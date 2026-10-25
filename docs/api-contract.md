@@ -101,8 +101,12 @@ The current defaults are:
 | `engine_bytes_limit` | 67108864 bytes (64 MiB) |
 | `result_bytes_limit` | 16777216 bytes (16 MiB) |
 
-Creation reserves the request/input/event/PCM storage in one engine arena. Snapshot
-fields are resolved limits; the independent snapshot pool is not implemented yet.
+The request/input/event/PCM storage shares one engine arena. PCM capacity is
+split into blocks of at most 1024 stereo float frames; a final shorter block
+preserves the exact configured frame count. Block records and both handoff queues
+also count against the engine byte limit. This private handoff is exercised by
+native tests; public playback producers and a device callback are not implemented yet.
+Snapshot fields are resolved limits; the independent snapshot pool is not implemented yet.
 Current result accessors read immutable copies built by private tests; public
 result producers are not implemented yet. `result_tag` requires distinct key
 and value output pointers. Identical pointers return INVALID without changes.

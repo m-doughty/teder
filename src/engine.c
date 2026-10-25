@@ -4,7 +4,8 @@ teder_code td_engine_create_with(const teder_config *input, td_allocator allocat
 {
 	teder_config config;
 	teder_code code;
-	size_t capacity = 0, total, handle, requests, payload, events, pcm;
+	size_t capacity = 0, total, handle, requests, payload, events;
+	td_pcm_layout pcm;
 	if (!out) return TEDER_INVALID;
 	*out = NULL;
 	code = td_prefix(input, sizeof(*input));
@@ -23,7 +24,7 @@ teder_code td_engine_create_with(const teder_config *input, td_allocator allocat
 		!td_layout_add(&capacity, config.request_capacity, sizeof(td_request_slot), _Alignof(td_request_slot), &requests) ||
 		!td_layout_add(&capacity, config.request_capacity, config.max_input_bytes, 1, &payload) ||
 		!td_layout_add(&capacity, config.event_capacity, sizeof(teder_event), _Alignof(teder_event), &events) ||
-		!td_layout_add(&capacity, config.pcm_frames, 2 * sizeof(float), _Alignof(float), &pcm) ||
+		!td_pcm_plan(&capacity, config.pcm_frames, &pcm) ||
 		!td_arena_size(capacity, &total) || total > config.engine_bytes_limit) return TEDER_LIMIT;
 	td_arena *arena = td_arena_create(allocator, capacity);
 	if (!arena) return TEDER_NO_MEMORY;
@@ -35,7 +36,8 @@ teder_code td_engine_create_with(const teder_config *input, td_allocator allocat
 	engine->header = (td_handle){TD_ENGINE, TEDER_ABI_VERSION};
 	engine->arena = arena; engine->config = config; engine->owned_bytes = total;
 	engine->requests = (td_request_slot *)(storage + requests);
-	engine->events = (teder_event *)(storage + events); engine->pcm = (float *)(storage + pcm);
+	engine->events = (teder_event *)(storage + events);
+	td_pcm_init(&engine->pcm, storage, &pcm, config.pcm_frames);
 	for (uint32_t i = 0; i < config.request_capacity; i++)
 		engine->requests[i].input = storage + payload + (size_t)i * config.max_input_bytes;
 	engine->status.struct_size = sizeof(engine->status);

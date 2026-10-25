@@ -73,6 +73,18 @@ cycles exercise wakeup timing. Native OS stack/handle allocation is outside the
 heap tracker.
 State polls yield and wait for observed states; sleeps never establish ordering.
 
+`-L pcm` selects sample/identity, ownership and callback-audit checks.
+Cases cover non-power-of-two queue wrap, one-block pools, partial reads,
+mixed callback sizes, old/future generations, every block ownership state at
+quiescent close, a gated last reader, and 10,000 concurrently transferred blocks.
+Allocation guards and deferred destructors verify no callback heap operation or
+final release. The callback object is also checked with GNU/LLVM or Apple `nm`:
+only compiler/sanitizer helpers, linker metadata and memory-copy primitives may be imported.
+A separate unlinked object deliberately calling `free` must fail that audit.
+Sanitizer runtime calls are diagnostic overhead, outside the production claim.
+Test gates surround operations; they are not part of the callback implementation.
+The test build requires `nm` (normally supplied by the toolchain).
+
 ## Linux ThreadSanitizer in Docker
 
 From the package root, run `python tools/run-tsan-docker.py` with Python 3 and

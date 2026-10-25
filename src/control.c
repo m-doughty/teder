@@ -78,6 +78,7 @@ static void control(teder_engine *e)
 	/* This worker is also the lifecycle owner. Future workers must be joined
 	 * here. Neither this function nor its native trampoline may access e after
 	 * the final release-store; destroy joins the remaining OS-thread return. */
+	td_pcm_clear(&e->pcm); /* Both PCM roles are currently unused; future device/decoder joins precede this. */
 	checkpoint(e, TD_STOPPED);
 	atomic_store(&e->lifecycle, TEDER_CLOSED_STATE);
 }

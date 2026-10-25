@@ -2,6 +2,7 @@
 #define TEDER_INTERNAL_H
 #include "teder.h"
 #include "memory.h"
+#include "pcm.h"
 #include "miniaudio.h"
 #include <stdatomic.h>
 #include <string.h>
@@ -80,7 +81,7 @@ struct teder_engine {
 	size_t owned_bytes;
 	td_request_slot *requests;
 	teder_event *events;
-	float *pcm;
+	td_pcm_pool pcm;
 	td_allocator allocator;
 	td_runtime runtime;
 	td_mutex gate;

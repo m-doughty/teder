@@ -25,6 +25,11 @@ fixed request/input/event/PCM storage. Each result owns a separate arena with
 copied metadata or device data. Result views remain valid until result release,
 including after engine destruction. See the [ownership contract](docs/api-contract.md).
 
+PCM storage is split into blocks of up to 1024 stereo frames, with bounded
+publication and return queues in the same arena. The default still reserves
+512 KiB of samples, plus block/queue bookkeeping. Private tests exercise partial
+reads, generation switches and source retirement; decoder/device wiring follows. No whole-track allocation is introduced.
+
 Creation starts one control/lifecycle worker at LIVE/EMPTY with gain 1, no source
 and no output device. Accepted requests retain their completion slots until
 acknowledgement. Telemetry has a separate, lossy event ring. Close stops admission
