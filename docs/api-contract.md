@@ -113,6 +113,10 @@ untaken results, and its snapshot pool. Results additionally have a per-result
 limit. A taken result leaves the engine's budget; its caller owns that memory
 until release. Creating engines or retaining detached results repeatedly can
 grow application memory: these APIs do not promise a process-global bound.
+Byte limits cover requested heap storage, including arena overhead, rather than
+allocator/thread-runtime bookkeeping or OS-managed thread stacks and handles. Worker result
+construction reserves budget before allocation and releases unused reservation
+afterward; untaken results remain accounted until transfer or actual release.
 Snapshot loans never expand a pool. Retirement counts against capacity until
 quiescence, even after cancellation; admission can remain BUSY during retirement.
 
@@ -141,6 +145,10 @@ before commitment, outcome is CANCELLED and temporary resources retire safely.
 If commitment wins, its actual outcome stands. Poll until terminal to learn
 which occurred. Cancellation does not roll back committed work or transfer
 ownership to the caller. Close uses a separate latch, independent of all pools.
+On brief engine-gate contention, status/request/event reads return AGAIN with
+unchanged output. Admission, cancel, take and ack return BUSY; take still clears
+its output handle. Retry from a later host iteration. Close does not acquire
+this gate and remains available under contention and queue saturation.
 
 Events are lossy copies. Their sequence starts at one, advances for every
 generated event, and does not wrap; the oldest queued event is dropped on
@@ -293,6 +301,9 @@ have been cleaned up. The lifecycle worker joins all other workers, publishes
 CLOSED as its final engine-memory access, and returns. Status/completions remain
 stored in the live engine; CLOSED means quiescence, not that this final worker's
 OS thread handle has already been reaped.
+The wake event and bookkeeping gate stay alive until exclusive final destroy,
+so permitted reads and repeated close never race their teardown. The current
+control worker also owns lifecycle; future workers must be joined by that owner.
 
 There is no blocking wait/join API for the UI. An uninterruptible read leaves
 close pending; a timeout never licenses detaching a worker or freeing storage.

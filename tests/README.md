@@ -61,6 +61,18 @@ one-time transfer, close rejection and two concurrent readers after engine
 destruction. Inputs are borrowed and immutable only during private construction.
 The installed consumer exercises the exported lifecycle using the libc allocator.
 
+`-L requests` selects six request cases on the real native control worker. Private
+executors and startup/commit gates exercise copied payloads, full queues and
+retained completions, cancellation before/after commitment, result reservation
+and cleanup, event loss, identity exhaustion, and close during startup. A separate
+thread holds the bookkeeping gate to prove host calls return contention codes
+while close still succeeds. No production entry point accepts these test hooks.
+Initialization failure injection covers lock, wake, thread-start and post-start
+publication stages. Logs count owned workers before/after join; 32 immediate-close
+cycles exercise wakeup timing. Native OS stack/handle allocation is outside the
+heap tracker.
+State polls yield and wait for observed states; sleeps never establish ordering.
+
 ## Linux ThreadSanitizer in Docker
 
 From the package root, run `python tools/run-tsan-docker.py` with Python 3 and

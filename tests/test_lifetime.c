@@ -1,5 +1,6 @@
 #include "internal.h"
 #include "support/harness.h"
+#include "support/engine.h"
 #include <check.h>
 #include <stdio.h>
 
@@ -44,7 +45,7 @@ START_TEST(engine)
 	teder_status s = INIT(teder_status), expected = INIT(teder_status);
 	expected.lifecycle = TEDER_LIVE; expected.transport = TEDER_EMPTY;
 	expected.current.epoch = 1; expected.gain = 1.0f;
-	OK(teder_get_status(e, &s)); ck_assert(!memcmp(&s, &expected, sizeof(s)));
+	OK(th_read_status(e, &s)); ck_assert(!memcmp(&s, &expected, sizeof(s)));
 	teder_engine *before = e;
 	ck_assert(teder_destroy(&e) == TEDER_BUSY && e == before);
 	for (uint32_t i = 0; i < resolved.request_capacity; i++) {
@@ -56,9 +57,9 @@ START_TEST(engine)
 	ck_assert(prefix[0] == 8 && prefix[1] == TEDER_ABI_VERSION);
 	s.abi_version = 99; teder_status untouched = s;
 	ck_assert(teder_get_status(e, &s) == TEDER_ABI_MISMATCH && !memcmp(&s, &untouched, sizeof(s)));
-	OK(teder_request_close(e)); OK(teder_request_close(e));
+	OK(th_close(e)); OK(th_close(e));
 	s.abi_version = TEDER_ABI_VERSION; expected.lifecycle = TEDER_CLOSED_STATE;
-	OK(teder_get_status(e, &s)); ck_assert(!memcmp(&s, &expected, sizeof(s)));
+	OK(th_read_status(e, &s)); ck_assert(!memcmp(&s, &expected, sizeof(s)));
 	OK(teder_get_config(e, &resolved)); OK(teder_destroy(&e)); ck_assert_ptr_null(e);
 	OK(teder_destroy(&e)); ck_assert(teder_destroy(NULL) == TEDER_INVALID);
 	ck_assert(teder_request_close(NULL) == TEDER_INVALID);
@@ -165,7 +166,7 @@ START_TEST(failures)
 	c.engine_bytes_limit = baseline - 1; teder_engine *other = e;
 	ck_assert(td_engine_create(&c, th_allocator(&t), &other) == TEDER_LIMIT && other == NULL);
 	c.engine_bytes_limit = baseline; OK(td_engine_create(&c, th_allocator(&t), &other));
-	OK(teder_request_close(other)); OK(teder_destroy(&other));
+	OK(th_close(other)); OK(teder_destroy(&other));
 	c = small(); c.request_capacity = UINT32_MAX; c.max_input_bytes = UINT32_MAX;
 	ck_assert(td_engine_create(&c, th_allocator(&t), &other) == TEDER_LIMIT && other == NULL);
 	_Alignas(teder_config) uint32_t prefix[] = {8, TEDER_ABI_VERSION};
@@ -206,7 +207,7 @@ START_TEST(failures)
 	ck_assert(teder_result_kind(r, &value) == TEDER_ABI_MISMATCH && value == 77);
 	r->header.version--; teder_result_release(r);
 	ck_assert(t.bytes == baseline && t.live == 1);
-	OK(teder_request_close(e)); OK(teder_destroy(&e));
+	OK(th_close(e)); OK(teder_destroy(&e));
 	ck_assert(th_tracker_clean(&t)); th_tracker_uninit(&t);
 }
 END_TEST
@@ -243,7 +244,7 @@ START_TEST(ownership)
 	for (; initialized < 2; initialized++) if (!th_gate_init(&readers[initialized].gate)) break;
 	if (initialized == 2) for (; started < 2; started++) if (!th_thread_start(&threads[started], read_result, &readers[started])) break;
 	for (unsigned i = 0; i < started; i++) th_gate_await(&readers[i].gate);
-	teder_code closed = teder_request_close(e), destroyed = teder_destroy(&e);
+	teder_code closed = th_close(e), destroyed = teder_destroy(&e);
 	bool accounted = t.bytes == result_bytes && t.live == 1;
 	for (unsigned i = 0; i < started; i++) th_gate_release(&readers[i].gate);
 	for (unsigned i = 0; i < started; i++) th_thread_join(&threads[i]);
@@ -253,7 +254,7 @@ START_TEST(ownership)
 	ck_assert(initialized == 2 && started == 2 && readers[0].valid && readers[1].valid);
 	ck_assert(th_tracker_init(&t)); OK(td_engine_create(&c, th_allocator(&t), &e));
 	r = probe(&t); second = probe(&t); OK(td_engine_attach_result(e, 0, &r));
-	OK(teder_request_close(e));
+	OK(th_close(e));
 	ck_assert(td_engine_attach_result(e, 1, &second) == TEDER_CLOSED && second != NULL);
 	OK(td_engine_take_result(e, 0, &r)); OK(teder_destroy(&e));
 	teder_result_release(r); teder_result_release(second);

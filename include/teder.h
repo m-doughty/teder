@@ -156,15 +156,15 @@ typedef struct teder_snapshot_info {
  */
 TEDER_API teder_code TEDER_CALL teder_get_build_info(teder_build_info *out);
 /* Zero config limits select documented build defaults; query resolved values.
- * Create reserves engine storage but does no file/device I/O. Failure: *out=NULL.
- * See README for implemented services; future workers share this engine owner.
+ * Create reserves engine storage and starts its control/lifecycle worker.
+ * It does no file/device I/O. Failure: *out=NULL; initialized resources unwind.
  */
 TEDER_API teder_code TEDER_CALL teder_create(const teder_config *config, teder_engine **out);
 TEDER_API teder_code TEDER_CALL teder_get_config(teder_engine *engine, teder_config *out);
 TEDER_API teder_code TEDER_CALL teder_get_status(teder_engine *engine, teder_status *out);
 /* Close bypasses command capacity; repeated close on a live handle is safe.
- * Destroy requires CLOSED and exclusive access; once workers are implemented,
- * it joins the quiescent lifecycle worker before releasing storage.
+ * Destroy requires CLOSED and exclusive access; it joins the quiescent lifecycle
+ * worker before releasing storage.
  * Run away from the UI; success clears *engine.
  * Failure preserves it. NULL *engine is a successful no-op, not stale detection.
  */
@@ -207,6 +207,7 @@ TEDER_API teder_code TEDER_CALL teder_configure_analysis(teder_engine *engine,
  * Cancel is capacity-independent intent; a racing commit may still succeed.
  * Take transfers a result exactly once. Ack discards any untaken result and
  * releases the slot; neither operation changes an already taken result.
+ * Brief gate contention returns AGAIN for poll/get, BUSY for cancel/take/ack.
  */
 TEDER_API teder_code TEDER_CALL teder_request_poll(teder_engine *engine, teder_request_info *out);
 TEDER_API teder_code TEDER_CALL teder_request_get(teder_engine *engine, uint64_t request, teder_request_info *out);

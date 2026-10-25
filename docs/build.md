@@ -14,6 +14,9 @@ These are release requirements. The CI workflow registers shared/static core and
 installed-consumer jobs on all three OSes.
 Windows MSVC 2022 core builds are allowed as an
 additional toolchain, but the notcurses fork requires UCRT64 for Windows.
+C17 lock-free unsigned atomics are checked during configuration. MSVC uses
+`/experimental:c11atomics` as documented by the
+[Microsoft C++ team](https://devblogs.microsoft.com/cppblog/c11-atomics-in-visual-studio-2022-version-17-5-preview-2/).
 No native 32-bit, big-endian or other-OS support is promised. PipeWire is usable
 through its PulseAudio compatibility service; no native PipeWire backend is selected.
 
@@ -48,7 +51,8 @@ CTest process with a timeout. Current tests cover build metadata, rejected ABI
 inputs, dependency linkage, engine lifecycles and detached result views. They do
 not open an audio device or certify playback/DSP. The harness supplies arena
 fault injection, reference FLAC/PCM, simulated output and controlled callback
-quiescence. Result tests include engine destruction with concurrent readers. See
+quiescence. Tests include concurrent result readers and controlled request/close
+interleavings on the actual control worker. See
 `tests/README.md` in the source tree.
 
 ## Installed consumers

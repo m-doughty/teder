@@ -1,6 +1,6 @@
 #include "internal.h"
 
-teder_code td_engine_create(const teder_config *input, td_allocator allocator, teder_engine **out)
+teder_code td_engine_create_with(const teder_config *input, td_allocator allocator, td_runtime runtime, teder_engine **out)
 {
 	teder_config config;
 	teder_code code;
@@ -42,8 +42,16 @@ teder_code td_engine_create(const teder_config *input, td_allocator allocator, t
 	engine->status.abi_version = TEDER_ABI_VERSION;
 	engine->status.lifecycle = TEDER_LIVE; engine->status.transport = TEDER_EMPTY;
 	engine->status.current.epoch = 1; engine->status.gain = 1.0f;
+	engine->allocator = allocator; engine->runtime = runtime;
+	atomic_init(&engine->lifecycle, TEDER_LIVE);
+	code = td_control_start(engine);
+	if (code != TEDER_OK) { td_arena_destroy(arena); return code; }
 	*out = engine;
 	return TEDER_OK;
+}
+teder_code td_engine_create(const teder_config *input, td_allocator allocator, teder_engine **out)
+{
+	return td_engine_create_with(input, allocator, (td_runtime){0}, out);
 }
 teder_code TEDER_CALL teder_create(const teder_config *config, teder_engine **out)
 {
@@ -60,16 +68,19 @@ teder_code TEDER_CALL teder_get_status(teder_engine *engine, teder_status *out)
 {
 	teder_code code = td_handle_check(engine, TD_ENGINE);
 	if (code == TEDER_OK) code = td_prefix(out, sizeof(*out));
-	if (code == TEDER_OK) memcpy(out, &engine->status, sizeof(*out));
+	if (code != TEDER_OK) return code;
+	if (!td_try_lock(engine)) return TEDER_AGAIN;
+	memcpy(out, &engine->status, sizeof(*out));
+	out->lifecycle = atomic_load(&engine->lifecycle);
+	td_unlock(engine);
 	return code;
 }
 teder_code TEDER_CALL teder_request_close(teder_engine *engine)
 {
 	teder_code code = td_handle_check(engine, TD_ENGINE);
 	if (code != TEDER_OK) return code;
-	/* WHY: no workers/devices exist yet. Future workers extend this owner's quiescence
-	 * transition; it must not publish CLOSED merely because close was requested. */
-	engine->status.lifecycle = TEDER_CLOSED_STATE;
+	unsigned live = TEDER_LIVE;
+	if (atomic_compare_exchange_strong(&engine->lifecycle, &live, TEDER_CLOSING)) td_signal(engine);
 	return TEDER_OK;
 }
 teder_code TEDER_CALL teder_destroy(teder_engine **owner)
@@ -79,9 +90,11 @@ teder_code TEDER_CALL teder_destroy(teder_engine **owner)
 	teder_engine *engine = *owner;
 	teder_code code = td_handle_check(engine, TD_ENGINE);
 	if (code != TEDER_OK) return code;
-	if (engine->status.lifecycle != TEDER_CLOSED_STATE) return TEDER_BUSY;
+	if (atomic_load(&engine->lifecycle) != TEDER_CLOSED_STATE) return TEDER_BUSY;
+	td_control_join(engine);
 	for (uint32_t i = 0; i < engine->config.request_capacity; i++)
 		teder_result_release(engine->requests[i].result);
+	td_control_dispose(engine);
 	td_arena_destroy(engine->arena);
 	*owner = NULL;
 	return TEDER_OK;
@@ -93,7 +106,7 @@ teder_code td_engine_attach_result(teder_engine *engine, uint32_t slot, teder_re
 	if (!owner) return TEDER_INVALID;
 	code = td_handle_check(*owner, TD_RESULT);
 	if (code != TEDER_OK) return code;
-	if (engine->status.lifecycle != TEDER_LIVE) return TEDER_CLOSED;
+	if (atomic_load(&engine->lifecycle) != TEDER_LIVE) return TEDER_CLOSED;
 	if (slot >= engine->config.request_capacity) return TEDER_NOT_FOUND;
 	if (engine->requests[slot].result) return TEDER_BUSY;
 	size_t total;

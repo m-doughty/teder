@@ -8,26 +8,30 @@ Implemented exports:
 - `teder_get_build_info`; optional `teder_renderer_get_build_info`.
 - `teder_create`, `teder_get_config`, `teder_get_status`,
   `teder_request_close`, and `teder_destroy`.
+- `teder_request_poll`, `teder_request_get`, `teder_request_cancel`,
+  `teder_request_take_result`, `teder_request_ack`, and `teder_event_poll`.
 - `teder_result_kind`, `teder_result_probe`, `teder_result_tag`,
   `teder_result_artwork`, `teder_result_device_count`, `teder_result_device`,
   and `teder_result_release`.
 
-Build queries still report zero capabilities/backend mask. Results have private
-construction/transfer tests; public probe/device producers and request APIs are
-not implemented yet. Other declarations remain draft contracts and will not
-link. Playback, decoding integration, analysis and drawing are future work.
+Build queries still report zero capabilities/backend mask. Bounded admission
+and operation execution have private test producers; public file/device/control
+submission functions are not implemented yet. Other declarations remain draft
+contracts and will not link. Playback, decoding integration, analysis and drawing
+are future work.
 
 Each engine owns one arena containing its handle, copied configuration and
 fixed request/input/event/PCM storage. Each result owns a separate arena with
 copied metadata or device data. Result views remain valid until result release,
 including after engine destruction. See the [ownership contract](docs/api-contract.md).
 
-Creation starts at LIVE/EMPTY with gain 1, no source and no output device. Close
-currently reaches CLOSED immediately because no workers or devices exist yet.
-Destroy before CLOSED returns BUSY; successful destroy clears the caller's
-pointer. Applications must observe CLOSED before destroying: worker integration
-will make close asynchronous. The [installed consumer](tests/consumer/main.c)
-exercises the current lifecycle through the public C interface.
+Creation starts one control/lifecycle worker at LIVE/EMPTY with gain 1, no source
+and no output device. Accepted requests retain their completion slots until
+acknowledgement. Telemetry has a separate, lossy event ring. Close stops admission
+without needing a free slot; the worker completes or cancels admitted work and
+publishes CLOSED. Observe CLOSED before destroying. Destroy joins that worker,
+releases storage and clears the caller's pointer; earlier destruction returns
+BUSY. The [installed consumer](tests/consumer/main.c) exercises asynchronous close.
 
 ```sh
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DTEDER_WERROR=ON
