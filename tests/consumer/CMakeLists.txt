@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.25)
+project(teder_consumer LANGUAGES C)
+find_package(teder 0.1.0 EXACT CONFIG REQUIRED)
+add_executable(consumer main.c)
+target_link_libraries(consumer PRIVATE teder::teder)
+enable_testing()
+add_test(NAME consumer COMMAND consumer)
+set_tests_properties(consumer PROPERTIES TIMEOUT 20)

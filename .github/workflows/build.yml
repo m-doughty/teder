@@ -1,0 +1,44 @@
+name: Native foundation
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  core:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14, windows-latest]
+        shared: ['ON', 'OFF']
+        include:
+          - os: ubuntu-24.04
+            shell: bash
+          - os: macos-14
+            shell: bash
+          - os: windows-latest
+            shell: 'msys2 {0}'
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
+        if: runner.os == 'Windows'
+        with:
+          msystem: UCRT64
+          update: true
+          install: mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_SHARED_LIBS=${{ matrix.shared }} -DTEDER_WERROR=ON
+      - name: Build and test
+        run: |
+          cmake --build build --parallel 3
+          ctest --test-dir build --output-on-failure
+      - name: Installed consumer
+        run: |
+          prefix="$PWD/build/install"
+          cmake --install build --prefix "$prefix"
+          cmake -S tests/consumer -B build-consumer -G Ninja -DCMAKE_PREFIX_PATH="$prefix"
+          cmake --build build-consumer
+          export PATH="$prefix/bin:$PATH"
+          ctest --test-dir build-consumer --output-on-failure

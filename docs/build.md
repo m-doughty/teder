@@ -1,0 +1,85 @@
+# Builds and platform targets
+
+Require CMake 3.25+, a C17 compiler, and a C++ compiler for libFLAC's upstream
+configuration checks (teder itself is C). Ninja is recommended. All v1 targets
+are 64-bit little-endian with IEEE binary32 float.
+
+| Required v1 platform | Architecture | Toolchain target | Audio backend |
+|---|---|---|---|
+| Windows 10 22H2 / Windows 11 | x86_64 | MSYS2 UCRT64 GCC 13+ | WASAPI shared mode |
+| Linux, glibc 2.35+ | x86_64, aarch64 | GCC 12+ or Clang 15+ | ALSA and PulseAudio |
+| macOS 13+ | arm64, x86_64 | Apple Clang 15+ | CoreAudio |
+
+These are release requirements. The CI workflow registers shared/static core and
+installed-consumer jobs on all three OSes.
+Windows MSVC 2022 core builds are allowed as an
+additional toolchain, but the notcurses fork requires UCRT64 for Windows.
+No native 32-bit, big-endian or other-OS support is promised. PipeWire is usable
+through its PulseAudio compatibility service; no native PipeWire backend is selected.
+
+## Configurations
+
+Use separate directories for shared/static and each sanitizer configuration:
+
+```sh
+cmake -S . -B build-shared -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_SHARED_LIBS=ON
+cmake -S . -B build-static -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_SHARED_LIBS=OFF
+cmake --build build-shared
+ctest --test-dir build-shared --output-on-failure
+```
+
+`TEDER_SANITIZER=address` enables AddressSanitizer plus UndefinedBehaviorSanitizer;
+`thread` enables ThreadSanitizer; default is `none`. The modes are exclusive.
+Windows sanitizer configurations fail explicitly. Linux/macOS builds probe the
+selected compiler/runtime before enabling instrumentation. Dependencies inherit
+instrumentation; Check allocations are not teder's allocation-failure domain.
+`TEDER_WERROR` applies to authored library code, not upstream warning policy.
+
+Check runs with `CK_NOFORK` on every OS. Each registered case runs as a separate
+CTest process with a timeout. Current tests cover build metadata, rejected ABI
+inputs, dependency linkage and constructor/release smoke. They do not open an
+audio device or certify playback/DSP. Fault injection and controlled thread
+interleavings are not implemented yet.
+
+## Installed consumers
+
+```sh
+cmake --install build-shared --prefix /absolute/path/to/teder-install
+cmake -S tests/consumer -B build-consumer -G Ninja -DCMAKE_PREFIX_PATH=/absolute/path/to/teder-install
+cmake --build build-consumer
+ctest --test-dir build-consumer --output-on-failure
+```
+
+Use `find_package(teder CONFIG REQUIRED)` and link `teder::teder`. The package
+propagates `TEDER_STATIC` for static consumers. Keep the installation's `bin`
+on PATH for Windows shared consumers, or its `lib` on the appropriate runtime
+search path. The private FLAC archive and notices are installed with teder;
+third-party headers and Check are not part of the installed API.
+
+## Optional renderer foundation
+
+`TEDER_WITH_NOTCURSES=OFF` is the default and performs no notcurses discovery.
+Enabling it requires an explicitly supplied installation of
+`m-doughty/notcurses` commit `7152070f1b6c7cf6acc4e7447e5b6854f9f1e904`, matching
+Notcurses-Native's `binaries-notcurses-3.0.17-r17` source pin:
+
+```sh
+cmake -S . -B build-renderer -DTEDER_WITH_NOTCURSES=ON -DTEDER_NOTCURSES_PREFIX=/absolute/fork/install -DTEDER_NOTCURSES_REVISION=7152070f1b6c7cf6acc4e7447e5b6854f9f1e904
+```
+
+Headers and the shared core runtime/import library must exist under that prefix.
+Private static copies of notcurses are rejected. Missing inputs
+fail configuration. The revision is the builder's provenance assertion; a
+numeric runtime version check cannot prove fork identity. Actual loaded-library identity must
+be verified before any borrowed plane is accepted.
+This target currently provides only the build/runtime-version query, not drawing.
+An installed renderer consumer supplies `TEDER_NOTCURSES_LIBRARY` pointing to
+that runtime's core import/shared library and links `teder::notcurses`.
+
+## Source reproducibility
+
+`cmake/Dependencies.cmake` contains immutable commit URLs and SHA-256 hashes.
+Sources/builds stay under the build tree. CMake's standard
+`FETCHCONTENT_SOURCE_DIR_TEDER_*_SOURCE` overrides support local/offline source
+trees; these overrides bypass archive verification and must retain equivalent
+provenance before release. Use a fresh build directory for a changed source pin.

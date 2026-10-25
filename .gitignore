@@ -1,0 +1,14 @@
+# Out-of-source CMake builds and generated compile database.
+/build/
+/build-*/
+/cmake-build-*/
+/compile_commands.json
+
+# Local build presets, caches and IDE state.
+/CMakeUserPresets.json
+/.cache/
+/.vs/
+
+# OS metadata.
+.DS_Store
+Thumbs.db
