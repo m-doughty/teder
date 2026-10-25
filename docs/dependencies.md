@@ -48,8 +48,18 @@ a blocked OS read is not forcibly interruptible by the codec.
   checked allocations and unwinds partial construction; `stream_decoder_delete`
   calls finish and releases decoder-owned storage. Use those APIs, never free
   its interior pointers or pretend that its reallocations are arena no-ops.
-  Decoder and temporary metadata heap must be explicitly reserved/accounted;
-  a teder arena limit alone does not establish a codec heap cap.
+  The private build now redirects malloc/calloc/realloc/free/strdup through
+  `src/flac_heap.c`, including temporary metadata and alignment padding.
+  Headers and realloc overlap count against a worker-owned byte budget;
+  new allocations require a scope. This is a private build adaptation, not
+  an upstream allocator API or process-wide allocator replacement.
+  Source integration must reserve that budget against the engine limit first.
+  Keep the heap descriptor in its source arena through final decoder deletion
+  and zero live codec allocations. Dependency buffers are individually freed
+  and reused; only objects with common lifetimes share the source arena.
+  Do not hand foreign malloc buffers to codec APIs that adopt ownership.
+  Production sources must use stream callbacks with separately owned I/O;
+  libFLAC's stdio helpers can allocate CRT storage outside this adapter.
 - `kiss_fftr_alloc` supports querying the complete plan size and initializing
   caller-owned aligned storage. That plan and its scratch fit one analysis
   region. Restrict v1 FFT sizes to bounded powers of two and use distinct input

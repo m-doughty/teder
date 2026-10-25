@@ -30,6 +30,10 @@ publication and return queues in the same arena. The default still reserves
 512 KiB of samples, plus block/queue bookkeeping. Private tests exercise partial
 reads, generation switches and source retirement; decoder/device wiring follows. No whole-track allocation is introduced.
 
+The private libFLAC build routes codec allocations through a bounded worker-owned
+budget. Tests cover real decoder allocation failures and cleanup. Source staging,
+conversion and integration with the engine's budget are not implemented yet.
+
 Creation starts one control/lifecycle worker at LIVE/EMPTY with gain 1, no source
 and no output device. Accepted requests retain their completion slots until
 acknowledgement. Telemetry has a separate, lossy event ring. Close stops admission

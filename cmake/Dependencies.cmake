@@ -47,6 +47,20 @@ function(teder_configure_flac)
 	set_target_properties(FLAC PROPERTIES C_VISIBILITY_PRESET hidden DEBUG_POSTFIX "")
 endfunction()
 teder_configure_flac()
+# All codec objects share one allocation ABI. Keep the adapter in the archive
+# so installed static consumers need no additional target or public header.
+add_library(teder_flac_heap OBJECT src/flac_heap.c)
+target_include_directories(teder_flac_heap PRIVATE "${PROJECT_SOURCE_DIR}/include")
+set_target_properties(teder_flac_heap PROPERTIES C_VISIBILITY_PRESET hidden)
+target_sources(FLAC PRIVATE $<TARGET_OBJECTS:teder_flac_heap>)
+target_include_directories(FLAC PRIVATE "${PROJECT_SOURCE_DIR}/src" "${PROJECT_SOURCE_DIR}/include")
+if(MSVC)
+	target_compile_options(FLAC PRIVATE "$<$<COMPILE_LANGUAGE:C>:/FI${PROJECT_SOURCE_DIR}/cmake/flac_alloc.h>")
+	target_compile_options(teder_flac_heap PRIVATE /W4 $<$<BOOL:${TEDER_WERROR}>:/WX>)
+else()
+	target_compile_options(FLAC PRIVATE "$<$<COMPILE_LANGUAGE:C>:-include${PROJECT_SOURCE_DIR}/cmake/flac_alloc.h>")
+	target_compile_options(teder_flac_heap PRIVATE -Wall -Wextra -Wpedantic $<$<BOOL:${TEDER_WERROR}>:-Werror>)
+endif()
 install(FILES "${teder_miniaudio_source_SOURCE_DIR}/LICENSE"
 	DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/teder RENAME miniaudio.txt)
 install(FILES "${teder_flac_source_SOURCE_DIR}/COPYING.Xiph"

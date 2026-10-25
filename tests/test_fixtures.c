@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
+#include "flac_heap.h"
 
 typedef struct {
 	const char *name;
@@ -75,6 +76,9 @@ static bool validate(reference *r)
 }
 int main(void)
 {
+	td_flac_heap heap;
+	if (td_flac_heap_init(&heap, td_libc_allocator(), 1024 * 1024) != TEDER_OK) return 1;
+	td_flac_heap *previous = td_flac_scope(&heap);
 	reference fixtures[] = {
 		{"track-a", track_a, 2, 16, 44100, 0, 0, 0, 0, true},
 		{"track-b", track_b, 2, 16, 44100, 0, 0, 0, 0, true},
@@ -83,5 +87,6 @@ int main(void)
 	for (size_t i = 0; i < 3; i++) if (!validate(&fixtures[i])) {
 		fprintf(stderr, "fixture mismatch: %s\n", fixtures[i].name); return 1;
 	}
-	return 0;
+	td_flac_scope(previous);
+	return heap.live || heap.bytes || heap.error != TEDER_OK ? 1 : 0;
 }

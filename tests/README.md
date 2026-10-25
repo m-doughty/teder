@@ -28,9 +28,9 @@ only into tests; it is neither installed nor linked into the public library.
   creation now use this same helper and their own independent arenas.
 - `th_ma_allocator` adapts the same tracker to miniaudio's callbacks. Tests
   inject every observed allocation in the pinned stereo 48000-to-44100 float
-  converter constructor. libFLAC has no public allocation hook; its internal
-  heap is not included in fail-at-N coverage. Check/framework/OS allocations
-  are also outside the tracker. KissFFT caller storage can use the arena.
+  converter constructor. `src/flac_heap.c` now routes the private libFLAC heap
+  through the tracker too. Check/framework/OS and stdio internals remain
+  outside the tracker. KissFFT caller storage can use the arena.
 - `th_sink` borrows caller capture storage and a render callback. Step sizes,
   forced silence, short writes and latched device loss are explicit. It reports
   exact captured/underrun frame counts and rejects capacity overflow. The
@@ -52,7 +52,7 @@ device negotiation, decoder scheduling or production gapless playback. Future
 real-device tests must use a separate label and fail explicitly when their
 required backend/device is unavailable. There is no automatic fake fallback.
 
-`ctest --test-dir build -L lifetime --output-on-failure` selects the five lifetime
+`ctest --test-dir build -R '^lifetime\.' --output-on-failure` selects the five lifetime
 cases. `-V -R lifetime.failures` prints injected engine/result allocation sites
 and exact retained baselines. Each constructor has one `arena.chunk` allocation;
 size, UTF-8 and ABI failures occur before allocation. Tests cover deep copies,
@@ -84,6 +84,20 @@ A separate unlinked object deliberately calling `free` must fail that audit.
 Sanitizer runtime calls are diagnostic overhead, outside the production claim.
 Test gates surround operations; they are not part of the callback implementation.
 The test build requires `nm` (normally supplied by the toolchain).
+
+`-R flac-heap` selects the codec budget tests and archive audit. The tests check
+exact byte limits, realloc overlap/rollback, alignment/overflow, nested scopes,
+two concurrent codec owners, and all 15 observed allocations in a reference
+decode with comments and an inserted seek table. One-shot failure at allocation
+15 is recovered by libFLAC's MD5 retry; the adapter retains NO_MEMORY. Persistent
+failure at each ordinal must fail decoding and unwind to zero. Exact PCM,
+metadata and MD5 still pass on the success path. The archive audit rejects
+direct heap imports and verifies all five adapters; a deliberate free proves
+rejection. New codec versions require source review as well as this symbol check.
+
+These are private codec tests, not asynchronous source/player acceptance.
+The existing fixture test uses stdio; its CRT-owned file buffers are outside
+the codec budget. Production source callbacks will own/account I/O separately.
 
 ## Linux ThreadSanitizer in Docker
 
