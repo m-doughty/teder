@@ -1,5 +1,6 @@
 #include "memory.h"
 #include <stdint.h>
+#include <stdlib.h>
 
 typedef struct td_cleanup {
 	struct td_cleanup *next;
@@ -26,12 +27,32 @@ bool td_size_mul(size_t a, size_t b, size_t *out)
 	*out = a * b;
 	return true;
 }
+bool td_layout_add(size_t *used, size_t count, size_t size, size_t alignment, size_t *offset)
+{
+	size_t bytes, start, end;
+	if (!alignment || (alignment & (alignment - 1)) || alignment > _Alignof(max_align_t) ||
+		!td_size_mul(count, size, &bytes) || !td_size_add(*used, alignment - 1, &start)) return false;
+	start &= ~(alignment - 1);
+	if (!td_size_add(start, bytes, &end)) return false;
+	*offset = start; *used = end;
+	return true;
+}
+bool td_arena_size(size_t capacity, size_t *total)
+{
+	return capacity && td_size_add(sizeof(td_arena), capacity, total);
+}
+static void *libc_allocate(void *context, size_t bytes, const char *site)
+{
+	(void)context; (void)site;
+	return malloc(bytes);
+}
+static void libc_release(void *context, void *pointer) { (void)context; free(pointer); }
+td_allocator td_libc_allocator(void) { return (td_allocator){NULL, libc_allocate, libc_release}; }
 td_arena *td_arena_create(td_allocator allocator, size_t capacity)
 {
 	size_t total;
 	td_arena *arena;
-	if (!allocator.allocate || !allocator.release || !capacity ||
-		!td_size_add(sizeof(*arena), capacity, &total)) return NULL;
+	if (!allocator.allocate || !allocator.release || !td_arena_size(capacity, &total)) return NULL;
 	arena = allocator.allocate(allocator.context, total, "arena.chunk");
 	if (!arena) return NULL;
 	arena->allocator = allocator;
@@ -42,12 +63,10 @@ td_arena *td_arena_create(td_allocator allocator, size_t capacity)
 }
 void *td_arena_alloc(td_arena *arena, size_t count, size_t size, size_t alignment)
 {
-	size_t bytes, aligned, end;
-	if (!arena || !alignment || (alignment & (alignment - 1)) ||
-		alignment > _Alignof(max_align_t) || !td_size_mul(count, size, &bytes) ||
-		!bytes || !td_size_add(arena->used, alignment - 1, &aligned)) return NULL;
-	aligned &= ~(alignment - 1);
-	if (!td_size_add(aligned, bytes, &end) || end > arena->capacity) return NULL;
+	size_t aligned, end;
+	if (!arena || !count || !size) return NULL;
+	end = arena->used;
+	if (!td_layout_add(&end, count, size, alignment, &aligned) || end > arena->capacity) return NULL;
 	arena->used = end;
 	return arena->data + aligned;
 }

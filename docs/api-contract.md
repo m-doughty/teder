@@ -88,6 +88,25 @@ Release functions accept NULL; a second release of the same ownership reference
 is invalid. Keep both shared libraries loaded until their final objects die.
 
 Zero config limits choose finite build defaults, reported by `get_config`.
+The current defaults are:
+
+| Field | Default |
+|---|---:|
+| `request_capacity` | 32 |
+| `event_capacity` | 64 |
+| `max_input_bytes` | 4096 per request |
+| `pcm_frames` | 65536 stereo frames |
+| `snapshot_slots` / `snapshot_loans` | 4 / 16 |
+| `max_bands` / `max_spans` | 256 / 16 |
+| `engine_bytes_limit` | 67108864 bytes (64 MiB) |
+| `result_bytes_limit` | 16777216 bytes (16 MiB) |
+
+Creation reserves the request/input/event/PCM storage in one engine arena. Snapshot
+fields are resolved limits; the independent snapshot pool is not implemented yet.
+Current result accessors read immutable copies built by private tests; public
+result producers are not implemented yet. `result_tag` requires distinct key
+and value output pointers. Identical pointers return INVALID without changes.
+
 Create validates products/alignment and reserves fixed pools before publication.
 The engine limit covers engine-owned arenas, active/staged/retiring sources,
 untaken results, and its snapshot pool. Results additionally have a per-result

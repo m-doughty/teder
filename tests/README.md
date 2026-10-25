@@ -24,8 +24,8 @@ only into tests; it is neither installed nor linked into the public library.
   cleanup entries and padding are accounted for; deferred destructors run in
   reverse registration order before reset/free. Failed registration leaves
   resource ownership with the caller. Allocator context outlives the arena;
-  reset/destroy require exclusive access and no borrowers. Engine/result ownership will
-  use this helper; those public handles do not exist yet.
+  reset/destroy require exclusive access and no borrowers. Engine and result
+  creation now use this same helper and their own independent arenas.
 - `th_ma_allocator` adapts the same tracker to miniaudio's callbacks. Tests
   inject every observed allocation in the pinned stereo 48000-to-44100 float
   converter constructor. libFLAC has no public allocation hook; its internal
@@ -51,6 +51,15 @@ The fake sink tests sample capture and ownership observations, not real sound,
 device negotiation, decoder scheduling or production gapless playback. Future
 real-device tests must use a separate label and fail explicitly when their
 required backend/device is unavailable. There is no automatic fake fallback.
+
+`ctest --test-dir build -L lifetime --output-on-failure` selects the five lifetime
+cases. `-V -R lifetime.failures` prints injected engine/result allocation sites
+and exact retained baselines. Each constructor has one `arena.chunk` allocation;
+size, UTF-8 and ABI failures occur before allocation. Tests cover deep copies,
+empty/wrong-kind/index reads, unchanged error outputs, exact budget boundaries,
+one-time transfer, close rejection and two concurrent readers after engine
+destruction. Inputs are borrowed and immutable only during private construction.
+The installed consumer exercises the exported lifecycle using the libc allocator.
 
 ## Linux ThreadSanitizer in Docker
 

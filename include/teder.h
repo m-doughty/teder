@@ -156,14 +156,16 @@ typedef struct teder_snapshot_info {
  */
 TEDER_API teder_code TEDER_CALL teder_get_build_info(teder_build_info *out);
 /* Zero config limits select documented build defaults; query resolved values.
- * Create allocates/starts workers but does no file/device I/O. Failure: *out=NULL.
+ * Create reserves engine storage but does no file/device I/O. Failure: *out=NULL.
+ * See README for implemented services; future workers share this engine owner.
  */
 TEDER_API teder_code TEDER_CALL teder_create(const teder_config *config, teder_engine **out);
 TEDER_API teder_code TEDER_CALL teder_get_config(teder_engine *engine, teder_config *out);
 TEDER_API teder_code TEDER_CALL teder_get_status(teder_engine *engine, teder_status *out);
 /* Close bypasses command capacity; repeated close on a live handle is safe.
- * Destroy requires CLOSED and exclusive access; it joins the quiescent lifecycle
- * worker before releasing storage. Run away from the UI; success clears *engine.
+ * Destroy requires CLOSED and exclusive access; once workers are implemented,
+ * it joins the quiescent lifecycle worker before releasing storage.
+ * Run away from the UI; success clears *engine.
  * Failure preserves it. NULL *engine is a successful no-op, not stale detection.
  */
 TEDER_API teder_code TEDER_CALL teder_request_close(teder_engine *engine);
@@ -217,6 +219,7 @@ TEDER_API teder_code TEDER_CALL teder_event_poll(teder_engine *engine, teder_eve
 /* Results own immutable storage independent of the engine. Accessors borrow it.
  * Wrong-kind access returns BAD_STATE; out-of-range index returns NOT_FOUND.
  * All indices are zero-based; repeated tags retain their file order.
+ * Tag key/value outputs must be distinct; identical pointers return INVALID.
  */
 TEDER_API teder_code TEDER_CALL teder_result_kind(const teder_result *result, uint32_t *out);
 TEDER_API teder_code TEDER_CALL teder_result_probe(const teder_result *result, teder_probe_info *out);

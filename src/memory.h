@@ -14,6 +14,9 @@ typedef struct {
 typedef struct td_arena td_arena;
 bool td_size_add(size_t a, size_t b, size_t *out);
 bool td_size_mul(size_t a, size_t b, size_t *out);
+bool td_layout_add(size_t *used, size_t count, size_t size, size_t alignment, size_t *offset);
+bool td_arena_size(size_t capacity, size_t *total);
+td_allocator td_libc_allocator(void);
 td_arena *td_arena_create(td_allocator allocator, size_t capacity);
 void *td_arena_alloc(td_arena *, size_t count, size_t size, size_t alignment);
 /* LIFO cleanup runs while every region byte remains valid. Destructors must

@@ -45,9 +45,10 @@ requirements, retained logs and temporary-resource handling.
 
 Check runs with `CK_NOFORK` on every OS. Each registered case runs as a separate
 CTest process with a timeout. Current tests cover build metadata, rejected ABI
-inputs, dependency linkage and constructor/release smoke. They do not open an
-audio device or certify playback/DSP. The harness adds arena/allocation fault injection,
-reference FLAC/PCM, simulated output and controlled callback quiescence. See
+inputs, dependency linkage, engine lifecycles and detached result views. They do
+not open an audio device or certify playback/DSP. The harness supplies arena
+fault injection, reference FLAC/PCM, simulated output and controlled callback
+quiescence. Result tests include engine destruction with concurrent readers. See
 `tests/README.md` in the source tree.
 
 ## Installed consumers
