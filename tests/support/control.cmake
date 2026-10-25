@@ -1,0 +1,23 @@
+# Supervise intentional defects in a child; timeout kills the whole process.
+# Never unwind/free memory concurrently with a stranded test worker.
+execute_process(COMMAND "${PROGRAM}" "control-${CASE}" TIMEOUT 3
+	RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE errors)
+file(WRITE "${LOG}" "result=${result}\n${output}${errors}")
+if(CASE STREQUAL "missing-worker")
+	if(NOT result MATCHES "[Tt]imeout" OR NOT output MATCHES "worker pending at checkpoint")
+		message(FATAL_ERROR "Missing-worker control did not reach its expected timeout; see ${LOG}")
+	endif()
+else()
+	if(CASE STREQUAL "leak")
+		set(expected "leak site=control.leak bytes=8")
+	elseif(CASE STREQUAL "wrong-free")
+		set(expected "wrong free: unowned block")
+	elseif(CASE STREQUAL "pcm")
+		set(expected "pcm mismatch frame=1 channel=1")
+	else()
+		message(FATAL_ERROR "Unknown control: ${CASE}")
+	endif()
+	if(NOT result STREQUAL "42" OR NOT errors MATCHES "${expected}")
+		message(FATAL_ERROR "${CASE} control did not detect the intended defect; see ${LOG}")
+	endif()
+endif()

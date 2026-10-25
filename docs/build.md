@@ -35,11 +35,20 @@ selected compiler/runtime before enabling instrumentation. Dependencies inherit
 instrumentation; Check allocations are not teder's allocation-failure domain.
 `TEDER_WERROR` applies to authored library code, not upstream warning policy.
 
+For native Linux/amd64 Docker, run `python tools/run-tsan-docker.py` from the
+source tree. High-entropy ASLR can cause TSan to abort before `main` with
+`unexpected memory mapping`; newer runtimes may instead fail when Docker blocks
+their `personality` call. The helper uses a pinned default seccomp profile plus
+one exact allowance for process-local ASLR control, then runs tests offline with
+`setarch -R`. Host ASLR settings remain unchanged. See `tests/README.md` for its
+requirements, retained logs and temporary-resource handling.
+
 Check runs with `CK_NOFORK` on every OS. Each registered case runs as a separate
 CTest process with a timeout. Current tests cover build metadata, rejected ABI
 inputs, dependency linkage and constructor/release smoke. They do not open an
-audio device or certify playback/DSP. Fault injection and controlled thread
-interleavings are not implemented yet.
+audio device or certify playback/DSP. The harness adds arena/allocation fault injection,
+reference FLAC/PCM, simulated output and controlled callback quiescence. See
+`tests/README.md` in the source tree.
 
 ## Installed consumers
 

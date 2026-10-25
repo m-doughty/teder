@@ -45,7 +45,10 @@ function(teder_target target)
 endfunction()
 
 configure_file(cmake/version.h.in generated/teder_version.h @ONLY)
-add_library(teder src/build.c $<TARGET_OBJECTS:teder_miniaudio> $<TARGET_OBJECTS:teder_kissfft>)
+add_library(teder_memory OBJECT src/memory.c)
+teder_target(teder_memory)
+add_library(teder src/build.c $<TARGET_OBJECTS:teder_memory>
+	$<TARGET_OBJECTS:teder_miniaudio> $<TARGET_OBJECTS:teder_kissfft>)
 add_library(teder::teder ALIAS teder)
 teder_target(teder)
 target_include_directories(teder PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
