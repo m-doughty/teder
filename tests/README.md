@@ -207,6 +207,22 @@ preparation, including the last representable epoch.
 closes and fails each observed allocation in turn. It selects the default on
 Windows and the first enumerated output elsewhere. It never starts playback.
 
+## Refill scheduling
+
+`refill.native-progress` blocks native enumeration while draining 32,769 exact
+stereo PCM frames through a 2,048-frame pool. Its variable-size consumer performs
+no wake calls. The independent sample formula checks every frame/channel and
+keeps decode EOF separate from public playback clocks. This checks refill
+continuity under blocked control, not a hardware callback deadline.
+`refill.handoff` gates a producer borrow while replacing a source or closing;
+old arenas remain owned until acknowledgement. `refill.initialization` rejects
+each new event/thread stage and checks matched worker starts/stops, zero tracked
+resources and unchanged warmed Windows handle counts. `refill.idle` keeps a full,
+stopped output parked through native enumeration. `refill.close-resume` holds
+refill after a pause acknowledgement and control after a new resume, then closes;
+exit must follow acknowledgement of that outstanding resume.
+Shared generated fixtures use a CTest resource lock. Callback audits are unchanged.
+
 ## Linux ThreadSanitizer in Docker
 
 From the package root, run `python tools/run-tsan-docker.py` with Python 3 and

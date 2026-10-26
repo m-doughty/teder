@@ -24,6 +24,7 @@ teder_code td_device_get_info(td_device *, td_device_info *);
  * publication is not implemented yet; these setters return BUSY while a callback can run. */
 teder_code td_device_configure(td_device *, td_audio_config);
 teder_code td_device_start(td_device *);
+bool td_device_running(td_device *); /* lifecycle-owner observation, not a join */
 teder_code td_device_stop(td_device *);
 teder_code td_device_get_report(td_device *, td_device_report *);
 /* Observation only, modulo 2^32. Never a substitute for native quiescence. */

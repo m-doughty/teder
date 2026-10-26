@@ -165,3 +165,12 @@ foreach(case snapshot cancellation failures identity closing selection rates sel
 	add_test(NAME output.${case} COMMAND teder_test_output ${case})
 	set_tests_properties(output.${case} PROPERTIES TIMEOUT 40 LABELS "unit;output;lifetime")
 endforeach()
+
+add_executable(teder_test_refill test_refill.c)
+teder_target(teder_test_refill)
+target_compile_definitions(teder_test_refill PRIVATE TEDER_STATIC "OUTPUT_DIR=\"${CMAKE_CURRENT_BINARY_DIR}\"")
+target_link_libraries(teder_test_refill PRIVATE teder_lifetime teder_backend teder_device teder_device_callback teder_audio_callback teder_source FLAC teder_test_support Check::check)
+foreach(case native-progress handoff initialization idle close-resume)
+	add_test(NAME refill.${case} COMMAND teder_test_refill ${case})
+	set_tests_properties(refill.${case} PROPERTIES TIMEOUT 40 LABELS "unit;refill;lifetime" RESOURCE_LOCK refill_fixture)
+endforeach()

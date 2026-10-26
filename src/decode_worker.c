@@ -274,14 +274,19 @@ bool td_decode_step(teder_engine *e)
 		if (retiring)
 			progress |= retire(e, &e->sources[i]);
 	}
+	return td_decode_pump(e) || progress;
+}
+
+bool td_decode_pump(teder_engine *e)
+{
 	td_lock(e);
 	td_source_job *j = active(e);
 	td_unlock(e);
 	if (!j || j->state == TD_JOB_SUSPENDED || j->source->error != TEDER_OK || j->source->done)
-		return progress;
+		return false;
 	td_source *s = j->source;
 	if (s->slot == TD_PCM_NONE && !e->pcm.free_count)
-		return progress;
+		return false;
 	teder_code code = td_source_pump(s, &e->pcm);
 	td_lock(e);
 	e->status.duration_frames = s->info.duration_frames;

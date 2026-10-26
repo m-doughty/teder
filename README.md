@@ -56,9 +56,9 @@ budget. The source owns one arena for its wrapper, path, frame scratch and conve
 Tests cover decoding, staged seeking, conversion, cancellation and resource retirement.
 See the [source contract](docs/sources.md) for public usage and memory reservations.
 
-Creation starts a control/decode/lifecycle worker and a separate preparation
-worker at LIVE/EMPTY with gain 1, no source
-and no output device. Accepted requests retain their completion slots until
+Creation starts control/lifecycle, preparation and refill workers at LIVE/EMPTY
+with gain 1, no source and no output device. Refill can continue during blocked
+native enumeration. Source replacement waits for its producer borrow to end. Accepted requests retain their completion slots until
 acknowledgement. Telemetry has a separate, lossy event ring. Close stops admission
 without needing a free slot; the worker completes or cancels admitted work and
 publishes CLOSED. Observe CLOSED before destroying. Destroy joins that worker,

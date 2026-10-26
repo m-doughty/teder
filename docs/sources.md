@@ -73,9 +73,14 @@ and are reaped. Final success clears the owner; a POSIX close diagnostic returns
 with the owner still cleared. Consumers must quiesce before a pool clear. Never
 cancel native threads or detach a blocked file operation and reclaim its storage.
 
-A separate preparation worker prevents blocked replacement I/O from starving
-active decoding. Both use the same engine budget and perform I/O outside its gate.
+Preparation keeps replacement I/O separate from active decoding. A refill worker
+can own the producer while control performs blocking native device operations.
+Control waits for an explicit idle acknowledgement before touching that producer
+or replacing its source. All I/O stays outside the engine bookkeeping gate.
+Refill checks for returned PCM at a requested 1 ms interval while delegated and
+unable to progress; this is not a device deadline or latency guarantee. Consumers
+never signal it. Stopped public output needs no polling. Without an active consumer
+or source/retired blocks needing work, refill waits on an event.
 Cancellation belongs to the source job, surviving request acknowledgement/reuse.
-Close waits for blocked operations, joins preparation, quiesces consumers, clears
-PCM and retires all sources before CLOSED. Full pools sleep until a control wake;
-the future device integration must arrange producer wakes outside the callback.
+Close waits for blocked operations, joins preparation and refill, quiesces consumers,
+clears PCM and retires all sources before CLOSED. Output startup is not implemented yet.

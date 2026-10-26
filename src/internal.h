@@ -95,7 +95,10 @@ enum {
 	TD_INIT_THREAD,
 	TD_INIT_PUBLISH,
 	TD_INIT_PREPARE_WAKE,
-	TD_INIT_PREPARE_THREAD
+	TD_INIT_PREPARE_THREAD,
+	TD_INIT_REFILL_WAKE,
+	TD_INIT_REFILL_IDLE,
+	TD_INIT_REFILL_THREAD
 };
 
 enum { TD_STARTED = 1, TD_STOPPED };
@@ -110,7 +113,13 @@ enum {
 	TD_OUTPUT_AFTER_COMMIT,
 	TD_SELECT_BEFORE_COMMIT,
 	TD_SELECT_AFTER_COMMIT,
-	TD_PREPARE_JOB
+	TD_PREPARE_JOB,
+	TD_REFILL_STARTED,
+	TD_REFILL_STOPPED,
+	TD_REFILL_PUMP,
+	TD_REFILL_PARKED,
+	TD_REFILL_PAUSING,
+	TD_REFILL_RESUMED
 };
 
 typedef struct {
@@ -120,7 +129,7 @@ typedef struct {
 	teder_code (*execute)(void *, teder_engine *, uint32_t slot);
 	void (*media_checkpoint)(void *, uint64_t request, unsigned point);
 	/* Optional private consumer: one endpoint, joined here before PCM clear.
-	 * Without it, control owns the idle consumer; no device exists yet. */
+	 * Without it, control owns the idle endpoint until a native device starts. */
 	void (*consumer_join)(void *);
 	/* Zero uses native backends; otherwise all functions are required.
 	 * The descriptor is copied; its caller-owned context outlives destroy. */
@@ -161,8 +170,11 @@ struct teder_engine {
 	td_mutex gate;
 	ma_event wake;
 	ma_event prepare_wake;
+	ma_event refill_wake, refill_idle;
+	atomic_uint refill_enabled, refill_stop;
 	td_thread thread;
 	td_thread prepare_thread;
+	td_thread refill_thread;
 	td_source_job sources[TD_SOURCE_JOBS];
 	uint64_t last_source;
 	td_backend *backend; /* lifecycle worker only; context outlives devices */
@@ -196,7 +208,14 @@ void td_control_dispose(teder_engine *);
 void td_signal(teder_engine *);
 void td_prepare_signal(teder_engine *);
 void td_prepare_run(teder_engine *);
-bool td_decode_step(teder_engine *);
+/* Control holds the producer unless it has resumed refill. Pause acknowledges
+ * the last pump/reap before control touches source or producer-owned state. */
+void td_refill_run(teder_engine *);
+void td_refill_pause(teder_engine *);
+void td_refill_stop(teder_engine *); /* pause, request exit, then caller joins */
+void td_refill_resume(teder_engine *);
+bool td_decode_pump(teder_engine *); /* current producer only */
+bool td_decode_step(teder_engine *); /* control, refill paused */
 teder_code td_output_enumerate(teder_engine *, uint32_t slot);
 void td_output_close(teder_engine *); /* lifecycle worker: device before context */
 void td_output_select(teder_engine *, uint32_t slot);

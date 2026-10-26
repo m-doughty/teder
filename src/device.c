@@ -130,6 +130,11 @@ teder_code td_device_start(td_device *d)
 	return code == TEDER_OK ? code : failed(d, code);
 }
 
+bool td_device_running(td_device *d)
+{
+	return d && d->active;
+}
+
 teder_code td_device_stop(td_device *d)
 {
 	if (!d)

@@ -96,7 +96,9 @@ static void control(teder_engine *e)
 {
 	checkpoint(e, TD_STARTED);
 	while (atomic_load(&e->lifecycle) == TEDER_LIVE) {
+		td_refill_pause(e);
 		bool progress = td_decode_step(e);
+		td_refill_resume(e);
 		td_lock(e);
 		uint32_t slot = e->config.request_capacity;
 		for (uint32_t i = 0; i < e->config.request_capacity; i++)
@@ -107,7 +109,9 @@ static void control(teder_engine *e)
 		if (slot == e->config.request_capacity) {
 			td_unlock(e);
 			if (!progress && atomic_load(&e->lifecycle) == TEDER_LIVE) {
+				td_refill_pause(e);
 				td_media_checkpoint(e, 0, TD_DECODE_IDLE);
+				td_refill_resume(e);
 				if (ma_event_wait(&e->wake) != MA_SUCCESS)
 					abort();
 			}
@@ -136,10 +140,12 @@ static void control(teder_engine *e)
 		td_complete(e, slot, code);
 		td_unlock(e);
 	}
-	/* Close cannot detach a blocked source call. Preparation returns before
-	 * its join; the sole producer is this worker, already outside every pump. */
+	/* Each worker returns its source borrow before consumer/pool reclamation.
+	 * A blocked native read keeps close pending; no timeout permits detachment. */
 	td_prepare_signal(e);
 	join(e->prepare_thread);
+	td_refill_stop(e);
+	join(e->refill_thread);
 	if (e->runtime.consumer_join)
 		e->runtime.consumer_join(e->runtime.context);
 	td_output_close(e);
@@ -165,6 +171,12 @@ static unsigned __stdcall prepare_entry(void *p)
 	td_prepare_run(p);
 	return 0;
 }
+
+static unsigned __stdcall refill_entry(void *p)
+{
+	td_refill_run(p);
+	return 0;
+}
 #else
 static void *entry(void *p)
 {
@@ -175,6 +187,12 @@ static void *entry(void *p)
 static void *prepare_entry(void *p)
 {
 	td_prepare_run(p);
+	return NULL;
+}
+
+static void *refill_entry(void *p)
+{
+	td_refill_run(p);
 	return NULL;
 }
 #endif
@@ -197,15 +215,31 @@ teder_code td_control_start(teder_engine *e)
 		goto lock_failed;
 	if (!permit(e, TD_INIT_PREPARE_WAKE) || ma_event_init(&e->prepare_wake) != MA_SUCCESS)
 		goto wake_failed;
-	if (!permit(e, TD_INIT_PREPARE_THREAD))
+	if (!permit(e, TD_INIT_REFILL_WAKE) || ma_event_init(&e->refill_wake) != MA_SUCCESS)
 		goto prepare_failed;
+	if (!permit(e, TD_INIT_REFILL_IDLE) || ma_event_init(&e->refill_idle) != MA_SUCCESS)
+		goto refill_wake_failed;
+	atomic_init(&e->refill_enabled, 0);
+	atomic_init(&e->refill_stop, 0);
+	if (!permit(e, TD_INIT_PREPARE_THREAD))
+		goto refill_idle_failed;
 #ifdef _WIN32
 	e->prepare_thread = (HANDLE)_beginthreadex(NULL, 0, prepare_entry, e, 0, NULL);
 	if (!e->prepare_thread)
-		goto prepare_failed;
+		goto refill_idle_failed;
 #else
 	if (pthread_create(&e->prepare_thread, NULL, prepare_entry, e))
-		goto prepare_failed;
+		goto refill_idle_failed;
+#endif
+	if (!permit(e, TD_INIT_REFILL_THREAD))
+		goto refill_thread_failed;
+#ifdef _WIN32
+	e->refill_thread = (HANDLE)_beginthreadex(NULL, 0, refill_entry, e, 0, NULL);
+	if (!e->refill_thread)
+		goto refill_thread_failed;
+#else
+	if (pthread_create(&e->refill_thread, NULL, refill_entry, e))
+		goto refill_thread_failed;
 #endif
 	if (!permit(e, TD_INIT_THREAD))
 		goto thread_failed;
@@ -221,11 +255,19 @@ teder_code td_control_start(teder_engine *e)
 		return TEDER_OK;
 	teder_request_close(e);
 	td_control_join(e);
-	goto prepare_failed;
+	goto refill_idle_failed;
 thread_failed:
+	atomic_store(&e->lifecycle, TEDER_CLOSING);
+	td_refill_stop(e);
+	join(e->refill_thread);
+refill_thread_failed:
 	atomic_store(&e->lifecycle, TEDER_CLOSING);
 	td_prepare_signal(e);
 	join(e->prepare_thread);
+refill_idle_failed:
+	ma_event_uninit(&e->refill_idle);
+refill_wake_failed:
+	ma_event_uninit(&e->refill_wake);
 prepare_failed:
 	ma_event_uninit(&e->prepare_wake);
 wake_failed:
@@ -245,6 +287,8 @@ void td_control_join(teder_engine *e)
 
 void td_control_dispose(teder_engine *e)
 {
+	ma_event_uninit(&e->refill_idle);
+	ma_event_uninit(&e->refill_wake);
 	ma_event_uninit(&e->prepare_wake);
 	ma_event_uninit(&e->wake);
 #ifndef _WIN32

@@ -82,6 +82,7 @@ static void device_close(teder_engine *e)
 static void invalidate(teder_engine *e, teder_code code)
 {
 	device_close(e);
+	td_refill_pause(e);
 	td_lock(e);
 	bool exhausted = e->status.current.epoch == UINT64_MAX;
 	if (exhausted)

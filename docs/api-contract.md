@@ -375,8 +375,9 @@ stored in the live engine; CLOSED means quiescence, not that this final worker's
 OS thread handle has already been reaped.
 The wake event and bookkeeping gate stay alive until exclusive final destroy,
 so permitted reads and repeated close never race their teardown. The control/decode
-worker owns lifecycle and joins preparation before CLOSED. Future device/analysis
-workers must join that shutdown order.
+worker owns lifecycle and joins preparation and refill before consumer/pool/source
+reclamation. Producer handoff requires the refill worker's idle acknowledgement;
+a request to pause is insufficient. Future analysis workers join that shutdown order.
 
 There is no blocking wait/join API for the UI. An uninterruptible read leaves
 close pending; a timeout never licenses detaching a worker or freeing storage.
