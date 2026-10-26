@@ -3,16 +3,16 @@
 #include <check.h>
 #include <stdio.h>
 
-#define INIT(type)                                                                                 \
-	{                                                                                              \
-		.struct_size = sizeof(type), .abi_version = TEDER_ABI_VERSION                              \
+#define INIT(type) \
+	{ \
+		.struct_size = sizeof(type), .abi_version = TEDER_ABI_VERSION \
 	}
 #define OK(call) ck_assert((call) == TEDER_OK)
-#define RETRY(code, call)                                                                          \
-	do {                                                                                           \
-		(code) = (call);                                                                           \
-		if ((code) == TEDER_BUSY)                                                                  \
-			th_yield();                                                                            \
+#define RETRY(code, call) \
+	do { \
+		(code) = (call); \
+		if ((code) == TEDER_BUSY) \
+			th_yield(); \
 	} while ((code) == TEDER_BUSY)
 
 typedef struct {

@@ -18,8 +18,8 @@ teder_code td_engine_create_with(const teder_config *input,
 	if (!allocator.allocate || !allocator.release)
 		return TEDER_INVALID;
 	memcpy(&config, input, sizeof(config));
-#define DEFAULT(field, value)                                                                      \
-	if (!config.field)                                                                             \
+#define DEFAULT(field, value) \
+	if (!config.field) \
 	config.field = (value)
 	DEFAULT(request_capacity, 32);
 	DEFAULT(event_capacity, 64);

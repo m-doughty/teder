@@ -16,6 +16,7 @@ SeparateDefinitionBlocks: Leave
 BinPackArguments: false
 BinPackParameters: false
 AlignAfterOpenBracket: Align
+AlignEscapedNewlines: DontAlign
 SortIncludes: Never
 IncludeBlocks: Preserve
 ReflowComments: true
