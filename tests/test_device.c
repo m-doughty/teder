@@ -224,7 +224,11 @@ START_TEST(lifecycle)
 	OK(td_device_start(f.device));
 	ck_assert(td_device_configure(f.device, (td_audio_config){0, 1, 0, 0}) == TEDER_BUSY);
 	td_device_report report;
-	ck_assert(td_device_get_report(f.device, &report) == TEDER_BUSY);
+	while (td_device_callbacks(f.device) != 1)
+		pause_for_device();
+	OK(td_device_get_report(f.device, &report));
+	ck_assert(report.generation == 1 && report.final == 1 && report.pcm_frames == 3 &&
+	          report.missing_frames == 5 && report.error == TEDER_OK);
 
 	OK(td_device_stop(f.device));
 	OK(td_device_stop(f.device));
@@ -238,8 +242,16 @@ START_TEST(lifecycle)
 	OK(td_device_start(f.device));
 	OK(td_device_stop(f.device));
 	OK(td_device_get_report(f.device, &report));
-	ck_assert(report.pcm_frames == 3 && report.missing_frames == 5 &&
-	          td_device_callbacks(f.device) == 2);
+	ck_assert(report.generation == 0 && report.pcm_frames == 0 && report.missing_frames == 0 &&
+	          report.final == 0 && td_device_callbacks(f.device) == 2);
+
+	/* Counter exhaustion cannot wrap the snapshot version and admit ABA. */
+	td_device_feed *feed = f.native->pUserData;
+	atomic_store(&feed->sequence, UINT64_MAX - 1);
+	float silence[2] = {1, 1};
+	f.native->onData(f.native, silence, NULL, 1);
+	ck_assert(silence[0] == 0 && silence[1] == 0);
+	ck_assert(td_device_get_report(f.device, &report) == TEDER_LIMIT);
 
 	uninit(&f);
 	ck_assert(f.initialized == 1 && f.released == 1);

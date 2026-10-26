@@ -98,6 +98,12 @@ static void control(teder_engine *e)
 	while (atomic_load(&e->lifecycle) == TEDER_LIVE) {
 		td_refill_pause(e);
 		bool progress = td_decode_step(e);
+		progress = td_output_report(e) || progress;
+		td_lock(e);
+		bool failed = e->status.transport == TEDER_FAILED;
+		td_unlock(e);
+		if (failed)
+			td_output_quiesce(e);
 		td_refill_resume(e);
 		td_lock(e);
 		uint32_t slot = e->config.request_capacity;

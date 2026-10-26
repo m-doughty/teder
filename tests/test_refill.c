@@ -1,7 +1,7 @@
 #include "support/harness.h"
 #include "support/engine.h"
 #include "source.h"
-#include <FLAC/stream_encoder.h>
+#include "support/track.h"
 #include <check.h>
 #include <stdio.h>
 
@@ -143,36 +143,6 @@ static uint64_t open_track(teder_engine *e)
 	return id;
 }
 
-static void make_track(void)
-{
-	td_flac_heap heap;
-	OK(td_flac_heap_init(&heap, td_libc_allocator(), 8 * 1024 * 1024));
-	td_flac_heap *previous = td_flac_scope(&heap);
-	FLAC__StreamEncoder *encoder = FLAC__stream_encoder_new();
-	ck_assert(encoder);
-	ck_assert(FLAC__stream_encoder_set_channels(encoder, 2));
-	ck_assert(FLAC__stream_encoder_set_bits_per_sample(encoder, 16));
-	ck_assert(FLAC__stream_encoder_set_sample_rate(encoder, 44100));
-	ck_assert(FLAC__stream_encoder_set_blocksize(encoder, 256));
-	ck_assert(FLAC__stream_encoder_set_total_samples_estimate(encoder, FRAMES));
-	ck_assert(FLAC__stream_encoder_init_file(encoder, PATH, NULL, NULL) ==
-	          FLAC__STREAM_ENCODER_INIT_STATUS_OK);
-	int32_t samples[512];
-	for (unsigned frame = 0; frame < FRAMES;) {
-		unsigned count = FRAMES - frame < 256 ? FRAMES - frame : 256;
-		for (unsigned i = 0; i < count; i++) {
-			samples[2 * i] = (int32_t)((frame + i) % 2048) - 1024;
-			samples[2 * i + 1] = 1024 - (int32_t)((frame + i) % 2048);
-		}
-		ck_assert(FLAC__stream_encoder_process_interleaved(encoder, samples, count));
-		frame += count;
-	}
-	ck_assert(FLAC__stream_encoder_finish(encoder));
-	FLAC__stream_encoder_delete(encoder);
-	td_flac_scope(previous);
-	ck_assert(heap.error == TEDER_OK && heap.live == 0 && heap.bytes == 0);
-}
-
 /* No producer wake, even on an empty queue. Native control can remain blocked
  * for this entire stream, which is sixteen times the engine's PCM capacity. */
 static void drain(teder_engine *e, teder_target target)
@@ -209,7 +179,7 @@ static void drain(teder_engine *e, teder_target target)
 
 START_TEST(native_progress)
 {
-	make_track();
+	th_make_track(PATH, FRAMES);
 	fixture f;
 	init(&f);
 	teder_engine *e = NULL;
@@ -243,7 +213,7 @@ END_TEST
 
 START_TEST(handoff)
 {
-	make_track();
+	th_make_track(PATH, FRAMES);
 	for (unsigned closing = 0; closing < 2; closing++) {
 		fixture f;
 		init(&f);
@@ -283,7 +253,7 @@ END_TEST
 
 START_TEST(idle)
 {
-	make_track();
+	th_make_track(PATH, FRAMES);
 	fixture f;
 	init(&f);
 	f.consumer = false;
@@ -316,7 +286,7 @@ END_TEST
 
 START_TEST(close_resume)
 {
-	make_track();
+	th_make_track(PATH, FRAMES);
 	fixture f;
 	init(&f);
 	teder_engine *e = NULL;

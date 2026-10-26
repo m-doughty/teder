@@ -323,8 +323,19 @@ source ID and track label are preserved, transport becomes PAUSED. Preparation
 still needs a source reservation alongside the retained source. Its failure leaves
 the output READY and source FAILED; retry select, seek or open explicitly.
 
-This checkpoint does not start playback. AUTOPLAY returns UNSUPPORTED when output
-is READY, and BAD_STATE otherwise. Build capability bits remain unchanged.
+Open with AUTOPLAY prefills the bounded PCM pool, then starts the selected output.
+PLAYING requires successful native startup; missing output returns BAD_STATE.
+Failed startup leaves output LOST and the committed source PAUSED. Preparation
+failure before commitment preserves the old source. Ordinary open stops the old
+consumer and leaves READY. Seeking while playing resumes at the requested frame.
+Build capability bits remain unchanged while the broader contracts are incomplete.
+
+The producer reads coherent, generation-tagged callback reports. Final PCM
+submission sets SUBMIT_EOF and ENDED; output continues with silence until explicit
+replacement or close. No audible-end estimate is published. Raw missing-frame
+counts include EOF silence and are not yet exposed as public underrun counts.
+Position/latency quality remains UNKNOWN; the current source-frame field retains
+the saved open/seek position until live accounting is implemented.
 A selected context's native allocator failure during enumeration closes its
 device/context, advances epoch and pauses the source. Explicit selection recovers.
 

@@ -165,7 +165,9 @@ The Windows unwind check preserves exact handle counts over 16 rejected opens.
 The adapter may import only the separately audited `td_audio_render` and allowed
 compiler primitives. It cannot allocate, release, signal or control the device.
 Its counters describe raw missing PCM, including EOF; they are not clock or
-public underrun classification. Configuration/report access requires quiescence.
+public underrun classification. Configuration requires quiescence. Live report
+reads use an atomic snapshot and return AGAIN on concurrent publication. Tests
+check generation reset, final PCM and sticky version exhaustion without wrap.
 
 Run `build/bin/teder_test_device native` separately. It opens the current default
 on Windows, or the first enumerated output elsewhere, submits three silent PCM
@@ -206,6 +208,21 @@ preparation, including the last representable epoch.
 `build/bin/teder_test_output native-select` opens a real output, verifies status,
 closes and fails each observed allocation in turn. It selects the default on
 Windows and the first enumerated output elsewhere. It never starts playback.
+
+## Public playback
+
+`output.playback` checks 32,769 exact stereo frames through a 2,048-frame pool,
+variable native callback sizes and silence guards while enumeration is blocked.
+`output.play-changes` holds a native borrower across seek and close, checks exact
+post-seek samples, and verifies ordinary open stops playback. `output.play-failures`
+covers native start/stop failure and every observed autoplay allocation failure.
+All use the real callback and public request path with synthetic native dispatch.
+`support/track.h` generates the shared long-stream fixture with a separately checked
+sample formula; callback allocation/import audits remain mandatory.
+
+For audible acceptance, build and run `teder_play` with an absolute FLAC path.
+Record actual output/format, human observation and process exit separately from
+these synthetic tests. The example flushes prompts even when stdout is piped.
 
 ## Refill scheduling
 

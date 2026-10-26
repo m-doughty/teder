@@ -79,8 +79,6 @@ bool td_media_dispatch(teder_engine *e, uint32_t slot)
 		return false;
 	} else if (r->media.flags & TEDER_OPEN_AUTOPLAY && e->status.output_state != TEDER_OUTPUT_READY)
 		code = TEDER_BAD_STATE;
-	else if (r->media.flags & TEDER_OPEN_AUTOPLAY)
-		code = TEDER_UNSUPPORTED; /* actual playback is not implemented yet */
 	else
 		code = td_source_plan(r->input_bytes, TD_CODEC_BYTES, &reservation);
 	if (code == TEDER_OK &&
@@ -200,8 +198,16 @@ static void prepared(teder_engine *e, td_source_job *j)
 	if (code == TEDER_OK && r->media.flags & TEDER_OPEN_AUTOPLAY &&
 	    e->status.output_state != TEDER_OUTPUT_READY)
 		code = TEDER_BAD_STATE;
+	bool play =
+	    !selected &&
+	    ((r->media.flags & TEDER_OPEN_AUTOPLAY) ||
+	     (seek && (e->status.transport == TEDER_PLAYING || e->status.transport == TEDER_DRAINING)));
 	if (code == TEDER_OK && !selected)
 		code = td_commit_locked(e, slot);
+	td_unlock(e);
+	if (code == TEDER_OK)
+		code = td_output_quiesce(e);
+	td_lock(e);
 	if (code == TEDER_OK) {
 		td_source_job *old = active(e);
 		if (old)
@@ -223,9 +229,9 @@ static void prepared(teder_engine *e, td_source_job *j)
 		e->status.last_error = TEDER_OK;
 		if (selected)
 			e->status.transport = TEDER_PAUSED;
-		else if (!seek || e->status.transport == TEDER_FAILED || e->status.transport == TEDER_ENDED)
-			e->status.transport =
-			    r->media.flags & TEDER_OPEN_AUTOPLAY ? TEDER_PLAYING : TEDER_READY;
+		else if (play || !seek || e->status.transport == TEDER_FAILED ||
+		         e->status.transport == TEDER_ENDED)
+			e->status.transport = TEDER_READY; /* native start must succeed first */
 		e->status.next_source = e->status.next_track = 0;
 		e->status.next_state = TEDER_NEXT_NONE;
 		r->info.committed = e->status.current;
@@ -241,6 +247,25 @@ static void prepared(teder_engine *e, td_source_job *j)
 			td_pcm_peek(&e->pcm, &unused);
 		}
 		td_media_checkpoint(e, j->request, TD_MEDIA_AFTER_COMMIT);
+		if (play) {
+			while (td_decode_pump(e))
+				; /* bounded pool prefill, or validated EOF; no callback owns it yet */
+			td_source *s = j->source;
+			code = s->error;
+			bool empty = s->done && s->output == 0;
+			if (code == TEDER_OK && !empty)
+				code = td_output_start(e);
+			td_lock(e);
+			if (code == TEDER_OK) {
+				e->status.transport = empty ? TEDER_ENDED : TEDER_PLAYING;
+				if (empty)
+					e->status.clock_flags |= TEDER_SUBMIT_EOF;
+			} else if (e->status.output_state == TEDER_OUTPUT_READY) {
+				e->status.transport = TEDER_FAILED;
+				e->status.last_error = code;
+			}
+			td_unlock(e);
+		}
 	} else if (!retire(e, j))
 		abort(); /* uncommitted source has no PCM references */
 	td_lock(e);

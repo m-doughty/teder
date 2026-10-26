@@ -4,6 +4,9 @@
 #include <stdio.h>
 #include <math.h>
 #include "source.h"
+#include "support/track.h"
+#define LONG_TRACK OUTPUT_DIR "/output-long.flac"
+enum { LONG_FRAMES = 32769 };
 #define TRACK FIXTURE_DIR "/track-a.flac"
 
 #define INIT(type) \
@@ -20,7 +23,12 @@
 
 typedef struct {
 	th_tracker tracker;
-	th_gate gate;
+	th_gate gate, render_gate;
+	th_thread thread;
+	ma_device *native;
+	atomic_uint stop, hold, captured;
+	bool worker, fail_start, fail_stop;
+	float capture[LONG_FRAMES * 2];
 	atomic_uint point;
 	unsigned opened, closed, enumerated;
 	bool reject, enum_error, device_error;
@@ -82,8 +90,18 @@ static ma_result device_init(ma_device *d,
 	playback->channels = 2;
 	playback->sampleRate = id == 'A' ? 44100 : 22050;
 	playback->periodSizeInFrames = 8;
+	f->native = d;
 	f->devices++;
 	return MA_SUCCESS;
+}
+
+static void join_output(fixture *f)
+{
+	atomic_store(&f->stop, 1);
+	if (f->worker) {
+		th_thread_join(&f->thread);
+		f->worker = false;
+	}
 }
 
 static ma_result device_uninit(ma_device *d)
@@ -91,13 +109,55 @@ static ma_result device_uninit(ma_device *d)
 	fixture *f = d->pContext->pUserData;
 	owner(f);
 	hit(f, 8);
+	join_output(f);
 	f->releases++;
 	return MA_SUCCESS;
 }
 
+static void render_output(void *context)
+{
+	fixture *f = context;
+	if (atomic_exchange(&f->hold, 0))
+		th_gate_hit(&f->render_gate);
+	td_device_feed *feed = f->native->pUserData;
+	const unsigned sizes[] = {1, 31, 257, 7};
+	unsigned call = 0, captured = 0;
+	while (!atomic_load(&f->stop)) {
+		float pcm[516];
+		unsigned frames = sizes[call++ % 4];
+		pcm[2 * frames] = 12345;
+		uint64_t before = feed->report.pcm_frames;
+		f->native->onData(f->native, pcm, NULL, frames);
+		unsigned count = (unsigned)(feed->report.pcm_frames - before);
+		ck_assert(count <= frames && captured + count <= LONG_FRAMES && pcm[2 * frames] == 12345);
+		memcpy(f->capture + captured * 2, pcm, count * 2 * sizeof(float));
+		captured += count;
+		for (unsigned i = count * 2; i < frames * 2; i++)
+			ck_assert(pcm[i] == 0);
+		atomic_store(&f->captured, captured);
+		th_yield(); /* no producer wake; this fake is deliberately faster than hardware */
+	}
+}
+
 static ma_result device_start(ma_device *d)
 {
-	((fixture *)d->pContext->pUserData)->starts++;
+	fixture *f = d->pContext->pUserData;
+	owner(f);
+	f->starts++;
+	atomic_store(&f->stop, 0);
+	atomic_store(&f->captured, 0);
+	f->worker = th_thread_start(&f->thread, render_output, f);
+	return !f->worker || f->fail_start ? MA_ERROR : MA_SUCCESS;
+}
+
+static ma_result device_stop(ma_device *d)
+{
+	fixture *f = d->pContext->pUserData;
+	owner(f);
+	hit(f, 11);
+	if (f->fail_stop)
+		return MA_ERROR;
+	join_output(f);
 	return MA_SUCCESS;
 }
 
@@ -136,6 +196,7 @@ static ma_result context_init(const ma_backend *backends,
 	c->callbacks.onDeviceInit = device_init;
 	c->callbacks.onDeviceUninit = device_uninit;
 	c->callbacks.onDeviceStart = device_start;
+	c->callbacks.onDeviceStop = device_stop;
 	f->opened++;
 	return MA_SUCCESS;
 }
@@ -197,6 +258,10 @@ static void init(fixture *f)
 {
 	memset(f, 0, sizeof(*f));
 	atomic_init(&f->point, 0);
+	atomic_init(&f->stop, 0);
+	atomic_init(&f->hold, 0);
+	atomic_init(&f->captured, 0);
+	ck_assert(th_gate_init(&f->render_gate));
 	ck_assert(th_tracker_init(&f->tracker) && th_gate_init(&f->gate));
 #ifdef _WIN32
 	f->caller = GetCurrentThreadId();
@@ -207,9 +272,10 @@ static void init(fixture *f)
 
 static void dispose(fixture *f)
 {
-	ck_assert(f->opened == f->closed && f->devices == f->releases && f->starts == 0 &&
+	ck_assert(f->opened == f->closed && f->devices == f->releases && !f->worker &&
 	          !f->native_heap && th_tracker_clean(&f->tracker));
 	th_gate_uninit(&f->gate);
+	th_gate_uninit(&f->render_gate);
 	th_tracker_uninit(&f->tracker);
 }
 
@@ -666,7 +732,7 @@ START_TEST(rates)
 	th_gate_release(&f.gate);
 	RETRY(code, teder_open(e, TRACK, sizeof(TRACK) - 1, 88, TEDER_OPEN_AUTOPLAY, &id));
 	OK(code);
-	ck_assert(terminal(e, id).outcome == TEDER_UNSUPPORTED && status(e).track == 77);
+	ck_assert(terminal(e, id).outcome == TEDER_OK && status(e).track == 88 && f.starts == 1);
 	close_engine(&e);
 	dispose(&f);
 }
@@ -854,6 +920,155 @@ START_TEST(native)
 }
 END_TEST
 
+static uint64_t autoplay(teder_engine *e, const char *path)
+{
+	uint64_t id;
+	teder_code code;
+	RETRY(code, teder_open(e, path, (uint32_t)strlen(path), 99, TEDER_OPEN_AUTOPLAY, &id));
+	OK(code);
+	return id;
+}
+
+static void ended(fixture *f, teder_engine *e, unsigned frames)
+{
+	while (status(e).transport != TEDER_ENDED || atomic_load(&f->captured) != frames)
+		th_yield();
+	ck_assert((status(e).clock_flags & (TEDER_DECODE_EOF | TEDER_SUBMIT_EOF)) ==
+	          (TEDER_DECODE_EOF | TEDER_SUBMIT_EOF));
+}
+
+START_TEST(playback)
+{
+	th_make_track(LONG_TRACK, LONG_FRAMES);
+	fixture f;
+	init(&f);
+	teder_config config = INIT(teder_config);
+	config.pcm_frames = 2048;
+	teder_engine *e = create(&f, config, false);
+	OK(terminal(e, select_device(e, (teder_blob){0})).outcome);
+	atomic_store(&f.hold, 1);
+	uint64_t id = autoplay(e, LONG_TRACK);
+	th_gate_await(&f.render_gate);
+	OK(terminal(e, id).outcome);
+	ck_assert(status(e).transport == TEDER_PLAYING && atomic_load(&f.captured) == 0);
+	atomic_store(&f.point, 2);
+	uint64_t enumeration = submit(e);
+	th_gate_await(&f.gate);
+	th_gate_release(&f.render_gate);
+	ended(&f, e, LONG_FRAMES); /* callback/refill finish while native control remains blocked */
+	for (unsigned i = 0; i < LONG_FRAMES; i++) {
+		float expected = ((int32_t)(i % 2048) - 1024) / 32768.0f;
+		ck_assert(f.capture[i * 2] == expected && f.capture[i * 2 + 1] == -expected);
+	}
+	td_device_report report;
+	teder_code code;
+	do {
+		code = td_device_get_report(e->device, &report); /* control/config are held above */
+	} while (code == TEDER_AGAIN);
+	OK(code);
+	ck_assert(report.generation == status(e).current.epoch && report.final == 1 &&
+	          report.pcm_frames == LONG_FRAMES && report.error == TEDER_OK);
+	ck_assert(status(e).position_quality == TEDER_QUALITY_UNKNOWN &&
+	          status(e).underrun_frames == 0);
+	th_gate_release(&f.gate);
+	OK(terminal(e, enumeration).outcome);
+	close_engine(&e);
+	ck_assert(f.starts == 1);
+	dispose(&f);
+}
+END_TEST
+
+START_TEST(play_changes)
+{
+	fixture f;
+	init(&f);
+	teder_config config = INIT(teder_config);
+	config.pcm_frames = 4;
+	teder_engine *e = create(&f, config, false);
+	OK(terminal(e, select_device(e, (teder_blob){0})).outcome);
+	atomic_store(&f.hold, 1);
+	OK(terminal(e, autoplay(e, TRACK)).outcome);
+	th_gate_await(&f.render_gate);
+	teder_target target = status(e).current;
+	atomic_store(&f.point, 11);
+	uint64_t id;
+	teder_code code;
+	RETRY(code, teder_seek(e, &target, 7, &id));
+	OK(code);
+	th_gate_await(&f.gate); /* stop has been requested; the old native borrower is held */
+	ck_assert(status(e).current.epoch == target.epoch);
+	th_gate_release(&f.render_gate);
+	th_gate_release(&f.gate);
+	OK(terminal(e, id).outcome);
+	ended(&f, e, 9);
+	ck_assert(status(e).current.source == target.source && status(e).source_frame == 7);
+	for (unsigned i = 0; i < 9; i++) {
+		float expected = ((int)i - 1) * 1000 / 32768.0f;
+		ck_assert(f.capture[i * 2] == expected && f.capture[i * 2 + 1] == -expected);
+	}
+	load_track(e); /* ordinary open stops the old native consumer and stays READY */
+	ck_assert(status(e).transport == TEDER_READY && !f.worker && f.starts == 2);
+	atomic_store(&f.hold, 1);
+	OK(terminal(e, autoplay(e, TRACK)).outcome);
+	th_gate_await(&f.render_gate);
+	OK(teder_request_close(e));
+	ck_assert(status(e).lifecycle == TEDER_CLOSING && teder_destroy(&e) == TEDER_BUSY);
+	th_gate_release(&f.render_gate);
+	close_engine(&e);
+	dispose(&f);
+}
+END_TEST
+
+START_TEST(play_failures)
+{
+	for (unsigned stopping = 0; stopping < 2; stopping++) {
+		fixture f;
+		init(&f);
+		teder_config config = INIT(teder_config);
+		teder_engine *e = create(&f, config, false);
+		OK(terminal(e, select_device(e, (teder_blob){0})).outcome);
+		f.fail_start = !stopping;
+		uint64_t id = autoplay(e, TRACK);
+		if (stopping) {
+			OK(terminal(e, id).outcome);
+			ended(&f, e, 16);
+			f.fail_stop = true;
+			id = autoplay(e, TRACK);
+		}
+		ck_assert(terminal(e, id).outcome == TEDER_DEVICE_LOST);
+		ck_assert(status(e).output_state == TEDER_OUTPUT_LOST &&
+		          status(e).transport == TEDER_PAUSED && !e->device && !f.worker);
+		close_engine(&e);
+		dispose(&f);
+	}
+	size_t count = 0;
+	for (size_t n = 0; n <= count; n++) {
+		fixture f;
+		init(&f);
+		teder_config config = INIT(teder_config);
+		teder_engine *e = create(&f, config, false);
+		OK(terminal(e, select_device(e, (teder_blob){0})).outcome);
+		ma_mutex_lock(&f.tracker.lock);
+		size_t before = f.tracker.attempts;
+		f.tracker.fail_at = n ? before + n : 0;
+		ma_mutex_unlock(&f.tracker.lock);
+		uint64_t id = autoplay(e, TRACK);
+		teder_request_info r = terminal(e, id);
+		ck_assert(r.outcome == (n ? TEDER_NO_MEMORY : TEDER_OK));
+		if (!n) {
+			ended(&f, e, 16);
+			ma_mutex_lock(&f.tracker.lock);
+			count = f.tracker.attempts - before;
+			ma_mutex_unlock(&f.tracker.lock);
+			ck_assert(count > 5);
+		}
+		close_engine(&e);
+		dispose(&f);
+	}
+	printf("autoplay allocation failures 1..%zu unwind\n", count);
+}
+END_TEST
+
 START_TEST(native_select)
 {
 	size_t attempts = 0;
@@ -919,6 +1134,12 @@ int main(int argc, char **argv)
 		test = select_failures;
 	else if (!strcmp(argv[1], "select-cancel"))
 		test = select_cancel;
+	else if (!strcmp(argv[1], "playback"))
+		test = playback;
+	else if (!strcmp(argv[1], "play-changes"))
+		test = play_changes;
+	else if (!strcmp(argv[1], "play-failures"))
+		test = play_failures;
 	else if (!strcmp(argv[1], "native-select"))
 		test = native_select;
 	else if (!strcmp(argv[1], "native"))

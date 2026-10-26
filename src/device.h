@@ -8,7 +8,8 @@ typedef struct {
 	uint32_t native_rate, native_channels, native_format;
 } td_device_info;
 typedef struct {
-	uint64_t pcm_frames, missing_frames;
+	uint64_t generation, pcm_frames, missing_frames;
+	uint32_t final;
 	teder_code error;
 } td_device_report;
 /* Lifecycle-owner calls only; never on the callback/UI thread. Reserve the
@@ -26,6 +27,9 @@ teder_code td_device_configure(td_device *, td_audio_config);
 teder_code td_device_start(td_device *);
 bool td_device_running(td_device *); /* lifecycle-owner observation, not a join */
 teder_code td_device_stop(td_device *);
+/* One bounded coherent read, including while running; AGAIN retries later.
+ * A delegated producer may borrow this with lifecycle/configuration held stable.
+ * Quiesce that reader before reconfiguration or device destruction. */
 teder_code td_device_get_report(td_device *, td_device_report *);
 /* Observation only, modulo 2^32. Never a substitute for native quiescence. */
 uint32_t td_device_callbacks(td_device *);
@@ -34,12 +38,14 @@ uint32_t td_device_callbacks(td_device *);
 teder_code td_device_close(td_device **);
 
 /* Stable userdata in the device arena. Config is owner-written only while
- * quiescent; report is callback-written and owner-read only after quiescence. */
+ * quiescent. The callback owns report; live readers use atomic publication. */
 typedef struct {
 	td_pcm_pool *pool;
 	td_audio_config config;
 	td_device_report report;
-	atomic_uint calls;
+	atomic_uint calls, final;
+	atomic_int error;
+	atomic_uint_fast64_t sequence, pcm_frames, missing_frames;
 } td_device_feed;
 void td_device_callback(ma_device *, void *, const void *, ma_uint32);
 #endif

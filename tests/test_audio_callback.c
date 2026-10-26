@@ -117,7 +117,7 @@ static void output(
 	float out[66];
 	for (size_t i = 0; i < 66; i++)
 		out[i] = 12345;
-	td_audio_result result = {99, 99};
+	td_audio_result result = {.pcm_frames = 99, .missing_frames = 99};
 	OK(render(&f->pool, config, out, 66, frames, &result));
 	ck_assert(result.pcm_frames == pcm);
 	ck_assert(result.missing_frames == (config.enabled ? frames - pcm : 0));
@@ -231,7 +231,7 @@ START_TEST(bounds)
 	publish(&f, g, 2, 0, 0);
 	td_audio_config config = {1, 1, 1, 0};
 	float out[5] = {99, 99, 99, 99, 99};
-	td_audio_result result = {99, 99};
+	td_audio_result result = {.pcm_frames = 99, .missing_frames = 99};
 	ck_assert(render(&f.pool, config, out, 3, 2, &result) == TEDER_INVALID);
 	ck_assert(result.pcm_frames == 0 && result.missing_frames == 0);
 	ck_assert(render(&f.pool, config, out, 5, UINT32_MAX, &result) == TEDER_INVALID);

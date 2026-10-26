@@ -14,8 +14,13 @@ Device selection determines conversion rate; without a selected output, PCM keep
 the source rate. Selection rebuilds a retained source at its saved source-frame
 position and leaves it PAUSED. Device-open failure leaves it paused with output
 LOST; source rebuilding failure leaves output READY and transport FAILED. A new
-select, seek or open can recover. Playback, clocks and transport controls are
-not implemented yet. AUTOPLAY returns BAD_STATE without output, otherwise UNSUPPORTED.
+select, seek or open can recover. `TEDER_OPEN_AUTOPLAY` requires a selected READY
+output, otherwise BAD_STATE. After preparation, control stops the old consumer,
+commits the new source, prefills the bounded PCM pool and starts output. PLAYING
+is published only after native startup succeeds. Startup failure leaves output
+LOST and the new source PAUSED. A decode failure during prefill leaves FAILED.
+Ordinary open leaves READY; a seek during playback resumes the replacement.
+Clocks and separate play/pause/stop controls are not implemented yet.
 
 Three fixed engine job records bound active, staged and retiring sources together.
 Each source reserves its arena plus an 8 MiB codec cap before construction.
@@ -83,4 +88,9 @@ never signal it. Stopped public output needs no polling. Without an active consu
 or source/retired blocks needing work, refill waits on an event.
 Cancellation belongs to the source job, surviving request acknowledgement/reuse.
 Close waits for blocked operations, joins preparation and refill, quiesces consumers,
-clears PCM and retires all sources before CLOSED. Output startup is not implemented yet.
+clears PCM and retires all sources before CLOSED. The callback publishes a bounded
+atomic report; the producer observes final PCM submission and changes transport
+to ENDED with SUBMIT_EOF. Output continues with silence until close or replacement,
+so the final native buffer is not cut off. Empty validated input ends without
+starting output. Raw missing frames remain private and include EOF silence;
+public underrun classification and audible-position estimates remain future work.

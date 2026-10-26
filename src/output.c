@@ -69,6 +69,7 @@ static void device_close(teder_engine *e)
 {
 	if (!e->device)
 		return;
+	td_refill_pause(e);
 	if (td_device_close(&e->device) != TEDER_OK)
 		abort();
 	td_lock(e);
@@ -104,6 +105,16 @@ static void invalidate(teder_engine *e, teder_code code)
 	td_unlock(e);
 	if (!exhausted)
 		td_sources_suspend(e, epoch);
+	if (code != TEDER_OK) {
+		teder_event event = {.struct_size = sizeof(event),
+		                     .abi_version = TEDER_ABI_VERSION,
+		                     .kind = TEDER_EVENT_DEVICE,
+		                     .epoch = epoch,
+		                     .from_source = e->status.current.source,
+		                     .from_track = e->status.track,
+		                     .code = code};
+		td_emit(e, &event);
+	}
 }
 
 void td_output_close(teder_engine *e)
@@ -267,4 +278,65 @@ complete:
 	if (exhausted)
 		td_limit_close(e);
 	td_unlock(e);
+}
+
+/* Source commitment runs with refill paused, outside the bookkeeping gate. */
+teder_code td_output_quiesce(teder_engine *e)
+{
+	if (!td_device_running(e->device))
+		return TEDER_OK;
+	teder_code code = td_device_stop(e->device);
+	if (code != TEDER_OK)
+		invalidate(e, code);
+	return code;
+}
+
+teder_code td_output_start(teder_engine *e)
+{
+	if (atomic_load(&e->lifecycle) != TEDER_LIVE)
+		return TEDER_CANCELLED;
+	td_lock(e);
+	td_audio_config config = {e->status.current.epoch, e->status.gain, 1, e->status.mute};
+	td_unlock(e);
+	teder_code code = td_device_configure(e->device, config);
+	if (code == TEDER_OK)
+		code = td_device_start(e->device);
+	if (code != TEDER_OK)
+		invalidate(e, code);
+	return code;
+}
+
+bool td_output_report(teder_engine *e)
+{
+	if (!e->device)
+		return false;
+	td_device_report report;
+	teder_code code = td_device_get_report(e->device, &report);
+	if (code == TEDER_AGAIN)
+		return false;
+	td_lock(e);
+	if (code != TEDER_OK)
+		report = (td_device_report){.generation = e->status.current.epoch, .error = code};
+	bool current = report.generation == e->status.current.epoch;
+	bool failed = current && report.error != TEDER_OK && e->status.transport != TEDER_FAILED;
+	bool ended = current && report.error == TEDER_OK && report.final &&
+	             (e->status.transport == TEDER_PLAYING || e->status.transport == TEDER_DRAINING);
+	if (failed) {
+		e->status.transport = TEDER_FAILED;
+		e->status.last_error = report.error;
+	} else if (ended) {
+		e->status.clock_flags |= TEDER_SUBMIT_EOF;
+		e->status.transport = TEDER_ENDED;
+	}
+	teder_event event = {.struct_size = sizeof(event),
+	                     .abi_version = TEDER_ABI_VERSION,
+	                     .kind = TEDER_EVENT_ERROR,
+	                     .epoch = e->status.current.epoch,
+	                     .from_source = e->status.current.source,
+	                     .from_track = e->status.track,
+	                     .code = report.error};
+	td_unlock(e);
+	if (failed)
+		td_emit(e, &event);
+	return failed || ended;
 }

@@ -35,6 +35,7 @@ void td_refill_run(teder_engine *e)
 			td_media_checkpoint(e, 0, TD_REFILL_PUMP);
 			bool progress = td_pcm_reap(&e->pcm) != 0;
 			progress = td_decode_pump(e) || progress;
+			progress = td_output_report(e) || progress;
 			if (progress)
 				td_signal(e); /* retirement/status aggregation stays off the callback */
 			else
@@ -78,7 +79,8 @@ void td_refill_resume(teder_engine *e)
 	/* Control owns source state here, after pause. Preparation owns only STAGING
 	 * jobs and cannot mutate any ACTIVE/RETIRING source inspected below. */
 	td_lock(e);
-	bool needed = false;
+	bool needed = td_device_running(e->device) &&
+	              (e->status.transport == TEDER_PLAYING || e->status.transport == TEDER_DRAINING);
 	for (unsigned i = 0; i < TD_SOURCE_JOBS; i++) {
 		td_source_job *j = &e->sources[i];
 		if (j->state == TD_JOB_RETIRING ||

@@ -1,7 +1,8 @@
 # teder
 
 A C17 playback and analysis library, with a separate notcurses
-renderer. This is the native/test foundation, version 0.1.0, not a player yet.
+renderer. Version 0.1.0 now plays local FLAC through native output. Transport
+controls, clocks, gapless transitions, analysis and rendering are still in progress.
 
 Implemented exports:
 
@@ -16,8 +17,8 @@ Implemented exports:
   and `teder_result_release`.
 
 Build queries still report zero capabilities/backend mask. FLAC open and seek
-now prepare sources asynchronously and stream bounded PCM. Device output,
-transport clocks, analysis and drawing remain future work. Other declarations
+prepare sources asynchronously and stream bounded PCM. AUTOPLAY starts the selected
+output after bounded prefill. Other declarations
 remain draft contracts and will not link.
 
 Each engine owns one arena containing its handle, copied configuration and
@@ -29,14 +30,14 @@ PCM storage is split into blocks of up to 1024 stereo frames, with bounded
 publication and return queues in the same arena. The default still reserves
 512 KiB of samples, plus block/queue bookkeeping. Private tests exercise partial
 reads, generation switches and source retirement. The private FLAC source now
-streams decoded/converted PCM into this pool; device wiring follows.
+streams decoded/converted PCM into this pool while the device consumes it.
 No whole-track allocation is introduced.
 
 The private callback core now renders stereo float PCM with gain, mute and
 silence filling. It borrows the existing pool and allocates nothing. Tests cover
 variable requests and concurrent production. A private device owner now connects
 this core to miniaudio, with native start/stop and callback-safe teardown.
-Continuous engine playback is not implemented yet.
+Public autoplay connects that consumer to independent refill. Deterministic tests check every sample separately.
 
 Public device enumeration now runs asynchronously on the lifecycle worker. It
 copies up to 128 outputs into detached results, with engine-scoped opaque keys.
@@ -48,8 +49,8 @@ Each device owns a separate arena and borrows its context until native teardown
 finishes. Configuration changes require a stopped device. Native tests submit
 silence through WASAPI and headless ALSA. Public device selection now opens a
 stopped output and rebuilds a retained track at its negotiated rate, preserving
-identity and position. Engine playback/refill is not implemented yet; AUTOPLAY returns
-UNSUPPORTED with a selected output, or BAD_STATE without one.
+identity and the saved source position. Open with `TEDER_OPEN_AUTOPLAY` starts
+playback; it returns BAD_STATE without a selected output. Ordinary open stays READY.
 
 The private libFLAC build routes codec allocations through a bounded worker-owned
 budget. The source owns one arena for its wrapper, path, frame scratch and converter.
@@ -78,4 +79,16 @@ downloaded only with `BUILD_TESTING=ON`. Nothing is installed globally by
 configuration or building. See [builds and platforms](docs/build.md),
 [dependency choices](docs/dependencies.md), and the [API contract](docs/api-contract.md).
 
+The [standalone player](examples/play.c) uses only the public API:
+
+```sh
+build/bin/teder_play /absolute/path/to/track.flac
+```
+
+On Windows: `build-shared\bin\teder_play.exe "C:\Music\track.flac"`.
+An optional final device index selects an enumerated output. Otherwise it uses
+its reported default. The player prints the actual output and negotiated format.
+After final PCM submission, press Enter once the sound finishes. ENDED describes
+submission, not an audible clock; the example leaves output running until then.
+Build examples default on for a top-level build; disable with `-DTEDER_BUILD_EXAMPLES=OFF`.
 Contributor test instructions are in `tests/README.md` in the source tree.

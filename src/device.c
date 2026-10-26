@@ -49,6 +49,11 @@ teder_code td_device_open(
 	d->feed.pool = pool;
 	d->feed.config.gain = 1;
 	atomic_init(&d->feed.calls, 0);
+	atomic_init(&d->feed.sequence, 0);
+	atomic_init(&d->feed.pcm_frames, 0);
+	atomic_init(&d->feed.missing_frames, 0);
+	atomic_init(&d->feed.final, 0);
+	atomic_init(&d->feed.error, TEDER_OK);
 	ma_device_config config = ma_device_config_init(ma_device_type_playback);
 	config.playback.format = ma_format_f32;
 	config.playback.channels = 2;
@@ -102,6 +107,14 @@ teder_code td_device_configure(td_device *d, td_audio_config config)
 		return TEDER_BAD_STATE;
 	if (config.generation && config.generation < d->feed.pool->selected)
 		return TEDER_STALE;
+	if (config.generation != d->feed.config.generation) {
+		d->feed.report = (td_device_report){.generation = config.generation};
+		atomic_store(&d->feed.sequence, 0);
+		atomic_store(&d->feed.pcm_frames, 0);
+		atomic_store(&d->feed.missing_frames, 0);
+		atomic_store(&d->feed.final, 0);
+		atomic_store(&d->feed.error, TEDER_OK);
+	}
 	d->feed.config = config;
 	return TEDER_OK;
 }
@@ -154,9 +167,19 @@ teder_code td_device_get_report(td_device *d, td_device_report *out)
 {
 	if (!d || !out)
 		return TEDER_INVALID;
-	if (d->active)
-		return TEDER_BUSY;
-	*out = d->feed.report;
+	uint64_t before = atomic_load(&d->feed.sequence);
+	if (before == UINT64_MAX)
+		return TEDER_LIMIT;
+	if (before & 1)
+		return TEDER_AGAIN;
+	td_device_report report = {.generation = d->feed.config.generation,
+	                           .pcm_frames = atomic_load(&d->feed.pcm_frames),
+	                           .missing_frames = atomic_load(&d->feed.missing_frames),
+	                           .final = atomic_load(&d->feed.final),
+	                           .error = atomic_load(&d->feed.error)};
+	if (before != atomic_load(&d->feed.sequence))
+		return TEDER_AGAIN;
+	*out = report;
 	return TEDER_OK;
 }
 

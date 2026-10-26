@@ -36,7 +36,7 @@ python3 tools/format-c.py --check
 
 Check mode is the default and never edits files. Pass `--clang-format /path/to/tool`
 if needed. The helper checks the formatter's major version and covers authored
-`.c`/`.h` files in `src`, `include`, `tests`, and `cmake`. Downloaded dependencies,
+`.c`/`.h` files in `src`, `include`, `tests`, `cmake`, and `examples`. Downloaded dependencies,
 build outputs and CMake templates stay outside the pass. CI runs the same check.
 Formatting is separate from clang-tidy's static analysis; see the
 [clang-format options](https://clang.llvm.org/docs/ClangFormatStyleOptions.html).

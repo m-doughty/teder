@@ -46,11 +46,13 @@ teder_code td_audio_render(td_pcm_pool *pool,
 			for (size_t i = 0; i < (size_t)count * 2; i++)
 				target[i] = view.samples[i] * config.gain;
 		}
+		bool final = count == view.frames && (view.meta->flags & TD_PCM_FINAL);
 		/* No view access after consume: the producer may reclaim immediately. */
 		code = td_pcm_consume(pool, count);
 		if (code != TEDER_OK)
 			goto failed;
 		result->pcm_frames += count;
+		result->final |= final;
 	}
 	result->missing_frames = frames - result->pcm_frames;
 	return TEDER_OK;
