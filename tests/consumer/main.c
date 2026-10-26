@@ -51,6 +51,10 @@ int main(int argc, char **argv)
 	uint64_t invalid_request = 99;
 	if (teder_enumerate_devices(NULL, &invalid_request) != TEDER_INVALID || invalid_request != 0)
 		return 19;
+	invalid_request = 99;
+	if (teder_select_device(NULL, NULL, 0, &invalid_request) != TEDER_INVALID ||
+	    invalid_request != 0)
+		return 20;
 	teder_config config = {0};
 	config.struct_size = sizeof(config);
 	config.abi_version = TEDER_ABI_VERSION;

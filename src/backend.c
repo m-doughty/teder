@@ -184,9 +184,10 @@ td_backend_enumerate(td_backend *b, uint64_t limit, uint32_t key_limit, teder_re
 	return td_result_create(&input, b->allocator, limit, out);
 }
 
-teder_code td_backend_key(td_backend *b, teder_blob key, ma_device_id *out)
+teder_code
+td_backend_key_decode(uint64_t engine_token, uint32_t backend, teder_blob key, ma_device_id *out)
 {
-	if (!b || !out || !key.data || key.bytes < KEY_HEADER || key.bytes > KEY_LIMIT)
+	if (!out || !key.data || key.bytes < KEY_HEADER || key.bytes > KEY_LIMIT)
 		return TEDER_INVALID;
 	const unsigned char *p = key.data;
 	uint32_t bytes = p[13] | (uint32_t)p[14] << 8;
@@ -211,11 +212,16 @@ teder_code td_backend_key(td_backend *b, teder_blob key, ma_device_id *out)
 			return TEDER_INVALID;
 	}
 	unsigned char token[8];
-	token_bytes(token, b->token);
-	if (memcmp(token, p + 4, 8) || p[12] != b->backend)
+	token_bytes(token, engine_token);
+	if (!engine_token || memcmp(token, p + 4, 8) || (backend && p[12] != backend))
 		return TEDER_STALE;
 	*out = id;
 	return TEDER_OK;
+}
+
+teder_code td_backend_key(td_backend *b, teder_blob key, ma_device_id *out)
+{
+	return b ? td_backend_key_decode(b->token, b->backend, key, out) : TEDER_INVALID;
 }
 
 teder_code td_backend_error(td_backend *b)

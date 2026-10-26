@@ -76,6 +76,32 @@ quiescence. Tests include concurrent result readers and controlled request/close
 interleavings on the actual control worker. See
 `tests/README.md` in the source tree.
 
+## Neovim and clangd
+
+CMake already enables `CMAKE_EXPORT_COMPILE_COMMANDS`. With Ninja or Makefiles,
+configuration writes `compile_commands.json` into the build directory. clangd
+uses it for include paths, definitions and C17 flags, including private dependency
+headers. See the [clangd project setup](https://clangd.llvm.org/installation.html#project-setup).
+
+Generate the database on the machine running Neovim. Windows/Docker build paths
+will not resolve on macOS. From `teder/`:
+
+```sh
+cmake -S . -B build-macos -G Ninja -DCMAKE_BUILD_TYPE=Debug
+cmake --build build-macos
+ln -sfn build-macos/compile_commands.json compile_commands.json
+```
+
+This also downloads the pinned headers and creates generated headers. Restart
+Neovim's clangd client afterward, or reopen Neovim. For another local build tree,
+point the symlink at that tree's database. The root database and build trees are
+already ignored by Git.
+
+If missing includes remain, inspect `:LspLog` to see which database and compile
+command clangd uses. A missing `miniaudio.h`, `FLAC/...` or `check.h` suggests a
+missing/stale database or incomplete configuration. Missing system headers also
+require a working macOS SDK/toolchain; check `xcrun --show-sdk-path`.
+
 ## Installed consumers
 
 ```sh

@@ -175,8 +175,8 @@ WASAPI submission are native lifecycle evidence, not audible music acceptance.
 
 ## Public device enumeration
 
-`-R '^output\.'` selects five engine integration cases: snapshot, cancellation,
-failures, identity and closing. They check exact names/keys/defaults, detached
+`-R '^output\.'` selects the engine output integration cases. Enumeration covers
+snapshot, cancellation, failures, identity and closing. They check exact names/keys/defaults, detached
 results after destroy, cached context reservations, take/ack/destruction,
 cancellation on both sides of commitment, queue saturation and same-thread
 native initialization/uninitialization. Failed allocations cover the context
@@ -191,6 +191,21 @@ of every observed allocation failure. Results are read after engine destruction.
 It fails if no native backend can initialize; zero enumerated outputs is valid.
 This is enumeration evidence, not playback. The installed consumer also checks
 the public symbol and invalid-handle boundary without requiring an audio device.
+
+Selection adds `output.selection`, `.rates`, `.select-failures` and `.select-cancel`.
+Checks cover copied/stale/malformed keys, media exclusion, default/explicit IDs,
+negotiated fields, old-output preservation before commitment, native failure after
+commitment, budget rejection before allocation, device/converter/source allocation
+failures, epoch exhaustion and poisoned-context loss. Rates compare 44100-to-22050
+PCM with the independent conversion reference, then exact native-rate PCM after a
+seek and output replacement. Control is gated while tests borrow stopped PCM.
+Cancellation/close gates cover both sides of commitment, native uninit and source
+preparation. A dispatched generation remains fixed across native loss before
+preparation, including the last representable epoch.
+
+`build/bin/teder_test_output native-select` opens a real output, verifies status,
+closes and fails each observed allocation in turn. It selects the default on
+Windows and the first enumerated output elsewhere. It never starts playback.
 
 ## Linux ThreadSanitizer in Docker
 

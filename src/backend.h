@@ -47,6 +47,8 @@ td_backend_enumerate(td_backend *, uint64_t result_limit, uint32_t key_limit, te
 /* Decode only validated backend-specific bytes; no native access, pointer or
  * OS-handle deserialization. Output is unchanged on failure. */
 teder_code td_backend_key(td_backend *, teder_blob, ma_device_id *);
+/* Pure validation before native access. backend=0 accepts any supported backend. */
+teder_code td_backend_key_decode(uint64_t token, uint32_t backend, teder_blob, ma_device_id *);
 typedef struct {
 	ma_context *context;
 	ma_device_id id;

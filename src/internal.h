@@ -4,6 +4,7 @@
 #include "memory.h"
 #include "pcm.h"
 #include "backend.h"
+#include "device.h"
 #include "miniaudio.h"
 #include <stdatomic.h>
 #include <string.h>
@@ -106,7 +107,10 @@ enum {
 	TD_MEDIA_AFTER_COMMIT,
 	TD_DECODE_IDLE,
 	TD_OUTPUT_BEFORE_COMMIT,
-	TD_OUTPUT_AFTER_COMMIT
+	TD_OUTPUT_AFTER_COMMIT,
+	TD_SELECT_BEFORE_COMMIT,
+	TD_SELECT_AFTER_COMMIT,
+	TD_PREPARE_JOB
 };
 
 typedef struct {
@@ -129,6 +133,7 @@ enum {
 	TD_JOB_PREPARED,
 	TD_JOB_ACTIVE,
 	TD_JOB_RETIRING,
+	TD_JOB_SUSPENDED,
 	TD_SOURCE_JOBS = 3
 };
 
@@ -162,6 +167,8 @@ struct teder_engine {
 	uint64_t last_source;
 	td_backend *backend; /* lifecycle worker only; context outlives devices */
 	size_t backend_reservation;
+	td_device *device;
+	size_t device_reservation;
 	uint64_t backend_token;
 	atomic_uint lifecycle;
 	uint64_t last_request, last_completion;
@@ -191,7 +198,10 @@ void td_prepare_signal(teder_engine *);
 void td_prepare_run(teder_engine *);
 bool td_decode_step(teder_engine *);
 teder_code td_output_enumerate(teder_engine *, uint32_t slot);
-void td_output_close(teder_engine *); /* lifecycle worker, devices already closed */
+void td_output_close(teder_engine *); /* lifecycle worker: device before context */
+void td_output_select(teder_engine *, uint32_t slot);
+void td_sources_suspend(teder_engine *, uint64_t epoch); /* native consumer quiescent */
+void td_media_retarget(teder_engine *, uint32_t slot);
 teder_code td_token_next(atomic_uint_fast64_t *, uint64_t *);
 void td_sources_close(teder_engine *);            /* prep joined and consumer quiescent */
 bool td_media_dispatch(teder_engine *, uint32_t); /* gate held; never performs I/O */

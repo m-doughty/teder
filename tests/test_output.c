@@ -2,6 +2,9 @@
 #include "support/engine.h"
 #include <check.h>
 #include <stdio.h>
+#include <math.h>
+#include "source.h"
+#define TRACK FIXTURE_DIR "/track-a.flac"
 
 #define INIT(type) \
 	{ \
@@ -20,7 +23,8 @@ typedef struct {
 	th_gate gate;
 	atomic_uint point;
 	unsigned opened, closed, enumerated;
-	bool reject, enum_error;
+	bool reject, enum_error, device_error;
+	unsigned devices, releases, starts;
 	void *native_heap;
 #ifdef _WIN32
 	DWORD caller, owner;
@@ -45,13 +49,65 @@ static void owner(fixture *f)
 #endif
 }
 
+static ma_result
+describe(ma_context *c, ma_device_type type, const ma_device_id *id, ma_device_info *info)
+{
+	(void)c;
+	(void)type;
+	memset(info, 0, sizeof(*info));
+	info->id.wasapi[0] = id ? id->wasapi[0] : 'A';
+	memcpy(info->name, "Selected", 9);
+	return MA_SUCCESS;
+}
+
+static ma_result device_info(ma_device *d, ma_device_type type, ma_device_info *info)
+{
+	return describe(d->pContext, type, &d->playback.id, info);
+}
+
+static ma_result device_init(ma_device *d,
+                             const ma_device_config *config,
+                             ma_device_descriptor *playback,
+                             ma_device_descriptor *capture)
+{
+	(void)capture;
+	fixture *f = d->pContext->pUserData;
+	owner(f);
+	if (f->device_error)
+		return MA_ERROR;
+	ck_assert(config->playback.pDeviceID);
+	ma_wchar_win32 id = config->playback.pDeviceID->wasapi[0];
+	ck_assert(id == 'A' || id == 'B');
+	playback->format = ma_format_f32;
+	playback->channels = 2;
+	playback->sampleRate = id == 'A' ? 44100 : 22050;
+	playback->periodSizeInFrames = 8;
+	f->devices++;
+	return MA_SUCCESS;
+}
+
+static ma_result device_uninit(ma_device *d)
+{
+	fixture *f = d->pContext->pUserData;
+	owner(f);
+	hit(f, 8);
+	f->releases++;
+	return MA_SUCCESS;
+}
+
+static ma_result device_start(ma_device *d)
+{
+	((fixture *)d->pContext->pUserData)->starts++;
+	return MA_SUCCESS;
+}
+
 static ma_result context_init(const ma_backend *backends,
                               ma_uint32 count,
                               const ma_context_config *config,
                               ma_context *c)
 {
 	(void)backends;
-	ck_assert(count == 4);
+	ck_assert(count == 4 || count == 1);
 	fixture *f = config->pUserData;
 #ifdef _WIN32
 	f->owner = GetCurrentThreadId();
@@ -69,6 +125,17 @@ static ma_result context_init(const ma_backend *backends,
 	f->native_heap = ma_malloc(64, &c->allocationCallbacks);
 	if (!f->native_heap)
 		return MA_OUT_OF_MEMORY;
+	ma_result code = ma_mutex_init(&c->deviceInfoLock);
+	if (code != MA_SUCCESS) {
+		ma_free(f->native_heap, &c->allocationCallbacks);
+		f->native_heap = NULL;
+		return code;
+	}
+	c->callbacks.onContextGetDeviceInfo = describe;
+	c->callbacks.onDeviceGetInfo = device_info;
+	c->callbacks.onDeviceInit = device_init;
+	c->callbacks.onDeviceUninit = device_uninit;
+	c->callbacks.onDeviceStart = device_start;
 	f->opened++;
 	return MA_SUCCESS;
 }
@@ -78,6 +145,7 @@ static ma_result context_uninit(ma_context *c)
 	fixture *f = c->pUserData;
 	owner(f);
 	ma_free(f->native_heap, &c->allocationCallbacks);
+	ma_mutex_uninit(&c->deviceInfoLock);
 	f->native_heap = NULL;
 	f->closed++;
 	return MA_SUCCESS;
@@ -113,6 +181,16 @@ static void checkpoint(void *p, uint64_t request, unsigned point)
 		hit(p, 3);
 	if (point == TD_OUTPUT_AFTER_COMMIT)
 		hit(p, 4);
+	if (point == TD_SELECT_BEFORE_COMMIT)
+		hit(p, 5);
+	if (point == TD_SELECT_AFTER_COMMIT)
+		hit(p, 6);
+	if (point == TD_DECODE_IDLE)
+		hit(p, 7);
+	if (point == TD_SOURCE_OPENED)
+		hit(p, 9);
+	if (point == TD_PREPARE_JOB)
+		hit(p, 10);
 }
 
 static void init(fixture *f)
@@ -129,7 +207,8 @@ static void init(fixture *f)
 
 static void dispose(fixture *f)
 {
-	ck_assert(f->opened == f->closed && !f->native_heap && th_tracker_clean(&f->tracker));
+	ck_assert(f->opened == f->closed && f->devices == f->releases && f->starts == 0 &&
+	          !f->native_heap && th_tracker_clean(&f->tracker));
 	th_gate_uninit(&f->gate);
 	th_tracker_uninit(&f->tracker);
 }
@@ -424,6 +503,314 @@ START_TEST(closing)
 }
 END_TEST
 
+static uint64_t select_device(teder_engine *e, teder_blob key)
+{
+	uint64_t id;
+	teder_code code;
+	RETRY(code, teder_select_device(e, key.data, key.bytes, &id));
+	OK(code);
+	return id;
+}
+
+static void load_track(teder_engine *e)
+{
+	uint64_t id;
+	teder_code code;
+	RETRY(code, teder_open(e, TRACK, sizeof(TRACK) - 1, 77, 0, &id));
+	OK(code);
+	ck_assert(terminal(e, id).outcome == TEDER_OK);
+	ack(e, id);
+}
+
+static teder_status status(teder_engine *e)
+{
+	teder_status s = INIT(teder_status);
+	OK(th_read_status(e, &s));
+	return s;
+}
+
+static void idle(fixture *f, teder_engine *e)
+{
+	while (!(status(e).clock_flags & TEDER_DECODE_EOF))
+		th_yield();
+	atomic_store(&f->point, 7);
+	td_signal(e);
+	th_gate_await(&f->gate); /* sole producer/idle consumer is parked; device is stopped */
+}
+
+START_TEST(selection)
+{
+	fixture f;
+	init(&f);
+	teder_config config = INIT(teder_config);
+	teder_engine *e = create(&f, config, false);
+	unsigned char unissued[20] = {'T', 'D', 'K', '1'};
+	unissued[12] = 1;
+	unissued[13] = 4;
+	unissued[16] = 'A';
+	uint64_t id = select_device(e, (teder_blob){unissued, sizeof(unissued)});
+	ck_assert(terminal(e, id).outcome == TEDER_STALE && f.opened == 0);
+	ack(e, id);
+	id = submit(e);
+	ck_assert(terminal(e, id).outcome == TEDER_OK);
+	teder_result *r = take(e, id);
+	teder_device_info b = entry(r, 1);
+	unsigned char key[20];
+	memcpy(key, b.key.data, sizeof(key));
+	teder_result_release(r);
+	atomic_store(&f.point, 5);
+	id = select_device(e, (teder_blob){key, sizeof(key)});
+	th_gate_await(&f.gate);
+	memset(key, 0, sizeof(key));
+	uint64_t other;
+	ck_assert(teder_select_device(e, NULL, 0, &other) == TEDER_BUSY && other == 0);
+	ck_assert(teder_open(e, TRACK, sizeof(TRACK) - 1, 9, 0, &other) == TEDER_BUSY);
+	th_gate_release(&f.gate);
+	ck_assert(terminal(e, id).outcome == TEDER_OK);
+	ack(e, id);
+	teder_status s = status(e);
+	ck_assert(s.current.epoch == 2 && s.current.source == 0 && s.transport == TEDER_EMPTY &&
+	          s.output_state == TEDER_OUTPUT_READY && s.output_rate == 22050 &&
+	          s.output_channels == 2 && s.output_period_frames == 8 && s.backend == 1 &&
+	          s.latency_quality == TEDER_QUALITY_UNKNOWN && s.latency_frames == 0);
+	teder_event event = INIT(teder_event);
+	OK(teder_event_poll(e, &event));
+	ck_assert(event.kind == TEDER_EVENT_DEVICE && event.epoch == 2 && event.code == TEDER_OK);
+
+	for (unsigned mode = 0; mode < 2; mode++) {
+		memcpy(key, "TDK1", 4);
+		if (mode) { /* structurally valid, different engine */
+			key[4] = 255;
+			key[12] = 1;
+			key[13] = 4;
+			key[16] = 'A';
+		}
+		id = select_device(e, (teder_blob){key, sizeof(key)});
+		ck_assert(terminal(e, id).outcome == (mode ? TEDER_STALE : TEDER_INVALID));
+		ack(e, id);
+		ck_assert(status(e).current.epoch == 2 && f.devices == 1 && f.releases == 0);
+	}
+	f.device_error = true;
+	id = select_device(e, (teder_blob){0});
+	ck_assert(terminal(e, id).outcome == TEDER_DEVICE_LOST);
+	ack(e, id);
+	s = status(e);
+	ck_assert(s.current.epoch == 3 && s.output_state == TEDER_OUTPUT_LOST && s.output_rate == 0 &&
+	          !e->device && f.releases == 1);
+	f.device_error = false;
+	id = select_device(e, (teder_blob){0});
+	ck_assert(terminal(e, id).outcome == TEDER_OK && status(e).current.epoch == 4);
+	close_engine(&e);
+	dispose(&f);
+}
+END_TEST
+
+START_TEST(rates)
+{
+	fixture f;
+	init(&f);
+	teder_config config = INIT(teder_config);
+	config.pcm_frames = 64;
+	teder_engine *e = create(&f, config, false);
+	load_track(e);
+	idle(&f, e);
+	ck_assert(e->pcm.free_count == 0); /* old published PCM must be returned on selection */
+	th_gate_release(&f.gate);
+	uint64_t id = submit(e);
+	ck_assert(terminal(e, id).outcome == TEDER_OK);
+	teder_result *r = take(e, id);
+	teder_device_info b = entry(r, 1);
+	id = select_device(e, b.key);
+	teder_result_release(r);
+	ck_assert(terminal(e, id).outcome == TEDER_OK);
+	ack(e, id);
+	idle(&f, e);
+	teder_status s = status(e);
+	ck_assert(s.current.epoch == 3 && s.current.source == 1 && s.track == 77 &&
+	          s.transport == TEDER_PAUSED && s.source_frame == 0 && s.output_rate == 22050);
+	/* Independent binary64 reference from fixtures/conversion_reference.py. */
+	static const float down[] = {-0.07722943774f,
+	                             -0.0684246029f,
+	                             0.02713067635f,
+	                             0.06513578667f,
+	                             0.1416162903f,
+	                             0.1716223316f,
+	                             0.05848782661f,
+	                             -0.04445810882f};
+	td_pcm_view v;
+	OK(td_pcm_peek(&e->pcm, &v));
+	ck_assert(v.frames == 8 && v.generation->generation == 3 && v.generation->source == 1);
+	for (unsigned i = 0; i < 8; i++)
+		ck_assert(fabsf(v.samples[2 * i] - down[i]) < 1e-6f &&
+		          fabsf(v.samples[2 * i + 1] + down[i]) < 1e-6f);
+	th_gate_release(&f.gate);
+
+	teder_code code;
+	RETRY(code, teder_seek(e, &s.current, 7, &id));
+	OK(code);
+	ck_assert(terminal(e, id).outcome == TEDER_OK);
+	ack(e, id);
+	id = select_device(e, (teder_blob){0});
+	ck_assert(terminal(e, id).outcome == TEDER_OK);
+	ack(e, id);
+	idle(&f, e);
+	s = status(e);
+	ck_assert(s.current.epoch == 5 && s.current.source == 1 && s.source_frame == 7 &&
+	          s.transport == TEDER_PAUSED && s.output_rate == 44100);
+	OK(td_pcm_peek(&e->pcm, &v));
+	ck_assert(v.frames == 9 && v.generation->generation == 5);
+	for (unsigned i = 0; i < 9; i++) {
+		float expected = ((int)i * 1000 - 1000) / 32768.0f;
+		ck_assert(v.samples[2 * i] == expected && v.samples[2 * i + 1] == -expected);
+	}
+	th_gate_release(&f.gate);
+	RETRY(code, teder_open(e, TRACK, sizeof(TRACK) - 1, 88, TEDER_OPEN_AUTOPLAY, &id));
+	OK(code);
+	ck_assert(terminal(e, id).outcome == TEDER_UNSUPPORTED && status(e).track == 77);
+	close_engine(&e);
+	dispose(&f);
+}
+END_TEST
+
+START_TEST(select_failures)
+{
+	for (unsigned fail = 1; fail <= 3; fail++) {
+		fixture f;
+		init(&f);
+		teder_config config = INIT(teder_config);
+		teder_engine *e = create(&f, config, false);
+		load_track(e);
+		uint64_t id = select_device(e, (teder_blob){0});
+		ck_assert(terminal(e, id).outcome == TEDER_OK);
+		ack(e, id);
+		idle(&f, e);
+		f.tracker.fail_at =
+		    f.tracker.attempts + fail; /* device arena, converter heap, source arena */
+		id = select_device(e, (teder_blob){0});
+		th_gate_release(&f.gate);
+		ck_assert(terminal(e, id).outcome == TEDER_NO_MEMORY);
+		ack(e, id);
+		teder_status s = status(e);
+		ck_assert_msg(s.current.epoch == 4 && s.current.source == 1 && s.track == 77 &&
+		                  s.transport == (fail < 3 ? TEDER_PAUSED : TEDER_FAILED) &&
+		                  s.output_state == (fail < 3 ? TEDER_OUTPUT_LOST : TEDER_OUTPUT_READY),
+		              "fail=%u epoch=%llu source=%llu transport=%u output=%u site=%s",
+		              fail,
+		              (unsigned long long)s.current.epoch,
+		              (unsigned long long)s.current.source,
+		              s.transport,
+		              s.output_state,
+		              f.tracker.failed_site);
+		f.tracker.fail_at = 0;
+		id = select_device(e, (teder_blob){0});
+		ck_assert(terminal(e, id).outcome == TEDER_OK);
+		ack(e, id);
+		idle(&f, e);
+		f.tracker.fail_at = f.tracker.attempts + 1; /* native enumeration with a selected device */
+		id = submit(e);
+		th_gate_release(&f.gate);
+		ck_assert(terminal(e, id).outcome == TEDER_NO_MEMORY);
+		ck_assert(!e->device && !e->backend && status(e).current.epoch == 6 &&
+		          status(e).output_state == TEDER_OUTPUT_LOST);
+		close_engine(&e);
+		dispose(&f);
+	}
+	fixture f;
+	init(&f);
+	teder_config config = INIT(teder_config);
+	teder_engine *e = create(&f, config, false);
+	size_t base = owned(e), context_bytes, device_bytes;
+	OK(td_backend_plan(8 * 1024 * 1024, &context_bytes));
+	OK(td_device_plan(&device_bytes));
+	close_engine(&e);
+	config.engine_bytes_limit = base + context_bytes + device_bytes - 1;
+	e = create(&f, config, false);
+	uint64_t id = submit(e);
+	ck_assert(terminal(e, id).outcome == TEDER_OK);
+	ack(e, id);
+	size_t allocations = f.tracker.attempts;
+	id = select_device(e, (teder_blob){0});
+	ck_assert(terminal(e, id).outcome == TEDER_LIMIT && status(e).current.epoch == 1 &&
+	          f.devices == 0 && f.tracker.attempts == allocations);
+	close_engine(&e);
+	dispose(&f);
+
+	init(&f);
+	config.engine_bytes_limit = 0;
+	e = create(&f, config, false);
+	td_lock(e);
+	e->status.current.epoch = UINT64_MAX;
+	td_unlock(e);
+	id = select_device(e, (teder_blob){0});
+	ck_assert(terminal(e, id).outcome == TEDER_LIMIT);
+	OK(th_close(e));
+	ck_assert(status(e).current.epoch == UINT64_MAX && f.devices == 0);
+	close_engine(&e);
+	dispose(&f);
+	/* Device loss between dispatch and preparation must invalidate that job,
+	 * including when the loss consumes the last representable epoch. */
+	init(&f);
+	e = create(&f, config, false);
+	load_track(e);
+	id = select_device(e, (teder_blob){0});
+	ck_assert(terminal(e, id).outcome == TEDER_OK);
+	ack(e, id);
+	idle(&f, e);
+	td_lock(e);
+	e->status.current.epoch = UINT64_MAX - 1;
+	td_unlock(e);
+	atomic_store(&f.point, 10);
+	th_gate_release(&f.gate);
+	teder_code code;
+	RETRY(code, teder_open(e, TRACK, sizeof(TRACK) - 1, 99, 0, &id));
+	OK(code);
+	th_gate_await(&f.gate);
+	f.tracker.fail_at = f.tracker.attempts + 1;
+	uint64_t enumeration = submit(e);
+	ck_assert(terminal(e, enumeration).outcome == TEDER_NO_MEMORY);
+	f.tracker.fail_at = 0;
+	th_gate_release(&f.gate);
+	ck_assert_msg(terminal(e, id).outcome == TEDER_STALE,
+	              "Dispatched generation changed after device loss");
+	ck_assert(status(e).current.epoch == UINT64_MAX && status(e).current.source == 1);
+	close_engine(&e);
+	dispose(&f);
+}
+END_TEST
+
+START_TEST(select_cancel)
+{
+	for (unsigned point = 5; point <= 9; point++) {
+		if (point == 7)
+			continue;
+		fixture f;
+		init(&f);
+		teder_config config = INIT(teder_config);
+		teder_engine *e = create(&f, config, false);
+		load_track(e);
+		uint64_t id = select_device(e, (teder_blob){0});
+		ck_assert(terminal(e, id).outcome == TEDER_OK);
+		ack(e, id);
+		atomic_store(&f.point, point);
+		id = select_device(e, (teder_blob){0});
+		th_gate_await(&f.gate);
+		if (point == 8 || point == 9) {
+			OK(teder_request_close(e));
+			ck_assert(teder_destroy(&e) == TEDER_BUSY && e);
+		} else
+			OK(teder_request_cancel(e, id));
+		th_gate_release(&f.gate);
+		if (point == 8 || point == 9)
+			OK(th_close(e));
+		teder_request_info done = terminal(e, id);
+		ck_assert(done.outcome == (point == 6 ? TEDER_OK : TEDER_CANCELLED));
+		ck_assert(status(e).current.epoch == (point == 5 ? 3 : 4));
+		close_engine(&e);
+		dispose(&f);
+	}
+}
+END_TEST
+
 START_TEST(native)
 {
 	fixture f;
@@ -467,6 +854,48 @@ START_TEST(native)
 }
 END_TEST
 
+START_TEST(native_select)
+{
+	size_t attempts = 0;
+	for (size_t fail = 0; fail <= attempts; fail++) {
+		fixture f;
+		init(&f);
+		teder_config config = INIT(teder_config);
+		teder_engine *e = create(&f, config, true);
+		uint64_t id = submit(e);
+		ck_assert(terminal(e, id).outcome == TEDER_OK);
+		teder_result *r = take(e, id);
+		teder_blob key = {0};
+#ifndef _WIN32
+		teder_device_info d = entry(r, 0);
+		key = d.key;
+#endif
+		size_t before = f.tracker.attempts;
+		if (fail)
+			f.tracker.fail_at = before + fail;
+		id = select_device(e, key);
+		ck_assert(terminal(e, id).outcome == (fail ? TEDER_NO_MEMORY : TEDER_OK));
+		teder_status s = status(e);
+		ck_assert(s.current.epoch == 2 && s.current.source == 0 && s.transport == TEDER_EMPTY);
+		if (!fail) {
+			attempts = f.tracker.attempts - before;
+			ck_assert(s.output_state == TEDER_OUTPUT_READY && s.output_channels == 2 &&
+			          s.output_rate);
+			printf("Selected native backend=%u rate=%u channels=%u period=%u allocations=%zu\n",
+			       s.backend,
+			       s.output_rate,
+			       s.output_channels,
+			       s.output_period_frames,
+			       attempts);
+		} else
+			ck_assert(!e->device && s.output_state == TEDER_OUTPUT_LOST && s.output_rate == 0);
+		teder_result_release(r);
+		close_engine(&e);
+		dispose(&f);
+	}
+}
+END_TEST
+
 int main(int argc, char **argv)
 {
 	if (argc != 2)
@@ -482,6 +911,16 @@ int main(int argc, char **argv)
 		test = identity;
 	else if (!strcmp(argv[1], "closing"))
 		test = closing;
+	else if (!strcmp(argv[1], "selection"))
+		test = selection;
+	else if (!strcmp(argv[1], "rates"))
+		test = rates;
+	else if (!strcmp(argv[1], "select-failures"))
+		test = select_failures;
+	else if (!strcmp(argv[1], "select-cancel"))
+		test = select_cancel;
+	else if (!strcmp(argv[1], "native-select"))
+		test = native_select;
 	else if (!strcmp(argv[1], "native"))
 		test = native;
 	else

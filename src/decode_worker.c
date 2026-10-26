@@ -19,7 +19,7 @@ static void source_checkpoint(void *context, unsigned point)
 static td_source_job *active(teder_engine *e)
 {
 	for (unsigned i = 0; i < TD_SOURCE_JOBS; i++)
-		if (e->sources[i].state == TD_JOB_ACTIVE)
+		if (e->sources[i].state == TD_JOB_ACTIVE || e->sources[i].state == TD_JOB_SUSPENDED)
 			return &e->sources[i];
 	return NULL;
 }
@@ -68,15 +68,19 @@ bool td_media_dispatch(teder_engine *e, uint32_t slot)
 	td_request_slot *r = &e->requests[slot];
 	teder_code code = TEDER_OK;
 	size_t reservation = 0, total = 0;
-	if (r->info.operation != TEDER_OP_OPEN && r->info.operation != TEDER_OP_SEEK)
+	if (r->info.operation != TEDER_OP_OPEN && r->info.operation != TEDER_OP_SEEK &&
+	    r->info.operation != TEDER_OP_SELECT_DEVICE)
 		code = TEDER_UNSUPPORTED;
-	else if (e->status.current.epoch == UINT64_MAX ||
+	else if ((e->status.current.epoch == UINT64_MAX &&
+	          r->info.operation != TEDER_OP_SELECT_DEVICE) ||
 	         (r->info.operation == TEDER_OP_OPEN && e->last_source == UINT64_MAX)) {
 		td_complete(e, slot, TEDER_LIMIT);
 		td_limit_close(e);
 		return false;
 	} else if (r->media.flags & TEDER_OPEN_AUTOPLAY && e->status.output_state != TEDER_OUTPUT_READY)
 		code = TEDER_BAD_STATE;
+	else if (r->media.flags & TEDER_OPEN_AUTOPLAY)
+		code = TEDER_UNSUPPORTED; /* actual playback is not implemented yet */
 	else
 		code = td_source_plan(r->input_bytes, TD_CODEC_BYTES, &reservation);
 	if (code == TEDER_OK &&
@@ -90,6 +94,8 @@ bool td_media_dispatch(teder_engine *e, uint32_t slot)
 		td_source_job *j = &e->sources[i];
 		if (j->state != TD_JOB_FREE)
 			continue;
+		if (r->info.operation == TEDER_OP_OPEN)
+			r->media.target = e->status.current;
 		j->slot = slot;
 		j->request = r->info.request;
 		j->path_bytes = r->input_bytes;
@@ -121,9 +127,14 @@ void td_prepare_run(teder_engine *e)
 				abort();
 			continue;
 		}
+		td_unlock(e);
+		td_media_checkpoint(e, j->request, TD_PREPARE_JOB);
+		td_lock(e);
+		closing = atomic_load(&e->lifecycle) != TEDER_LIVE;
 		td_request_slot *r = &e->requests[j->slot];
-		bool seek = r->info.operation == TEDER_OP_SEEK;
-		td_source_config c = {.generation = e->status.current.epoch + 1,
+		bool selected = r->info.operation == TEDER_OP_SELECT_DEVICE;
+		bool seek = r->info.operation == TEDER_OP_SEEK || selected;
+		td_source_config c = {.generation = r->media.target.epoch + (selected ? 0 : 1),
 		                      .source = seek ? r->media.target.source : e->last_source + 1,
 		                      .track = seek ? e->status.track : r->media.track,
 		                      .output_rate = e->status.output_rate,
@@ -179,15 +190,17 @@ static void prepared(teder_engine *e, td_source_job *j)
 	td_lock(e);
 	td_request_slot *r = &e->requests[slot];
 	teder_code code = j->outcome;
-	bool seek = r->info.operation == TEDER_OP_SEEK;
-	if (code == TEDER_OK && (j->source->generation.generation != e->status.current.epoch + 1 ||
-	                         (seek && (r->media.target.epoch != e->status.current.epoch ||
-	                                   r->media.target.source != e->status.current.source))))
+	bool selected = r->info.operation == TEDER_OP_SELECT_DEVICE;
+	bool seek = r->info.operation == TEDER_OP_SEEK || selected;
+	if (code == TEDER_OK &&
+	    (j->source->generation.generation != e->status.current.epoch + (selected ? 0 : 1) ||
+	     (seek && (r->media.target.epoch != e->status.current.epoch ||
+	               r->media.target.source != e->status.current.source))))
 		code = TEDER_STALE;
 	if (code == TEDER_OK && r->media.flags & TEDER_OPEN_AUTOPLAY &&
 	    e->status.output_state != TEDER_OUTPUT_READY)
 		code = TEDER_BAD_STATE;
-	if (code == TEDER_OK)
+	if (code == TEDER_OK && !selected)
 		code = td_commit_locked(e, slot);
 	if (code == TEDER_OK) {
 		td_source_job *old = active(e);
@@ -208,7 +221,9 @@ static void prepared(teder_engine *e, td_source_job *j)
 		    (s->info.duration_known ? TEDER_DURATION_KNOWN : 0) | (s->done ? TEDER_DECODE_EOF : 0);
 		e->status.position_quality = TEDER_QUALITY_UNKNOWN;
 		e->status.last_error = TEDER_OK;
-		if (!seek || e->status.transport == TEDER_FAILED || e->status.transport == TEDER_ENDED)
+		if (selected)
+			e->status.transport = TEDER_PAUSED;
+		else if (!seek || e->status.transport == TEDER_FAILED || e->status.transport == TEDER_ENDED)
 			e->status.transport =
 			    r->media.flags & TEDER_OPEN_AUTOPLAY ? TEDER_PLAYING : TEDER_READY;
 		e->status.next_source = e->status.next_track = 0;
@@ -229,6 +244,11 @@ static void prepared(teder_engine *e, td_source_job *j)
 	} else if (!retire(e, j))
 		abort(); /* uncommitted source has no PCM references */
 	td_lock(e);
+	if (selected && code != TEDER_OK) {
+		e->status.transport =
+		    e->status.output_state == TEDER_OUTPUT_READY ? TEDER_FAILED : TEDER_PAUSED;
+		e->status.last_error = code;
+	}
 	td_complete(e, slot, code);
 	td_unlock(e);
 }
@@ -257,7 +277,7 @@ bool td_decode_step(teder_engine *e)
 	td_lock(e);
 	td_source_job *j = active(e);
 	td_unlock(e);
-	if (!j || j->source->error != TEDER_OK || j->source->done)
+	if (!j || j->state == TD_JOB_SUSPENDED || j->source->error != TEDER_OK || j->source->done)
 		return progress;
 	td_source *s = j->source;
 	if (s->slot == TD_PCM_NONE && !e->pcm.free_count)
@@ -290,4 +310,48 @@ void td_sources_close(teder_engine *e)
 	for (unsigned i = 0; i < TD_SOURCE_JOBS; i++)
 		if (e->sources[i].state != TD_JOB_FREE && !retire(e, &e->sources[i]))
 			abort();
+}
+
+/* The lifecycle owner has joined the native consumer. Return old generations
+ * through the existing queues; do not reset live cursors or reuse descriptors. */
+void td_sources_suspend(teder_engine *e, uint64_t epoch)
+{
+	for (unsigned i = 0; i < TD_SOURCE_JOBS; i++) {
+		td_source_job *j = &e->sources[i];
+		td_lock(e);
+		if (j->state == TD_JOB_ACTIVE)
+			j->state = TD_JOB_SUSPENDED;
+		bool owned = j->state == TD_JOB_SUSPENDED || j->state == TD_JOB_RETIRING;
+		td_unlock(e);
+		if (owned && j->source->slot != TD_PCM_NONE) {
+			if (td_pcm_abort(&e->pcm, j->source->slot) != TEDER_OK)
+				abort();
+			j->source->slot = TD_PCM_NONE;
+		}
+	}
+	td_pcm_view unused;
+	if (td_pcm_select(&e->pcm, epoch) != TEDER_OK || td_pcm_peek(&e->pcm, &unused) != TEDER_AGAIN)
+		abort();
+	td_pcm_reap(&e->pcm);
+}
+
+void td_media_retarget(teder_engine *e, uint32_t slot)
+{
+	td_lock(e);
+	td_source_job *old = active(e);
+	td_request_slot *r = &e->requests[slot];
+	/* The device open has finished borrowing the copied key. Reuse this bounded
+	 * slot for the retained source path until preparation returns. */
+	memcpy(r->input, old->source->path, old->path_bytes);
+	r->input_bytes = old->path_bytes;
+	r->media.target = e->status.current;
+	r->media.frame = e->status.source_frame;
+	bool dispatched = td_media_dispatch(e, slot);
+	if (!dispatched) {
+		e->status.transport = TEDER_FAILED;
+		e->status.last_error = r->info.outcome;
+	}
+	td_unlock(e);
+	if (dispatched)
+		td_prepare_signal(e);
 }

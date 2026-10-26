@@ -299,7 +299,34 @@ context. A native allocator failure discards that context before retry.
 Cancellation before commitment discards the result; a racing commitment can win.
 A blocked native operation keeps cancellation/close pending until it returns;
 the UI thread does not join it. No device is selected or started by enumeration.
-`teder_select_device` remains an unimplemented declaration in this checkpoint.
+### Device selection (implemented)
+
+Submit `teder_select_device(engine, key, bytes, &request)`. NULL/zero selects the
+current default; otherwise pass the complete key from this engine's enumeration.
+The call copies the key, so its result or caller buffer may be released afterward.
+Use the same terminal/outcome/ack sequence as enumeration; selection has no result.
+It claims the single media-mutation slot until source preparation finishes.
+
+Malformed/foreign keys, device-arena budget rejection and cancellation before
+commitment preserve the previous output and epoch. Key validation precedes native
+access. Device-arena reservation temporarily overlaps the previous device's
+reservation. Native teardown ends old callback borrows before advancing the epoch,
+returning obsolete PCM, clearing successor intent and opening the requested output.
+The outcome includes the committed target even when native opening fails.
+Such failure leaves output LOST with no hidden fallback. Cancellation after
+commitment does not roll back the switch; close still waits for native/worker exit.
+
+Success reports backend, negotiated stereo-float rate/channels and nominal period.
+Latency remains unknown. The stream is initialized but stopped. With a retained
+source, preparation reopens it at the saved source-frame position and new rate;
+source ID and track label are preserved, transport becomes PAUSED. Preparation
+still needs a source reservation alongside the retained source. Its failure leaves
+the output READY and source FAILED; retry select, seek or open explicitly.
+
+This checkpoint does not start playback. AUTOPLAY returns UNSUPPORTED when output
+is READY, and BAD_STATE otherwise. Build capability bits remain unchanged.
+A selected context's native allocator failure during enumeration closes its
+device/context, advances epoch and pauses the source. Explicit selection recovers.
 
 ### Analysis and rendering (planned)
 

@@ -10,9 +10,12 @@ The [installed C consumer](../tests/consumer/main.c) exercises this sequence.
 
 Status exposes source rate, channels, duration and the pending `media_request`.
 With no device, READY means prepared audio; decoding does not advance position.
-Device output, submitted/audible clocks and transport are not implemented yet. AUTOPLAY
-fails BAD_STATE without an output device. Prepared PCM currently keeps the native
-sample rate; a later selected device determines conversion rate.
+Device selection determines conversion rate; without a selected output, PCM keeps
+the source rate. Selection rebuilds a retained source at its saved source-frame
+position and leaves it PAUSED. Device-open failure leaves it paused with output
+LOST; source rebuilding failure leaves output READY and transport FAILED. A new
+select, seek or open can recover. Playback, clocks and transport controls are
+not implemented yet. AUTOPLAY returns BAD_STATE without output, otherwise UNSUPPORTED.
 
 Three fixed engine job records bound active, staged and retiring sources together.
 Each source reserves its arena plus an 8 MiB codec cap before construction.

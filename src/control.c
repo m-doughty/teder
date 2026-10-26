@@ -116,6 +116,11 @@ static void control(teder_engine *e)
 		td_request_slot *s = &e->requests[slot];
 		s->info.state = TEDER_RUNNING;
 		bool cancel = s->cancelled || atomic_load(&e->lifecycle) != TEDER_LIVE;
+		if (!cancel && !e->runtime.execute && s->info.operation == TEDER_OP_SELECT_DEVICE) {
+			td_unlock(e);
+			td_output_select(e, slot);
+			continue;
+		}
 		if (!cancel && !e->runtime.execute && s->info.operation != TEDER_OP_DEVICES) {
 			bool dispatched = td_media_dispatch(e, slot);
 			td_unlock(e);

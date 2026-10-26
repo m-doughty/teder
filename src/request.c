@@ -54,7 +54,8 @@ static teder_code submit(teder_engine *e,
 				goto done;
 			}
 			for (unsigned i = 0; i < TD_SOURCE_JOBS; i++)
-				if (e->sources[i].state == TD_JOB_ACTIVE) {
+				if (e->sources[i].state == TD_JOB_ACTIVE ||
+				    e->sources[i].state == TD_JOB_SUSPENDED) {
 					input = e->sources[i].source->path;
 					bytes = e->sources[i].path_bytes;
 					break;
