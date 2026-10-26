@@ -136,6 +136,21 @@ tests supply coherent configuration by value; they do not certify future control
 publication, native device stop, hardware deadlines, public underrun classification
 or audible output. Missing frames are raw unavailable PCM, including after EOF.
 
+## Backend context ownership
+
+`-R '^backend\.'` selects context snapshots, key validation, allocation failures,
+concurrent heap/realloc accounting and failed-context cleanup. Synthetic enumeration
+covers all four ID formats, maximum key lengths, 128-output capacity, malformed
+data and results surviving context destruction. The Windows unwind case compares
+exact process handle counts after warming OS caches; upstream 0.11.25 leaked one
+log handle per rejected context.
+
+Run `build/bin/teder_test_backend native` separately for actual context/enumeration
+and fail-at-N context allocation checks. It fails if no native backend is available.
+Linux needs the ALSA or PulseAudio runtime library; Ubuntu packages are
+`libasound2t64` and `libpulse0`. A headless ALSA context may enumerate zero devices.
+This is context/enumeration evidence, not playback or native callback-stop evidence.
+
 ## Linux ThreadSanitizer in Docker
 
 From the package root, run `python tools/run-tsan-docker.py` with Python 3 and

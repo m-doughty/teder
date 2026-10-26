@@ -37,6 +37,10 @@ silence filling. It borrows the existing pool and allocates nothing. Tests cover
 variable requests and concurrent production; native device wiring and audible
 playback are not implemented yet. No additional public function is available yet.
 
+Backend contexts now have a private owner and bounded allocator. Enumeration
+copies up to 128 outputs into detached results, with engine-scoped opaque keys.
+This foundation does not open devices or implement the public device requests yet.
+
 The private libFLAC build routes codec allocations through a bounded worker-owned
 budget. The source owns one arena for its wrapper, path, frame scratch and converter.
 Tests cover decoding, staged seeking, conversion, cancellation and resource retirement.

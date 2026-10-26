@@ -22,6 +22,14 @@ disabled. Only WASAPI, CoreAudio, or ALSA/PulseAudio are compiled for the target
 OS; null-device fallback is disabled. OS APIs/libraries retain their own heap
 ownership. No miniaudio structs cross the public ABI.
 
+`cmake/Miniaudio.cmake` applies reviewed context-failure cleanup fixes to a
+generated copy of the pinned header. It verifies the original header hash and
+patch anchors; downloaded sources stay unchanged. The fixes release the internal
+log and backend APIs on failed initialization, unwind context mutex stages, and
+release WASAPI/ALSA/PulseAudio libraries on their early failure paths.
+`backend.unwind` checks the reproduced Windows handle leak; allocator and native
+enumeration tests cover the context owner.
+
 libFLAC serves both playback decoding and metadata probing. This avoids a second
 FLAC decoder and keeps frame/error/metadata handling in the maintained codec.
 Ogg, tools, examples, C++ wrappers and encoder multithreading are disabled.
@@ -44,6 +52,10 @@ a blocked OS read is not forcibly interruptible by the codec.
 - miniaudio has allocator callbacks with caller data. Its data converter also
   has size-query/preallocated initialization. Device/context addresses and
   allocator context must remain stable through their final uninitialization.
+  The private backend owner now groups context and bounded enumeration scratch
+  in one arena. Its concurrent allocator charges headers and realloc overlap
+  against a reserved cap. Native OS/library allocations remain dependency-owned;
+  this cap covers requests through miniaudio's allocator callbacks.
 - libFLAC has no public allocator callbacks. `stream_decoder_new` performs
   checked allocations and unwinds partial construction; `stream_decoder_delete`
   calls finish and releases decoder-owned storage. Use those APIs, never free

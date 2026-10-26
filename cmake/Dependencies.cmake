@@ -15,8 +15,9 @@ FetchContent_Declare(teder_kissfft_source
 	DOWNLOAD_EXTRACT_TIMESTAMP FALSE SOURCE_SUBDIR teder-unused)
 FetchContent_MakeAvailable(teder_miniaudio_source teder_flac_source teder_kissfft_source)
 
-add_library(teder_miniaudio OBJECT "${teder_miniaudio_source_SOURCE_DIR}/miniaudio.c")
-target_include_directories(teder_miniaudio PUBLIC "${teder_miniaudio_source_SOURCE_DIR}")
+include(cmake/Miniaudio.cmake)
+add_library(teder_miniaudio OBJECT "${teder_ma_patched}/miniaudio.c")
+target_include_directories(teder_miniaudio PUBLIC "${teder_ma_patched}")
 target_compile_definitions(teder_miniaudio PUBLIC MA_NO_DECODING MA_NO_ENCODING
 	MA_NO_ENGINE MA_NO_NODE_GRAPH MA_NO_RESOURCE_MANAGER MA_ENABLE_ONLY_SPECIFIC_BACKENDS)
 if(WIN32)
