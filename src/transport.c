@@ -100,8 +100,10 @@ void td_transport(teder_engine *e, uint32_t slot)
 			code = applied(e, revision);
 		}
 	} else if (play) {
+		e->prefill = true;
 		while (td_decode_pump(e))
 			;
+		e->prefill = false;
 		bool empty = false;
 		for (unsigned i = 0; i < TD_SOURCE_JOBS; i++)
 			if (e->sources[i].state == TD_JOB_ACTIVE) {
@@ -109,6 +111,10 @@ void td_transport(teder_engine *e, uint32_t slot)
 				code = s->error;
 				empty = s->done && !s->output;
 			}
+		if (e->status.transport == TEDER_FAILED)
+			code = e->status.last_error;
+		if (e->status.next_state == TEDER_NEXT_COMMITTED)
+			empty = false;
 		if (code == TEDER_OK && !empty)
 			code = td_output_start(e);
 		if (code == TEDER_OK && empty) {

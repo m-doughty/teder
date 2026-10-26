@@ -184,6 +184,7 @@ struct teder_engine {
 	td_thread refill_thread;
 	td_source_job sources[TD_SOURCE_JOBS];
 	uint64_t last_source;
+	bool prefill;        /* exclusive producer: PLAY may commit a ready successor */
 	td_backend *backend; /* lifecycle worker only; context outlives devices */
 	size_t backend_reservation;
 	td_device *device;
@@ -235,6 +236,8 @@ teder_code td_successor_check(teder_engine *, const td_media_input *, bool prepa
 teder_code td_successor_ready(teder_engine *, td_source_job *);
 void td_successor_clear(teder_engine *, uint32_t slot);
 void td_successor_drop(teder_engine *, bool adopted);
+bool td_transition_pump(teder_engine *, td_source_job *);
+bool td_transition_report(teder_engine *, const td_device_report *, teder_event *); /* gate held */
 teder_code td_successor_publish(void *, td_pcm_pool *, uint32_t, const td_pcm_meta *);
 teder_code td_output_quiesce(teder_engine *); /* control, producer already paused */
 teder_code td_output_start(teder_engine *);

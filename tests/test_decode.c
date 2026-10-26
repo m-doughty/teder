@@ -713,6 +713,7 @@ START_TEST(next_failures)
 	teder_engine *e = with_next(&c, true);
 	done(e, prepare(e, FIXTURE_DIR "/missing.flac", 88), TEDER_IO);
 	done(e, prepare(e, FIXTURE_DIR "/track-a.pcm", 88), TEDER_UNSUPPORTED);
+	done(e, prepare(e, FIXTURE_DIR "/mono-24.flac", 88), TEDER_UNSUPPORTED);
 	td_lock(e);
 	e->config.engine_bytes_limit = e->owned_bytes;
 	td_unlock(e);

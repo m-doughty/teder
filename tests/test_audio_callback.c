@@ -105,7 +105,7 @@ static teder_code render(td_pcm_pool *pool,
                          td_audio_result *result)
 {
 	in_callback = true;
-	teder_code code = td_audio_render(pool, config, out, capacity, frames, result);
+	teder_code code = td_audio_render(pool, config, out, capacity, frames, 0, result);
 	in_callback = false;
 	return code;
 }
@@ -137,7 +137,7 @@ START_TEST(samples)
 	td_audio_config config = {1, 1, 1, 0};
 	output(&f, config, 5, 0, 0, 1);
 	publish(&f, g, 7, 0, TD_PCM_DISCONTINUITY);
-	publish(&f, g, 3, 7, TD_PCM_FINAL);
+	publish(&f, g, 3, 7, 0);
 	publish(&f, g, 5, 10, TD_PCM_BOUNDARY | TD_PCM_FINAL);
 	ck_assert(td_pcm_retire(&g) == TEDER_BUSY && g->references == 3);
 
@@ -379,6 +379,46 @@ START_TEST(concurrent)
 }
 END_TEST
 
+START_TEST(boundaries)
+{
+	fixture f = {0};
+	init(&f);
+	td_pcm_generation *a = generation(&f, 1), *b = generation(&f, 1), *c = generation(&f, 1);
+	b->source = 2;
+	c->source = 3;
+	atomic_store(&a->end, TD_END_LINKED);
+	atomic_store(&b->end, TD_END_LINKED);
+	publish(&f, a, 2, 0, TD_PCM_FINAL);
+	uint32_t slot;
+	OK(td_pcm_acquire(&f.pool, b, &slot));
+	td_pcm_meta marker = {.flags = TD_PCM_EMPTY};
+	ck_assert(td_pcm_publish(&f.pool, slot, &marker) == TEDER_INVALID);
+	marker.flags |= TD_PCM_FINAL | TD_PCM_BOUNDARY;
+	OK(td_pcm_publish(&f.pool, slot, &marker));
+	publish(&f, c, 3, 2, TD_PCM_FINAL);
+	float pcm[16];
+	td_audio_result result;
+	in_callback = true;
+	OK(td_audio_render(&f.pool, (td_audio_config){1, 1, 1, 0}, pcm, 16, 8, 10, &result));
+	in_callback = false;
+	ck_assert(result.source == 3 && result.source_frame == 5 && result.pcm_frames == 5 &&
+	          result.final && result.missing_frames == 3);
+	for (unsigned i = 0; i < 8; i++) {
+		float expected = i < 5 ? (float)(i + 1) : 0;
+		ck_assert(pcm[2 * i] == expected && pcm[2 * i + 1] == -expected);
+	}
+	ck_assert(atomic_load(&a->first_output) == 10 && atomic_load(&b->first_output) == 12 &&
+	          atomic_load(&c->first_output) == 12 && atomic_load(&c->end) == TD_END_CLOSED);
+	unsigned open = TD_END_OPEN;
+	ck_assert(!atomic_compare_exchange_strong(&c->end, &open, TD_END_LINKED));
+	ck_assert(td_pcm_reap(&f.pool) == 3);
+	OK(td_pcm_retire(&a));
+	OK(td_pcm_retire(&b));
+	OK(td_pcm_retire(&c));
+	uninit(&f);
+}
+END_TEST
+
 int main(int argc, char **argv)
 {
 	if (argc != 2)
@@ -394,6 +434,8 @@ int main(int argc, char **argv)
 		test = positions;
 	else if (!strcmp(argv[1], "bounds"))
 		test = bounds;
+	else if (!strcmp(argv[1], "boundaries"))
+		test = boundaries;
 	else if (!strcmp(argv[1], "concurrent"))
 		test = concurrent;
 	else

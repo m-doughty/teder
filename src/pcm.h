@@ -7,13 +7,17 @@
 _Static_assert(ATOMIC_INT_LOCK_FREE == 2 && UINT_MAX == UINT32_MAX,
                "PCM requires lock-free 32-bit unsigned atomics");
 
+_Static_assert(ATOMIC_LONG_LOCK_FREE == 2 && ATOMIC_LLONG_LOCK_FREE == 2,
+               "Boundary timestamps require lock-free 64-bit atomics");
 enum { TD_PCM_BLOCK_FRAMES = 1024 };
 
 #define TD_PCM_NONE UINT32_MAX
 
 enum { TD_PCM_FREE, TD_PCM_FILLING, TD_PCM_PUBLISHED, TD_PCM_READING, TD_PCM_RETURNED };
 
-enum { TD_PCM_DISCONTINUITY = 1, TD_PCM_BOUNDARY = 2, TD_PCM_FINAL = 4 };
+enum { TD_PCM_DISCONTINUITY = 1, TD_PCM_BOUNDARY = 2, TD_PCM_FINAL = 4, TD_PCM_EMPTY = 8 };
+
+enum { TD_END_OPEN, TD_END_LINKED, TD_END_CLOSED };
 
 /* One descriptor allocated inside each source arena. Retire owns that entire
  * arena, including deferred dependency destructors. Identities are immutable.
@@ -22,6 +26,9 @@ enum { TD_PCM_DISCONTINUITY = 1, TD_PCM_BOUNDARY = 2, TD_PCM_FINAL = 4 };
 typedef struct {
 	td_arena *arena;
 	uint64_t generation, source, track;
+	atomic_uint end; /* producer links; consumer closes the source cutoff */
+	atomic_uint_fast64_t
+	    first_output; /* first submission; matching report source proves validity */
 	uint32_t references;
 	bool retiring;
 } td_pcm_generation;
@@ -82,11 +89,13 @@ teder_code td_pcm_abort(td_pcm_pool *, uint32_t slot);
 uint32_t td_pcm_reap(td_pcm_pool *);
 /* Consumer-only. Select at a callback boundary after prior view use ends.
  * Views end on consume/select/stop/next peek; never retain one across a call.
+ * EMPTY markers have zero frames and must be returned with consume(0).
  * Peek skips older generations, holds newer ones, and visits at most count
  * blocks. Output is unchanged on error. No callback operation frees or locks. */
 teder_code td_pcm_select(td_pcm_pool *, uint64_t generation);
 teder_code td_pcm_peek(td_pcm_pool *, td_pcm_view *);
 teder_code td_pcm_consume(td_pcm_pool *, uint32_t frames);
+bool td_pcm_mark(td_pcm_pool *, uint64_t output_frame, bool final); /* valid consumer view */
 teder_code
 td_pcm_stop(td_pcm_pool *); /* returns CLOSED once currently queued blocks are returned */
 /* Exclusive final cleanup after BOTH roles and all view users are joined or

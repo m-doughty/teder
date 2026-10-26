@@ -148,6 +148,7 @@ void td_prepare_run(teder_engine *e)
 		                      .track = seek ? e->status.track : r->media.track,
 		                      .output_rate = e->status.output_rate,
 		                      .codec_bytes = TD_CODEC_BYTES,
+		                      .boundaries = true,
 		                      .reservation = j->reservation,
 		                      .cancel = &j->cancel,
 		                      .lifecycle = &e->lifecycle,
@@ -339,16 +340,20 @@ bool td_decode_pump(teder_engine *e)
 	td_lock(e);
 	td_source_job *j = active(e);
 	td_unlock(e);
-	if (!j || j->state == TD_JOB_SUSPENDED || j->source->error != TEDER_OK || j->source->done)
+	if (!j || j->state == TD_JOB_SUSPENDED || j->source->error != TEDER_OK)
 		return false;
+	if (j->source->done && j->source->published)
+		return td_transition_pump(e, j);
 	td_source *s = j->source;
 	if (s->slot == TD_PCM_NONE && !e->pcm.free_count)
 		return false;
 	teder_code code = td_source_pump(s, &e->pcm);
 	td_lock(e);
 	e->status.duration_frames = s->info.duration_frames;
-	e->status.clock_flags =
-	    (s->info.duration_known ? TEDER_DURATION_KNOWN : 0) | (s->done ? TEDER_DECODE_EOF : 0);
+	/* A staged EOF seek may complete before its empty marker is published. */
+	e->status.clock_flags = (e->status.clock_flags & TEDER_SUBMIT_EOF) |
+	                        (s->info.duration_known ? TEDER_DURATION_KNOWN : 0) |
+	                        (s->done ? TEDER_DECODE_EOF : 0);
 	bool failed = code < 0 && code != TEDER_CLOSED && atomic_load(&e->lifecycle) == TEDER_LIVE;
 	if (failed) {
 		e->status.transport = TEDER_FAILED;

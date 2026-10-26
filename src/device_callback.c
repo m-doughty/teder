@@ -25,9 +25,16 @@ void td_device_callback(ma_device *device, void *output, const void *input, ma_u
 	memcpy(&config.gain, &bits, sizeof(bits));
 	config.mute = (uint32_t)(feed->applied >> 32) & 1;
 	config.enabled = (uint32_t)(feed->applied >> 33) & 1;
+	if (feed->report.final)
+		config.enabled = 0;
 	td_audio_result result;
-	teder_code code =
-	    td_audio_render(feed->pool, config, output, (size_t)frames * 2, frames, &result);
+	teder_code code = td_audio_render(feed->pool,
+	                                  config,
+	                                  output,
+	                                  (size_t)frames * 2,
+	                                  frames,
+	                                  feed->report.output_frames,
+	                                  &result);
 	if (code == TEDER_OK && feed->report.error == TEDER_OK && config.enabled &&
 	    !feed->report.final) {
 		/* Intentional pause/EOF silence is outside the playback clock. A short
@@ -39,7 +46,7 @@ void td_device_callback(ma_device *device, void *output, const void *input, ma_u
 			code = TEDER_LIMIT;
 		feed->report.output_frames = add(feed->report.output_frames, submitted);
 		feed->report.underrun_frames = add(feed->report.underrun_frames, missing);
-		if (result.pcm_frames) {
+		if (result.source) {
 			feed->report.source = result.source;
 			feed->report.track = result.track;
 			feed->report.source_frame = result.source_frame;

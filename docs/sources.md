@@ -55,6 +55,8 @@ at EOF, retaining exactly `ceil(remaining_source_frames * output_rate / source_r
 frames. This is the defined conversion reference, not a claim of exact frequency-
 independent filter delay. Source ranges use rational frame mapping and are estimates
 after conversion. Independent numerical vectors and chunk-size comparisons test it.
+Matching-source transitions concatenate these per-source converted outputs.
+Changes of source format are not implemented yet.
 
 Paths are absolute UTF-8 without NUL, at most 32767 bytes. Windows accepts drive
 and ordinary UNC paths, converted losslessly to UTF-16; device/extended namespace
@@ -99,8 +101,8 @@ Close waits for blocked operations, joins preparation and refill, quiesces consu
 clears PCM and retires all sources before CLOSED. The callback publishes a bounded
 atomic report; the producer observes final PCM submission and changes transport
 to ENDED with SUBMIT_EOF. Output continues with silence until close or replacement,
-so the final native buffer is not cut off. Empty validated input ends without
-starting output. Public underruns exclude pause/EOF silence. Source positions
+so the final native buffer is not cut off. Empty validated input without a committed
+successor ends without starting output. Public underruns exclude pause/EOF silence. Source positions
 advance only through consumed PCM; conversion reports estimated positions. Hardware
 latency remains unknown, so no estimated audible-end flag is published.
 
@@ -150,9 +152,49 @@ Playback failure or EOF discards an uncommitted ready successor. EMPTY/ENDED/FAI
 reject preparation with BAD_STATE. EOF during preparation completes it TOO_LATE.
 Close joins preparation and playback before freeing their source arenas.
 
-Readiness alone currently does not start the next track. Automatic
-splicing and transition reporting are not implemented yet. Their ownership hook is already implemented:
-the first successor PCM publication changes READY to COMMITTED. Replacement or
-clear that loses to publication returns TOO_LATE, and published PCM pins its source
-until returned and reaped. A validated empty successor may become READY but has no
-PCM to publish; its transition scheduling is also not implemented yet.
+## Gapless playback
+
+Matching sources must have the same sample rate, channel count and bit depth.
+Other source-format combinations return UNSUPPORTED during preparation, preserving
+the previous successor.
+
+Select an output, open the first track without AUTOPLAY, and prepare its successor.
+Wait for successful preparation before submitting PLAY with a fresh current target.
+For an already playing track, prepare the successor early. The producer appends
+its PCM once the current source is fully decoded. Neither event polling nor a
+host EOF callback is needed for the transition. READY remains replaceable;
+COMMITTED means successor PCM has been published and replacement/clear is TOO_LATE.
+
+The callback consumes the end of one source and the beginning of the next inside
+one output buffer when needed. It adds no overlap, fades or silence, and does not
+restart the device. Matching-rate output equals the concatenated source samples,
+including recorded leading/trailing silence. Existing per-source stereo conversion
+still applies when the device rate differs. Conversion positions remain estimates.
+
+The first submitted successor frame changes `status.current.source` and `track`,
+clears the next fields, and emits TRANSITION with both source/track identities and
+the exact submitted `output_frame`. The epoch and output clock stay continuous;
+source position and duration switch to the successor. Repeated labels/files keep
+distinct source IDs. Events may be dropped by the bounded telemetry ring; playback
+and current status continue independently. The public API retains one successor.
+
+Empty sources use a zero-frame boundary marker. An empty successor advances
+identity at the preceding source's endpoint without adding a sample. An empty
+first source can lead into a prepared successor through PLAY. An isolated empty
+source still ends without starting output. Callback marker processing is bounded
+by the PCM pool size.
+
+Prepare early enough to queue sufficient PCM before the native boundary. At least
+two PCM blocks are needed to queue both sides; the default pool has 64. Smaller
+pools or delayed I/O can miss the deadline even while status says READY. If the
+callback wins the EOF cutoff before successor publication, the sequence ends;
+late preparation reports TOO_LATE, and a losing publication reports an ERROR
+with TOO_LATE instead of starting another track. A linked but starved stream
+reports underruns and initialized silence. It cannot report that silence as media.
+
+A decode error before adoption discards the successor and preserves current audio.
+After adoption, a decode error fails the stream and quiesces output. Published PCM
+continues to pin its source until returned and reaped. Seek/stop/load/device changes
+flush through the existing quiescence protocol. Final sequence submission sets
+ENDED/SUBMIT_EOF; hardware latency remains unknown, so this is not an audible-end
+measurement. Empty-marker publication preserves an already completed EOF seek.

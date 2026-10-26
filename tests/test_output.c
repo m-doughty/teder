@@ -33,7 +33,7 @@ typedef struct {
 	atomic_uint point;
 	unsigned opened, closed, enumerated;
 	bool reject, enum_error, device_error;
-	unsigned devices, releases, starts;
+	unsigned devices, releases, starts, stops;
 	void *native_heap;
 #ifdef _WIN32
 	DWORD caller, owner;
@@ -161,6 +161,7 @@ static ma_result device_stop(ma_device *d)
 {
 	fixture *f = d->pContext->pUserData;
 	owner(f);
+	f->stops++;
 	hit(f, 11);
 	if (f->fail_stop)
 		return MA_ERROR;
@@ -267,6 +268,10 @@ static void checkpoint(void *p, uint64_t request, unsigned point)
 		hit(p, 14);
 	if (point == TD_REFILL_PUMP)
 		hit(p, 15);
+	if (point == TD_NEXT_BEFORE_PUBLISH)
+		hit(p, 16);
+	if (point == TD_NEXT_AFTER_PUBLISH)
+		hit(p, 17);
 }
 
 static void init(fixture *f)
@@ -1431,10 +1436,12 @@ START_TEST(seek_states)
 			}
 		}
 		outcome(e, seek_frame(e, 16), TEDER_OK);
+		idle(&f, e); /* include deferred empty-marker publication before checking EOF */
 		s = status(e);
 		ck_assert(s.transport == TEDER_ENDED && s.source_frame == 16 &&
 		          s.clock_flags == (TEDER_DURATION_KNOWN | TEDER_DECODE_EOF | TEDER_SUBMIT_EOF));
 		ck_assert(!f.worker);
+		th_gate_release(&f.gate);
 		close_engine(&e);
 		dispose(&f);
 	}
@@ -2010,6 +2017,223 @@ START_TEST(next_states)
 }
 END_TEST
 
+#define GAP_A OUTPUT_DIR "/gapless-a.flac"
+#define GAP_B OUTPUT_DIR "/gapless-b.flac"
+
+static void gap_load(teder_engine *e, const char *path)
+{
+	uint64_t id;
+	teder_code code;
+	RETRY(code, teder_open(e, path, (uint32_t)strlen(path), 77, 0, &id));
+	OK(code);
+	outcome(e, id, TEDER_OK);
+}
+
+static void gap_prepare(teder_engine *e, const char *path)
+{
+	teder_status s = status(e);
+	uint64_t id;
+	teder_code code;
+	RETRY(code,
+	      teder_prepare_next(e, &s.current, s.next_source, path, (uint32_t)strlen(path), 77, &id));
+	OK(code);
+	outcome(e, id, TEDER_OK);
+}
+
+static void gap_event(teder_engine *e, uint64_t from, uint64_t to, uint64_t frame)
+{
+	teder_event event = INIT(teder_event);
+	for (;;) {
+		teder_code code = teder_event_poll(e, &event);
+		ck_assert(code == TEDER_OK || code == TEDER_AGAIN);
+		if (code == TEDER_OK && event.kind == TEDER_EVENT_TRANSITION)
+			break;
+		th_yield();
+	}
+	ck_assert(event.epoch == 3 && event.from_source == from && event.to_source == to &&
+	          event.from_track == 77 && event.to_track == 77 && event.output_frame == frame &&
+	          event.code == TEDER_OK);
+}
+
+static void gap_samples(fixture *f, unsigned offset, unsigned frames)
+{
+	for (unsigned i = 0; i < frames; i++) {
+		float expected = i == 0 || i + 1 == frames ? 0 : ((int32_t)(i % 2048) - 1024) / 32768.0f;
+		ck_assert(f->capture[2 * (offset + i)] == expected &&
+		          f->capture[2 * (offset + i) + 1] == -expected);
+	}
+}
+
+START_TEST(gapless_pairs)
+{
+	const unsigned lengths[][2] = {{16, 16}, {1, 1}, {0, 1}, {1, 0}, {0, 0}, {1031, 513}};
+	const unsigned chunks[] = {1, 7, 31, 257};
+	for (unsigned pair = 0; pair < 6; pair++)
+		for (unsigned chunk = 0; chunk < 4; chunk++) {
+			unsigned a = lengths[pair][0], b = lengths[pair][1];
+			th_make_track_samples(GAP_A, a, true);
+			th_make_track_samples(GAP_B, b, true);
+			fixture f;
+			init(&f);
+			f.manual = true;
+			teder_config config = INIT(teder_config);
+			config.pcm_frames = 4096;
+			teder_engine *e = create(&f, config, false);
+			outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
+			gap_load(e, GAP_A);
+			gap_prepare(e, GAP_B);
+			ck_assert(status(e).next_state == TEDER_NEXT_READY);
+			outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
+			ck_assert(status(e).next_state == TEDER_NEXT_COMMITTED);
+			do {
+				step(&f, chunks[chunk]);
+			} while (atomic_load(&f.captured) < a + b);
+			/* A trailing empty marker may follow an exactly full callback. */
+			if (!b)
+				step(&f, 1);
+			teder_status s;
+			do {
+				s = status(e);
+				th_yield();
+			} while (s.transport != TEDER_ENDED);
+			ck_assert(s.current.epoch == 3 && s.current.source == 2 && s.track == 77 &&
+			          s.source_frame == b && s.duration_frames == b && s.output_frame == a + b &&
+			          !s.underrun_frames && !s.next_source && s.next_state == TEDER_NEXT_NONE &&
+			          (s.clock_flags & TEDER_SUBMIT_EOF) && s.last_error == TEDER_OK);
+			ck_assert(atomic_load(&f.captured) == a + b && f.starts == 1 && !f.stops &&
+			          !f.releases);
+			gap_samples(&f, 0, a);
+			gap_samples(&f, a, b);
+			gap_event(e, 1, 2, a);
+			step(&f, 31);
+			ck_assert(status(e).output_frame == a + b && atomic_load(&f.captured) == a + b);
+			close_engine(&e);
+			dispose(&f);
+		}
+}
+END_TEST
+
+START_TEST(gapless_repeat)
+{
+	th_make_track_samples(GAP_A, 512, true);
+	th_make_track_samples(GAP_B, 32, true);
+	fixture f;
+	init(&f);
+	f.manual = true;
+	teder_config config = INIT(teder_config);
+	config.pcm_frames = 4096;
+	teder_engine *e = create(&f, config, false);
+	outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
+	gap_load(e, GAP_A);
+	gap_prepare(e, GAP_B);
+	outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
+	step(&f, 257);
+	step(&f, 256); /* consume one successor frame, leaving 31 */
+	while (status(e).current.source != 2)
+		th_yield();
+	gap_prepare(e, GAP_B); /* repeated file/label, distinct source instance */
+	while (status(e).next_state != TEDER_NEXT_COMMITTED)
+		th_yield();
+	step(&f, 100);
+	while (status(e).transport != TEDER_ENDED)
+		th_yield();
+	teder_status s = status(e);
+	ck_assert(s.current.source == 3 && s.current.epoch == 3 && s.source_frame == 32 &&
+	          s.output_frame == 576 && !s.underrun_frames && f.starts == 1 && !f.stops &&
+	          !f.releases);
+	gap_samples(&f, 0, 512);
+	gap_samples(&f, 512, 32);
+	gap_samples(&f, 544, 32);
+	gap_event(e, 1, 2, 512);
+	gap_event(e, 2, 3, 544);
+	close_engine(&e);
+	dispose(&f);
+}
+END_TEST
+
+START_TEST(gapless_cutoff)
+{
+	for (unsigned after = 0; after < 2; after++) {
+		fixture f;
+		init(&f);
+		f.manual = true;
+		teder_config config = INIT(teder_config);
+		config.pcm_frames = 4096;
+		teder_engine *e = create(&f, config, false);
+		outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
+		load_track(e);
+		outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
+		atomic_store(&f.point, after ? 17 : 16);
+		gap_prepare(e, TRACK);
+		th_gate_await(&f.gate);
+		step(&f, 17); /* native EOF wins before linking, or consumes the successor */
+		ck_assert(atomic_load(&f.captured) == (after ? 17 : 16));
+		if (after) {
+			teder_status s = status(e);
+			uint64_t rejected = 99;
+			teder_code code;
+			RETRY(code, teder_clear_next(e, &s.current, s.next_source, &rejected));
+			ck_assert(code == TEDER_TOO_LATE && !rejected);
+			OK(teder_request_close(e));
+			ck_assert(teder_destroy(&e) == TEDER_BUSY);
+		}
+		th_gate_release(&f.gate);
+		if (!after) {
+			while (status(e).transport != TEDER_ENDED)
+				th_yield();
+			teder_status s = status(e);
+			ck_assert(s.current.source == 1 && s.last_error == TEDER_TOO_LATE && !s.next_source &&
+			          s.output_frame == 16 && !s.underrun_frames);
+			teder_event event = INIT(teder_event);
+			bool late = false;
+			while (!late) {
+				teder_code code = teder_event_poll(e, &event);
+				ck_assert(code == TEDER_OK || code == TEDER_AGAIN);
+				if (code == TEDER_OK) {
+					ck_assert(event.kind != TEDER_EVENT_TRANSITION);
+					late = event.kind == TEDER_EVENT_ERROR && event.code == TEDER_TOO_LATE &&
+					       event.to_source == 2;
+				}
+			}
+		}
+		close_engine(&e);
+		dispose(&f);
+	}
+}
+END_TEST
+
+START_TEST(gapless_failures)
+{
+	for (unsigned adopted = 0; adopted < 2; adopted++) {
+		th_make_track(GAP_B, adopted ? 2048 : 512);
+		FILE *file = fopen(GAP_B, "r+b");
+		ck_assert(file && !fseek(file, -1, SEEK_END));
+		int byte = fgetc(file);
+		ck_assert(byte != EOF && !fseek(file, -1, SEEK_END));
+		ck_assert(fputc(byte ^ 1, file) != EOF && !fclose(file));
+		fixture f;
+		init(&f);
+		f.manual = true;
+		teder_config config = INIT(teder_config);
+		config.pcm_frames = 4096;
+		teder_engine *e = create(&f, config, false);
+		outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
+		load_track(e);
+		gap_prepare(e, GAP_B); /* first FLAC frame is valid; later CRC fails */
+		outcome(e, transport(e, TEDER_PLAY), adopted ? TEDER_CORRUPT : TEDER_OK);
+		if (!adopted)
+			capture_track(&f, e, 0, 16);
+		teder_status s = status(e);
+		ck_assert(s.current.source == 1 && s.last_error == TEDER_CORRUPT &&
+		          s.transport == (adopted ? TEDER_FAILED : TEDER_ENDED) &&
+		          s.next_state == (adopted ? TEDER_NEXT_COMMITTED : TEDER_NEXT_NONE) &&
+		          f.starts == (adopted ? 0 : 1));
+		close_engine(&e);
+		dispose(&f);
+	}
+}
+END_TEST
+
 int main(int argc, char **argv)
 {
 	if (argc != 2)
@@ -2065,6 +2289,14 @@ int main(int argc, char **argv)
 		test = clock_readers;
 	else if (!strcmp(argv[1], "next-states"))
 		test = next_states;
+	else if (!strcmp(argv[1], "gapless-pairs"))
+		test = gapless_pairs;
+	else if (!strcmp(argv[1], "gapless-repeat"))
+		test = gapless_repeat;
+	else if (!strcmp(argv[1], "gapless-cutoff"))
+		test = gapless_cutoff;
+	else if (!strcmp(argv[1], "gapless-failures"))
+		test = gapless_failures;
 	else if (!strcmp(argv[1], "native-select"))
 		test = native_select;
 	else if (!strcmp(argv[1], "native"))

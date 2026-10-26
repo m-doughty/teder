@@ -9,6 +9,7 @@ teder_code td_audio_render(td_pcm_pool *pool,
                            float *output,
                            size_t sample_capacity,
                            uint32_t frames,
+                           uint64_t output_frame,
                            td_audio_result *result)
 {
 	if (!result)
@@ -32,12 +33,15 @@ teder_code td_audio_render(td_pcm_pool *pool,
 		code = td_pcm_peek(pool, &view);
 		return code == TEDER_AGAIN ? TEDER_OK : code;
 	}
-	while (result->pcm_frames < frames) {
+	uint32_t empty = 0;
+	while (result->pcm_frames < frames && empty < pool->count) {
 		code = td_pcm_peek(pool, &view);
 		if (code == TEDER_AGAIN)
 			break;
 		if (code != TEDER_OK)
 			goto failed;
+		if (!view.frames)
+			empty++;
 		uint32_t count = frames - result->pcm_frames;
 		if (count > view.frames)
 			count = view.frames;
@@ -53,7 +57,13 @@ teder_code td_audio_render(td_pcm_pool *pool,
 		/* Quotient/remainder avoids overflow even for the largest valid span.
 		 * Matching rates are exact; converted block ranges are estimates. */
 		uint64_t position =
-		    view.meta->source_start + (span / length) * offset + (span % length) * offset / length;
+		    view.meta->source_start +
+		    (length ? (span / length) * offset + (span % length) * offset / length : 0);
+		if (output_frame > UINT64_MAX - result->pcm_frames) {
+			code = TEDER_LIMIT;
+			goto failed;
+		}
+		final = td_pcm_mark(pool, output_frame + result->pcm_frames, final);
 		/* No view access after consume: the producer may reclaim immediately. */
 		code = td_pcm_consume(pool, count);
 		if (code != TEDER_OK)
@@ -62,7 +72,9 @@ teder_code td_audio_render(td_pcm_pool *pool,
 		result->source = source;
 		result->track = track;
 		result->source_frame = position;
-		result->final |= final;
+		result->final = final;
+		if (final)
+			break;
 	}
 	result->missing_frames = frames - result->pcm_frames;
 	return TEDER_OK;

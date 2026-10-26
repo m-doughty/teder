@@ -67,7 +67,8 @@ teder_code td_pcm_peek(td_pcm_pool *p, td_pcm_view *out)
 			    &p->blocks[p->reading].state, TD_PCM_READING, memory_order_relaxed);
 		}
 		td_pcm_block *b = &p->blocks[p->reading];
-		if (p->stopped || b->owner->generation < p->selected || p->offset == b->meta.frames) {
+		if (p->stopped || b->owner->generation < p->selected ||
+		    (p->offset == b->meta.frames && !(b->meta.flags & TD_PCM_EMPTY))) {
 			p->offset = b->meta.frames;
 			teder_code code = return_block(p);
 			if (code != TEDER_OK)
@@ -88,7 +89,7 @@ teder_code td_pcm_peek(td_pcm_pool *p, td_pcm_view *out)
 
 teder_code td_pcm_consume(td_pcm_pool *p, uint32_t frames)
 {
-	if (!p || !frames)
+	if (!p)
 		return TEDER_INVALID;
 	if (p->closed || p->stopped)
 		return TEDER_CLOSED;
@@ -97,7 +98,7 @@ teder_code td_pcm_consume(td_pcm_pool *p, uint32_t frames)
 	td_pcm_block *b = &p->blocks[p->reading];
 	if (b->owner->generation != p->selected)
 		return TEDER_STALE;
-	if (frames > b->meta.frames - p->offset)
+	if ((!frames && !(b->meta.flags & TD_PCM_EMPTY)) || frames > b->meta.frames - p->offset)
 		return TEDER_INVALID;
 	p->offset += frames;
 	return p->offset == b->meta.frames ? return_block(p) : TEDER_OK;
@@ -110,4 +111,16 @@ teder_code td_pcm_stop(td_pcm_pool *p)
 	p->stopped = true;
 	td_pcm_view unused;
 	return td_pcm_peek(p, &unused);
+}
+
+/* Called before consume ends the borrow. Only these two atomic scalars change;
+ * identities remain immutable. One CAS orders native EOF against producer linking. */
+bool td_pcm_mark(td_pcm_pool *p, uint64_t output_frame, bool final)
+{
+	td_pcm_generation *g = p->blocks[p->reading].owner;
+	if (atomic_load_explicit(&g->first_output, memory_order_relaxed) == UINT64_MAX)
+		atomic_store_explicit(&g->first_output, output_frame, memory_order_release);
+	unsigned open = TD_END_OPEN;
+	return final &&
+	       (atomic_compare_exchange_strong(&g->end, &open, TD_END_CLOSED) || open == TD_END_CLOSED);
 }

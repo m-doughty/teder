@@ -119,8 +119,11 @@ teder_code td_pcm_publish(td_pcm_pool *p, uint32_t slot, const td_pcm_meta *meta
 	td_pcm_block *b = &p->blocks[slot];
 	if (atomic_load_explicit(&b->state, memory_order_relaxed) != TD_PCM_FILLING)
 		return TEDER_BAD_STATE;
-	if (!meta->frames || meta->frames > b->capacity ||
-	    meta->flags & ~(TD_PCM_DISCONTINUITY | TD_PCM_BOUNDARY | TD_PCM_FINAL))
+	bool empty = meta->flags & TD_PCM_EMPTY;
+	if ((!meta->frames != empty) ||
+	    (empty && (meta->source_frames || !(meta->flags & TD_PCM_FINAL))) ||
+	    meta->frames > b->capacity ||
+	    meta->flags & ~(TD_PCM_DISCONTINUITY | TD_PCM_BOUNDARY | TD_PCM_FINAL | TD_PCM_EMPTY))
 		return TEDER_INVALID;
 	if (meta->source_frames > UINT64_MAX - meta->source_start ||
 	    meta->frames > UINT64_MAX - meta->output_start)

@@ -12,7 +12,7 @@ typedef struct {
 
 typedef struct {
 	uint64_t source, track, source_frame; /* last successfully consumed PCM endpoint */
-	uint32_t final;                       /* final block fully consumed in this call */
+	uint32_t final;                       /* sequence EOF cutoff won in this call */
 	uint32_t pcm_frames;                  /* consumed, including muted frames */
 	uint32_t missing_frames; /* enabled but unavailable, not an EOF/underrun classification */
 } td_audio_result;
@@ -27,7 +27,9 @@ typedef struct {
  * Result is required and reset on entry; zero frames permits NULL output.
  * Generation zero is valid only when disabled and leaves the pool untouched.
  * Disabled calls with a generation return stale blocks but preserve current
- * PCM. FINAL marks a source boundary, not the end of the output stream.
+ * PCM. FINAL marks a source boundary; its atomic cutoff decides sequence EOF.
+ * output_frame is the submitted index at the start of this call. Empty markers
+ * advance identity without advancing the sample count.
  * An internal pool error may follow partial consumption; pcm_frames records
  * completed consume operations and the entire output is silenced. Missing counts are set only
  * on success. Native device control/public status integration is separate. */
@@ -36,5 +38,6 @@ teder_code td_audio_render(td_pcm_pool *,
                            float *output,
                            size_t sample_capacity,
                            uint32_t frames,
+                           uint64_t output_frame,
                            td_audio_result *);
 #endif

@@ -16,7 +16,7 @@ foreach(line IN LISTS lines)
 	endif()
 	# The renderer may call only these audited consumer operations. The PCM
 	# object is separately checked without this allowance (no recursive escape).
-	if(ALLOW_PCM AND symbol MATCHES "^_?td_pcm_(select|peek|consume)$")
+	if(ALLOW_PCM AND symbol MATCHES "^_?td_pcm_(select|peek|consume|mark)$")
 		continue()
 	endif()
 	if(ALLOW_RENDER AND symbol MATCHES "^_?td_audio_render$")

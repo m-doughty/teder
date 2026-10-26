@@ -80,6 +80,16 @@ teder_code td_successor_ready(teder_engine *e, td_source_job *j)
 	if (code == TEDER_OK)
 		code = j->outcome;
 	if (code == TEDER_OK)
+		for (unsigned i = 0; i < TD_SOURCE_JOBS; i++) {
+			td_source_job *old = &e->sources[i];
+			if (old->state != TD_JOB_ACTIVE && old->state != TD_JOB_SUSPENDED)
+				continue;
+			teder_probe_info *a = &old->source->info, *b = &j->source->info;
+			if (a->sample_rate != b->sample_rate || a->channels != b->channels ||
+			    a->bits_per_sample != b->bits_per_sample)
+				code = TEDER_UNSUPPORTED; /* mixed-format boundaries are not implemented yet */
+		}
+	if (code == TEDER_OK)
 		code = td_commit_locked(e, j->slot);
 	if (code != TEDER_OK)
 		return code;
@@ -116,8 +126,8 @@ void td_successor_clear(teder_engine *e, uint32_t slot)
 	td_unlock(e);
 }
 
-/* Called only by the exclusive PCM producer. Future gapless scheduling chooses when to pump the
- * successor; this hook binds its first real queue publication to adoption.
+/* Called only by the exclusive PCM producer after the predecessor is decoded.
+ * This hook binds the successor's first real queue publication to adoption.
  * No I/O occurs under the gate. The callback acquires only the ready queue. */
 teder_code
 td_successor_publish(void *context, td_pcm_pool *pool, uint32_t slot, const td_pcm_meta *meta)
@@ -132,7 +142,23 @@ td_successor_publish(void *context, td_pcm_pool *pool, uint32_t slot, const td_p
 	    j->source->generation.source == e->status.next_source) {
 		code = TEDER_CANCELLED;
 		if (atomic_compare_exchange_strong(&e->lifecycle, &live, TEDER_LIVE)) {
-			code = td_pcm_publish(pool, slot, meta);
+			td_source *previous = NULL;
+			for (unsigned i = 0; i < TD_SOURCE_JOBS; i++)
+				if (e->sources[i].state == TD_JOB_ACTIVE)
+					previous = e->sources[i].source;
+			unsigned open = TD_END_OPEN;
+			code = TEDER_TOO_LATE;
+			if (previous && previous->done &&
+			    atomic_compare_exchange_strong(&previous->generation.end, &open, TD_END_LINKED)) {
+				code = td_pcm_publish(pool, slot, meta);
+				/* A filling slot guarantees queue capacity. Any invariant failure
+				 * after linking must fail the stream, never wait for absent PCM. */
+				if (code != TEDER_OK) {
+					code = TEDER_INTERNAL;
+					e->status.transport = TEDER_FAILED;
+					e->status.last_error = code;
+				}
+			}
 			if (code == TEDER_OK) {
 				j->state = TD_JOB_ADOPTED;
 				e->status.next_state = TEDER_NEXT_COMMITTED;

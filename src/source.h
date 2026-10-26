@@ -12,6 +12,7 @@ typedef struct {
 	uint32_t output_rate,
 	    read_size; /* 0 rate selects native; 0 read_size selects 4096, its maximum */
 	size_t codec_bytes, reservation;
+	bool boundaries;              /* engine sources publish zero-frame EOF markers */
 	const atomic_uint *cancel;    /* optional; stable until retirement */
 	const atomic_uint *lifecycle; /* optional engine close latch; LIVE permits work */
 	void *context;

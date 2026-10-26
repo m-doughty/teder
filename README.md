@@ -2,8 +2,8 @@
 
 A C17 playback and analysis library, with a separate notcurses
 renderer. Version 0.1.0 plays local FLAC, with play/pause/stop,
-seeking, successor preparation, submitted playback clocks and software gain/mute. Gapless transitions,
-analysis and rendering remain in progress.
+seeking, matching-format gapless playback, submitted clocks and software gain/mute.
+Mixed-format transitions, analysis and rendering remain in progress.
 
 Implemented exports:
 
@@ -21,8 +21,9 @@ Implemented exports:
 
 Build queries still report zero capabilities/backend mask. FLAC open and seek
 prepare sources asynchronously and stream bounded PCM. AUTOPLAY starts the selected
-output after bounded prefill. Successor preparation retains a separate source without starting it. Automatic
-gapless splicing is not implemented yet. See [successor usage](docs/sources.md#prepared-successors).
+output after bounded prefill. Prepared matching-format successors follow the current
+track within the same device stream. See [successor usage](docs/sources.md#prepared-successors)
+and [gapless behavior](docs/sources.md#gapless-playback).
 Other declarations remain draft contracts and will not link.
 
 Each engine owns one arena containing its handle, copied configuration and

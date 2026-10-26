@@ -3,7 +3,7 @@
 #include "flac_heap.h"
 #include <FLAC/stream_encoder.h>
 #include <check.h>
-static void th_make_track(const char *path, unsigned frames)
+static void th_make_track_samples(const char *path, unsigned frames, bool silent_edges)
 {
 	td_flac_heap heap;
 	ck_assert(td_flac_heap_init(&heap, td_libc_allocator(), 8 * 1024 * 1024) == TEDER_OK);
@@ -23,6 +23,8 @@ static void th_make_track(const char *path, unsigned frames)
 		for (unsigned i = 0; i < count; i++) {
 			samples[2 * i] = (int32_t)((frame + i) % 2048) - 1024;
 			samples[2 * i + 1] = 1024 - (int32_t)((frame + i) % 2048);
+			if (silent_edges && (frame + i == 0 || frame + i + 1 == frames))
+				samples[2 * i] = samples[2 * i + 1] = 0;
 		}
 		ck_assert(FLAC__stream_encoder_process_interleaved(encoder, samples, count));
 		frame += count;
@@ -33,4 +35,8 @@ static void th_make_track(const char *path, unsigned frames)
 	ck_assert(heap.error == TEDER_OK && heap.live == 0 && heap.bytes == 0);
 }
 
+static void th_make_track(const char *path, unsigned frames)
+{
+	th_make_track_samples(path, frames, false);
+}
 #endif

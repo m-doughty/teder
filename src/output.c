@@ -325,6 +325,8 @@ bool td_output_report(teder_engine *e)
 	td_lock(e);
 	if (code != TEDER_OK)
 		report = (td_device_report){.generation = e->status.current.epoch, .error = code};
+	teder_event transition;
+	bool transitioned = td_transition_report(e, &report, &transition);
 	bool current = report.generation == e->status.current.epoch &&
 	               (!report.source ||
 	                (report.source == e->status.current.source && report.track == e->status.track));
@@ -369,9 +371,11 @@ bool td_output_report(teder_engine *e)
 	                        .from_track = e->status.track,
 	                        .missing_frames = missing};
 	td_unlock(e);
+	if (transitioned)
+		td_emit(e, &transition);
 	if (failed)
 		td_emit(e, &event);
 	if (missing)
 		td_emit(e, &underrun);
-	return failed || ended || draining;
+	return transitioned || failed || ended || draining;
 }

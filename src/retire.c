@@ -7,6 +7,8 @@ teder_code td_pcm_generation_init(
 		return TEDER_INVALID;
 	*g = (td_pcm_generation){
 	    .arena = arena, .generation = generation, .source = source, .track = track};
+	atomic_init(&g->end, TD_END_OPEN);
+	atomic_init(&g->first_output, UINT64_MAX);
 	return TEDER_OK;
 }
 
