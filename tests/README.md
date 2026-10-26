@@ -110,6 +110,15 @@ and interpolation vectors; converted samples allow 1e-6 absolute error. Pool siz
 Failure sweeps cover both sequential decode and staged seek; codec/file/arena
 baselines must recover. These tests do not exercise public scheduling or real devices.
 
+`-R '^decode\.'` selects seven asynchronous engine cases: public open/seek and
+exact PCM, commitment/cancellation, active progress during blocked preparation,
+three-source retirement pressure, allocation/startup failures, close barriers,
+and identity/budget/corruption/unknown-duration outcomes. Source cancellation
+survives terminal request acknowledgement. Held PCM stays readable until the
+consumer-quiescence handshake permits close. The external consumer is a private
+native test endpoint, not evidence of real device output. Source conversion tests
+also compare primed and direct conversion against the independent references.
+
 ## Linux ThreadSanitizer in Docker
 
 From the package root, run `python tools/run-tsan-docker.py` with Python 3 and

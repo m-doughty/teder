@@ -4,12 +4,13 @@
 #include <string.h>
 
 _Static_assert(sizeof(float) == 4 && FLT_RADIX == 2 && FLT_MANT_DIG == 24,
-	"teder requires IEEE binary32 float");
+               "teder requires IEEE binary32 float");
 
 teder_code TEDER_CALL teder_get_build_info(teder_build_info *out)
 {
 	teder_build_info info = {0};
-	if (out == NULL) return TEDER_INVALID;
+	if (out == NULL)
+		return TEDER_INVALID;
 	if (out->struct_size != sizeof(*out) || out->abi_version != TEDER_ABI_VERSION)
 		return TEDER_ABI_MISMATCH;
 	info.struct_size = sizeof(info);

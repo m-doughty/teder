@@ -1,12 +1,31 @@
 # FLAC source contract
 
-The private worker API in `src/source.h` streams native FLAC into bounded PCM
-blocks. Public loading and engine scheduling remain future work. The executable
-C examples are the source tests in `tests/test_source.c`; this header is not installed.
+`teder_open` and `teder_seek` prepare native FLAC asynchronously. Submission OK
+means admitted; inspect the request until TERMINAL, check its outcome, then
+acknowledge it. Open copies the absolute UTF-8 path and caller track label.
+Seek copies the current `{epoch, source}` target and exact source-frame position.
+A failed or cancelled preparation preserves the current source. A successful open
+creates a new source ID; seeking preserves it. Both advance the epoch.
+The [installed C consumer](../tests/consumer/main.c) exercises this sequence.
+
+Status exposes source rate, channels, duration and the pending `media_request`.
+With no device, READY means prepared audio; decoding does not advance position.
+Device output, submitted/audible clocks and transport are not implemented yet. AUTOPLAY
+fails BAD_STATE without an output device. Prepared PCM currently keeps the native
+sample rate; a later selected device determines conversion rate.
+
+Three fixed engine job records bound active, staged and retiring sources together.
+Each source reserves its arena plus an 8 MiB codec cap before construction.
+The cap is a reservation, not an eager allocation. Exhausting the engine/codec
+budget returns LIMIT. A pending media mutation or no free job returns BUSY.
+A retired source still holds its reservation until every PCM reference returns.
+
+The private worker API in `src/source.h` implements this handoff; its header is
+not installed. Source tests in `tests/test_source.c` cover conversion separately.
 
 Inputs support 4–32-bit integer PCM, 1–8 channels in FLAC order, sample rates
 1–1048575 Hz, and FLAC frames up to 65535 samples per channel. Output is stereo
-float at a caller-selected rate in the same range. Capacity exhaustion returns
+float at a private caller-selected rate in the same range; zero selects the native rate. Capacity exhaustion returns
 LIMIT; supported format values do not override the caller's memory reservation.
 Integer samples divide by `2^(bits-1)`; binary32 rounding applies to wide samples.
 
@@ -38,12 +57,22 @@ The total includes one arena (wrapper, immutable identities, copied/native path,
 Retain the entire reservation until final retirement. No allocation scales with
 track length. Native handles and OS-internal storage are outside the heap budget.
 
-One producer owns all source calls. Pump performs a bounded decode/conversion step,
+Preparation owns open, staged seek and priming. Priming retains a converted
+sample (or validated EOF) inside the source, without publishing to the active pool.
+An engine-gate handoff transfers ownership to the sole PCM producer. Pump performs
+a bounded decode/conversion step,
 retains partial blocks, and uses one output sample of lookahead to mark final blocks.
 AGAIN means more work or returned pool space is needed; CLOSED means final PCM was
-published, not submitted to hardware. Seek is allowed only before the first pump.
+published, not submitted to hardware. Seek is allowed only before priming or the first pump.
 Cancellation aborts unpublished work; already published blocks retain their arena.
 Retire closes the file/decoder/converter and returns BUSY until those blocks return
 and are reaped. Final success clears the owner; a POSIX close diagnostic returns IO
 with the owner still cleared. Consumers must quiesce before a pool clear. Never
 cancel native threads or detach a blocked file operation and reclaim its storage.
+
+A separate preparation worker prevents blocked replacement I/O from starving
+active decoding. Both use the same engine budget and perform I/O outside its gate.
+Cancellation belongs to the source job, surviving request acknowledgement/reuse.
+Close waits for blocked operations, joins preparation, quiesces consumers, clears
+PCM and retires all sources before CLOSED. Full pools sleep until a control wake;
+the future device integration must arrange producer wakes outside the callback.

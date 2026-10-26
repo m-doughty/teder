@@ -21,6 +21,7 @@ typedef struct {
 	size_t limit, bytes, peak, live;
 	teder_code error; /* first allocation failure; sticky until explicit reset */
 } td_flac_heap;
+
 teder_code td_flac_heap_init(td_flac_heap *, td_allocator, size_t limit);
 td_flac_heap *td_flac_scope(td_flac_heap *); /* returns previous thread-local scope */
 void *td_flac_malloc(size_t);

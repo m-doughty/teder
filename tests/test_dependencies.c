@@ -12,21 +12,30 @@ int main(void)
 	size_t bytes = 0;
 	void *storage;
 	kiss_fftr_cfg plan;
-	if (strcmp(ma_version_string(), "0.11.25") || strcmp(FLAC__VERSION_STRING, "1.5.0")) return 1;
+	if (strcmp(ma_version_string(), "0.11.25") || strcmp(FLAC__VERSION_STRING, "1.5.0"))
+		return 1;
 	td_flac_heap heap;
-	if (td_flac_heap_init(&heap, td_libc_allocator(), 1024 * 1024) != TEDER_OK) return 2;
+	if (td_flac_heap_init(&heap, td_libc_allocator(), 1024 * 1024) != TEDER_OK)
+		return 2;
 	td_flac_heap *previous = td_flac_scope(&heap);
 	decoder = FLAC__stream_decoder_new();
-	if (decoder == NULL) return 2;
+	if (decoder == NULL)
+		return 2;
 	FLAC__stream_decoder_delete(decoder);
 	td_flac_scope(previous);
-	if (heap.live || heap.bytes || heap.error != TEDER_OK) return 2;
-	if (kiss_fftr_alloc(256, 0, NULL, &bytes) != NULL || bytes == 0) return 3;
+	if (heap.live || heap.bytes || heap.error != TEDER_OK)
+		return 2;
+	if (kiss_fftr_alloc(256, 0, NULL, &bytes) != NULL || bytes == 0)
+		return 3;
 	storage = malloc(bytes);
-	if (storage == NULL) return 4;
+	if (storage == NULL)
+		return 4;
 	plan = kiss_fftr_alloc(256, 0, storage, &bytes);
 	/* Caller storage owns the complete plan; no kiss_fft_free on that view. */
-	if (plan != storage) { free(storage); return 5; }
+	if (plan != storage) {
+		free(storage);
+		return 5;
+	}
 	free(storage);
 	return 0;
 }

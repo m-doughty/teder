@@ -20,6 +20,27 @@ C17 lock-free unsigned atomics are checked during configuration. MSVC uses
 No native 32-bit, big-endian or other-OS support is promised. PipeWire is usable
 through its PulseAudio compatibility service; no native PipeWire backend is selected.
 
+## C formatting
+
+Use clang-format 18 and Python 3. The shared `.clang-format` targets 100 columns,
+four-column tabs for indentation, and spaces for alignment. Keep one statement
+per line. Function bodies, branches and loops expand onto separate lines.
+Literal strings remain intact; a long diagnostic string can exceed the target.
+Separate logical test stages with blank lines. `.editorconfig` matches tab width
+and LF endings in editors.
+
+```sh
+python3 tools/format-c.py --write
+python3 tools/format-c.py --check
+```
+
+Check mode is the default and never edits files. Pass `--clang-format /path/to/tool`
+if needed. The helper checks the formatter's major version and covers authored
+`.c`/`.h` files in `src`, `include`, `tests`, and `cmake`. Downloaded dependencies,
+build outputs and CMake templates stay outside the pass. CI runs the same check.
+Formatting is separate from clang-tidy's static analysis; see the
+[clang-format options](https://clang.llvm.org/docs/ClangFormatStyleOptions.html).
+
 ## Configurations
 
 Use separate directories for shared/static and each sanitizer configuration:

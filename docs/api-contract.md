@@ -105,10 +105,10 @@ The request/input/event/PCM storage shares one engine arena. PCM capacity is
 split into blocks of at most 1024 stereo float frames; a final shorter block
 preserves the exact configured frame count. Block records and both handoff queues
 also count against the engine byte limit. This private handoff is exercised by
-native tests; public playback producers and a device callback are not implemented yet.
+native tests; a device callback is not implemented yet.
 Private FLAC sources now stream into this handoff; their format, conversion and
-reservation rules are specified in [sources.md](sources.md). Public source requests
-and their engine-budget integration remain unimplemented.
+reservation rules and implemented asynchronous open/seek behavior are specified
+in [sources.md](sources.md). Playback and device integration are not implemented yet.
 Snapshot fields are resolved limits; the independent snapshot pool is not implemented yet.
 Current result accessors read immutable copies built by private tests; public
 result producers are not implemented yet. `result_tag` requires distinct key
@@ -309,8 +309,9 @@ CLOSED as its final engine-memory access, and returns. Status/completions remain
 stored in the live engine; CLOSED means quiescence, not that this final worker's
 OS thread handle has already been reaped.
 The wake event and bookkeeping gate stay alive until exclusive final destroy,
-so permitted reads and repeated close never race their teardown. The current
-control worker also owns lifecycle; future workers must be joined by that owner.
+so permitted reads and repeated close never race their teardown. The control/decode
+worker owns lifecycle and joins preparation before CLOSED. Future device/analysis
+workers must join that shutdown order.
 
 There is no blocking wait/join API for the UI. An uninterruptible read leaves
 close pending; a timeout never licenses detaching a worker or freeing storage.

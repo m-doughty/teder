@@ -20,6 +20,7 @@ START_TEST(valid)
 	ck_assert_uint_eq(info.reserved, 0);
 }
 END_TEST
+
 START_TEST(invalid)
 {
 	teder_build_info info, before;
@@ -37,17 +38,21 @@ START_TEST(invalid)
 	ck_assert_int_eq(memcmp(&info, &before, sizeof(info)), 0);
 }
 END_TEST
+
 int main(int argc, char **argv)
 {
 	Suite *suite;
 	TCase *test;
 	SRunner *runner;
 	int failed;
-	if (argc != 2 || (strcmp(argv[1], "valid") && strcmp(argv[1], "invalid"))) return 2;
+	if (argc != 2 || (strcmp(argv[1], "valid") && strcmp(argv[1], "invalid")))
+		return 2;
 	suite = suite_create("build");
 	test = tcase_create(argv[1]);
-	if (!strcmp(argv[1], "valid")) tcase_add_test(test, valid);
-	else tcase_add_test(test, invalid);
+	if (!strcmp(argv[1], "valid"))
+		tcase_add_test(test, valid);
+	else
+		tcase_add_test(test, invalid);
 	suite_add_tcase(suite, test);
 	runner = srunner_create(suite);
 	srunner_set_fork_status(runner, CK_NOFORK);

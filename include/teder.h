@@ -20,34 +20,73 @@ typedef struct teder_snapshot teder_snapshot;
 
 /* Constants are not enum-typed ABI parameters. IDs are uint64_t; zero is none. */
 enum {
-	TEDER_OK = 0, TEDER_AGAIN = 1,
-	TEDER_INVALID = -1, TEDER_ABI_MISMATCH = -2, TEDER_LIMIT = -3,
-	TEDER_NO_MEMORY = -4, TEDER_BUSY = -5, TEDER_CLOSED = -6,
-	TEDER_NOT_FOUND = -7, TEDER_BAD_STATE = -8, TEDER_STALE = -9,
-	TEDER_CANCELLED = -10, TEDER_TOO_LATE = -11, TEDER_UNSUPPORTED = -12,
-	TEDER_IO = -13, TEDER_CORRUPT = -14, TEDER_DEVICE_LOST = -15,
-	TEDER_ENCODING = -16, TEDER_BUFFER_TOO_SMALL = -17, TEDER_INTERNAL = -18
+	TEDER_OK = 0,
+	TEDER_AGAIN = 1,
+	TEDER_INVALID = -1,
+	TEDER_ABI_MISMATCH = -2,
+	TEDER_LIMIT = -3,
+	TEDER_NO_MEMORY = -4,
+	TEDER_BUSY = -5,
+	TEDER_CLOSED = -6,
+	TEDER_NOT_FOUND = -7,
+	TEDER_BAD_STATE = -8,
+	TEDER_STALE = -9,
+	TEDER_CANCELLED = -10,
+	TEDER_TOO_LATE = -11,
+	TEDER_UNSUPPORTED = -12,
+	TEDER_IO = -13,
+	TEDER_CORRUPT = -14,
+	TEDER_DEVICE_LOST = -15,
+	TEDER_ENCODING = -16,
+	TEDER_BUFFER_TOO_SMALL = -17,
+	TEDER_INTERNAL = -18
 };
+
 enum { TEDER_LIVE = 1, TEDER_CLOSING, TEDER_CLOSED_STATE };
+
 enum {
-	TEDER_EMPTY = 1, TEDER_READY, TEDER_PLAYING, TEDER_PAUSED,
-	TEDER_DRAINING, TEDER_ENDED, TEDER_FAILED
+	TEDER_EMPTY = 1,
+	TEDER_READY,
+	TEDER_PLAYING,
+	TEDER_PAUSED,
+	TEDER_DRAINING,
+	TEDER_ENDED,
+	TEDER_FAILED
 };
+
 enum { TEDER_OUTPUT_NONE = 0, TEDER_OUTPUT_READY, TEDER_OUTPUT_LOST };
+
 enum { TEDER_NEXT_NONE = 0, TEDER_NEXT_READY, TEDER_NEXT_COMMITTED };
+
 enum { TEDER_QUEUED = 1, TEDER_RUNNING, TEDER_TERMINAL };
+
 enum {
-	TEDER_OP_OPEN = 1, TEDER_OP_TRANSPORT, TEDER_OP_SEEK, TEDER_OP_GAIN,
-	TEDER_OP_PREPARE, TEDER_OP_CLEAR_NEXT, TEDER_OP_PROBE,
-	TEDER_OP_DEVICES, TEDER_OP_SELECT_DEVICE, TEDER_OP_ANALYSIS
+	TEDER_OP_OPEN = 1,
+	TEDER_OP_TRANSPORT,
+	TEDER_OP_SEEK,
+	TEDER_OP_GAIN,
+	TEDER_OP_PREPARE,
+	TEDER_OP_CLEAR_NEXT,
+	TEDER_OP_PROBE,
+	TEDER_OP_DEVICES,
+	TEDER_OP_SELECT_DEVICE,
+	TEDER_OP_ANALYSIS
 };
+
 enum { TEDER_PLAY = 1, TEDER_PAUSE, TEDER_STOP };
+
 enum { TEDER_RESULT_NONE = 0, TEDER_RESULT_PROBE, TEDER_RESULT_DEVICES };
+
 enum { TEDER_QUALITY_UNKNOWN = 0, TEDER_QUALITY_ESTIMATED, TEDER_QUALITY_MEASURED };
+
 enum { TEDER_EVENT_TRANSITION = 1, TEDER_EVENT_UNDERRUN, TEDER_EVENT_DEVICE, TEDER_EVENT_ERROR };
+
 enum { TEDER_OPEN_AUTOPLAY = 1, TEDER_PROBE_ARTWORK = 1 };
+
 enum { TEDER_CODEC_FLAC = 1 };
+
 enum { TEDER_BACKEND_WASAPI = 1, TEDER_BACKEND_COREAUDIO, TEDER_BACKEND_ALSA, TEDER_BACKEND_PULSE };
+
 #define TEDER_CAP_FLAC (UINT64_C(1) << 0)
 #define TEDER_CAP_GAPLESS (UINT64_C(1) << 1)
 #define TEDER_CAP_ANALYSIS (UINT64_C(1) << 2)
@@ -61,9 +100,20 @@ enum { TEDER_BACKEND_WASAPI = 1, TEDER_BACKEND_COREAUDIO, TEDER_BACKEND_ALSA, TE
  * Text is UTF-8 with an explicit byte count; no trailing NUL is promised.
  * A result view lasts until result_release; a snapshot view until its release.
  */
-typedef struct teder_text { const char *data; uint32_t bytes; } teder_text;
-typedef struct teder_blob { const uint8_t *data; uint64_t bytes; } teder_blob;
-typedef struct teder_target { uint64_t epoch, source; } teder_target;
+typedef struct teder_text {
+	const char *data;
+	uint32_t bytes;
+} teder_text;
+
+typedef struct teder_blob {
+	const uint8_t *data;
+	uint64_t bytes;
+} teder_blob;
+
+typedef struct teder_target {
+	uint64_t epoch, source;
+} teder_target;
+
 typedef struct teder_span {
 	uint64_t output_start, frames, source, track;
 } teder_span;
@@ -78,11 +128,13 @@ typedef struct teder_config {
 	uint32_t snapshot_slots, snapshot_loans, max_bands, max_spans;
 	uint64_t engine_bytes_limit, result_bytes_limit;
 } teder_config;
+
 typedef struct teder_build_info {
 	uint32_t struct_size, abi_version;
 	uint64_t capabilities, backend_mask;
 	uint32_t version_major, version_minor, version_patch, reserved;
 } teder_build_info;
+
 typedef struct teder_status {
 	uint32_t struct_size, abi_version;
 	uint32_t lifecycle, transport, output_state, clock_flags;
@@ -100,6 +152,7 @@ typedef struct teder_status {
 	teder_code last_error;
 	uint32_t reserved;
 } teder_status;
+
 typedef struct teder_request_info {
 	uint32_t struct_size, abi_version;
 	uint64_t request;
@@ -111,6 +164,7 @@ typedef struct teder_request_info {
 	uint32_t detail_bytes, detail_truncated;
 	char detail[160];
 } teder_request_info;
+
 typedef struct teder_event {
 	uint32_t struct_size, abi_version;
 	uint64_t sequence, epoch, output_frame;
@@ -119,30 +173,35 @@ typedef struct teder_event {
 	teder_code code;
 	uint32_t reserved2;
 } teder_event;
+
 typedef struct teder_probe_info {
 	uint32_t struct_size, abi_version;
 	uint32_t codec, sample_rate, channels, bits_per_sample;
 	uint64_t duration_frames;
 	uint32_t duration_known, seekable, tag_count, artwork_count;
 } teder_probe_info;
+
 typedef struct teder_artwork {
 	uint32_t struct_size, abi_version;
 	uint32_t picture_type, width, height, depth, colors, reserved;
 	teder_text mime, description;
 	teder_blob encoded;
 } teder_artwork;
+
 typedef struct teder_device_info {
 	uint32_t struct_size, abi_version;
 	uint32_t backend, is_default;
 	teder_text name;
 	teder_blob key;
 } teder_device_info;
+
 typedef struct teder_analysis_config {
 	uint32_t struct_size, abi_version;
 	uint32_t enabled, bands, window_frames, hop_frames;
 	float low_hz, high_hz, floor_db, smoothing_ms, peak_decay_db_per_s;
 	uint32_t reserved;
 } teder_analysis_config;
+
 typedef struct teder_snapshot_info {
 	uint32_t struct_size, abi_version;
 	uint64_t sequence, epoch, output_start, frames, config_revision;
@@ -156,7 +215,7 @@ typedef struct teder_snapshot_info {
  */
 TEDER_API teder_code TEDER_CALL teder_get_build_info(teder_build_info *out);
 /* Zero config limits select documented build defaults; query resolved values.
- * Create reserves engine storage and starts its control/lifecycle worker.
+ * Create reserves engine storage and starts control and preparation workers.
  * It does no file/device I/O. Failure: *out=NULL; initialized resources unwind.
  */
 TEDER_API teder_code TEDER_CALL teder_create(const teder_config *config, teder_engine **out);
@@ -176,31 +235,50 @@ TEDER_API teder_code TEDER_CALL teder_destroy(teder_engine **engine);
  * Targets are copied and checked again at commitment. Track labels may repeat.
  */
 TEDER_API teder_code TEDER_CALL teder_open(teder_engine *engine,
-	const char *path, uint32_t bytes, uint64_t track, uint32_t flags, uint64_t *request);
+                                           const char *path,
+                                           uint32_t bytes,
+                                           uint64_t track,
+                                           uint32_t flags,
+                                           uint64_t *request);
 TEDER_API teder_code TEDER_CALL teder_transport(teder_engine *engine,
-	const teder_target *target, uint32_t action, uint64_t *request);
+                                                const teder_target *target,
+                                                uint32_t action,
+                                                uint64_t *request);
 TEDER_API teder_code TEDER_CALL teder_seek(teder_engine *engine,
-	const teder_target *target, uint64_t source_frame, uint64_t *request);
+                                           const teder_target *target,
+                                           uint64_t source_frame,
+                                           uint64_t *request);
 TEDER_API teder_code TEDER_CALL teder_set_gain(teder_engine *engine,
-	float linear_gain, uint32_t mute, uint64_t *request);
+                                               float linear_gain,
+                                               uint32_t mute,
+                                               uint64_t *request);
 /* expected_next=0 requires no successor. Replacement preserves the old successor
  * until the new one is ready. Commitment of the old successor wins with TOO_LATE.
  */
 TEDER_API teder_code TEDER_CALL teder_prepare_next(teder_engine *engine,
-	const teder_target *target, uint64_t expected_next, const char *path,
-	uint32_t bytes, uint64_t track, uint64_t *request);
+                                                   const teder_target *target,
+                                                   uint64_t expected_next,
+                                                   const char *path,
+                                                   uint32_t bytes,
+                                                   uint64_t track,
+                                                   uint64_t *request);
 TEDER_API teder_code TEDER_CALL teder_clear_next(teder_engine *engine,
-	const teder_target *target, uint64_t expected_next, uint64_t *request);
-TEDER_API teder_code TEDER_CALL teder_probe(teder_engine *engine,
-	const char *path, uint32_t bytes, uint32_t flags, uint64_t *request);
+                                                 const teder_target *target,
+                                                 uint64_t expected_next,
+                                                 uint64_t *request);
+TEDER_API teder_code TEDER_CALL teder_probe(
+    teder_engine *engine, const char *path, uint32_t bytes, uint32_t flags, uint64_t *request);
 TEDER_API teder_code TEDER_CALL teder_enumerate_devices(teder_engine *engine, uint64_t *request);
 /* NULL key with zero bytes selects the current default. Otherwise key is copied
  * from this engine's enumeration. Keys retain no result pointer or OS handle.
  */
 TEDER_API teder_code TEDER_CALL teder_select_device(teder_engine *engine,
-	const uint8_t *key, uint64_t bytes, uint64_t *request);
+                                                    const uint8_t *key,
+                                                    uint64_t bytes,
+                                                    uint64_t *request);
 TEDER_API teder_code TEDER_CALL teder_configure_analysis(teder_engine *engine,
-	const teder_analysis_config *config, uint64_t *request);
+                                                         const teder_analysis_config *config,
+                                                         uint64_t *request);
 
 /* Poll returns the oldest terminal, unacknowledged ID without removing it.
  * AGAIN means none available. Get also inspects queued/running requests.
@@ -210,9 +288,13 @@ TEDER_API teder_code TEDER_CALL teder_configure_analysis(teder_engine *engine,
  * Brief gate contention returns AGAIN for poll/get, BUSY for cancel/take/ack.
  */
 TEDER_API teder_code TEDER_CALL teder_request_poll(teder_engine *engine, teder_request_info *out);
-TEDER_API teder_code TEDER_CALL teder_request_get(teder_engine *engine, uint64_t request, teder_request_info *out);
+TEDER_API teder_code TEDER_CALL teder_request_get(teder_engine *engine,
+                                                  uint64_t request,
+                                                  teder_request_info *out);
 TEDER_API teder_code TEDER_CALL teder_request_cancel(teder_engine *engine, uint64_t request);
-TEDER_API teder_code TEDER_CALL teder_request_take_result(teder_engine *engine, uint64_t request, teder_result **out);
+TEDER_API teder_code TEDER_CALL teder_request_take_result(teder_engine *engine,
+                                                          uint64_t request,
+                                                          teder_result **out);
 TEDER_API teder_code TEDER_CALL teder_request_ack(teder_engine *engine, uint64_t request);
 /* Event poll consumes one copy. AGAIN means empty; sequence gaps expose loss. */
 TEDER_API teder_code TEDER_CALL teder_event_poll(teder_engine *engine, teder_event *out);
@@ -223,11 +305,20 @@ TEDER_API teder_code TEDER_CALL teder_event_poll(teder_engine *engine, teder_eve
  * Tag key/value outputs must be distinct; identical pointers return INVALID.
  */
 TEDER_API teder_code TEDER_CALL teder_result_kind(const teder_result *result, uint32_t *out);
-TEDER_API teder_code TEDER_CALL teder_result_probe(const teder_result *result, teder_probe_info *out);
-TEDER_API teder_code TEDER_CALL teder_result_tag(const teder_result *result, uint32_t index, teder_text *key, teder_text *value);
-TEDER_API teder_code TEDER_CALL teder_result_artwork(const teder_result *result, uint32_t index, teder_artwork *out);
-TEDER_API teder_code TEDER_CALL teder_result_device_count(const teder_result *result, uint32_t *out);
-TEDER_API teder_code TEDER_CALL teder_result_device(const teder_result *result, uint32_t index, teder_device_info *out);
+TEDER_API teder_code TEDER_CALL teder_result_probe(const teder_result *result,
+                                                   teder_probe_info *out);
+TEDER_API teder_code TEDER_CALL teder_result_tag(const teder_result *result,
+                                                 uint32_t index,
+                                                 teder_text *key,
+                                                 teder_text *value);
+TEDER_API teder_code TEDER_CALL teder_result_artwork(const teder_result *result,
+                                                     uint32_t index,
+                                                     teder_artwork *out);
+TEDER_API teder_code TEDER_CALL teder_result_device_count(const teder_result *result,
+                                                          uint32_t *out);
+TEDER_API teder_code TEDER_CALL teder_result_device(const teder_result *result,
+                                                    uint32_t index,
+                                                    teder_device_info *out);
 TEDER_API void TEDER_CALL teder_result_release(teder_result *result);
 
 /* Acquire returns one bounded reference to an immutable slot and its pool.
@@ -236,9 +327,14 @@ TEDER_API void TEDER_CALL teder_result_release(teder_result *result);
  * Loans survive engine destruction. Release must not dereference the engine.
  */
 TEDER_API teder_code TEDER_CALL teder_snapshot_acquire(teder_engine *engine, teder_snapshot **out);
-TEDER_API teder_code TEDER_CALL teder_snapshot_get_info(const teder_snapshot *snapshot, teder_snapshot_info *out);
-TEDER_API teder_code TEDER_CALL teder_snapshot_bands(const teder_snapshot *snapshot, const float **out, uint32_t *count);
-TEDER_API teder_code TEDER_CALL teder_snapshot_spans(const teder_snapshot *snapshot, const teder_span **out, uint32_t *count);
+TEDER_API teder_code TEDER_CALL teder_snapshot_get_info(const teder_snapshot *snapshot,
+                                                        teder_snapshot_info *out);
+TEDER_API teder_code TEDER_CALL teder_snapshot_bands(const teder_snapshot *snapshot,
+                                                     const float **out,
+                                                     uint32_t *count);
+TEDER_API teder_code TEDER_CALL teder_snapshot_spans(const teder_snapshot *snapshot,
+                                                     const teder_span **out,
+                                                     uint32_t *count);
 TEDER_API void TEDER_CALL teder_snapshot_release(teder_snapshot *snapshot);
 
 #ifdef __cplusplus

@@ -3,6 +3,14 @@ on: [push, pull_request, workflow_dispatch]
 permissions:
   contents: read
 jobs:
+  format:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install formatter
+        run: sudo apt-get update && sudo apt-get install -y clang-format-18
+      - name: Check C formatting
+        run: python3 tools/format-c.py --check
   core:
     strategy:
       fail-fast: false

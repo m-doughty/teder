@@ -18,24 +18,36 @@ typedef pthread_t td_thread;
 #endif
 
 enum { TD_ENGINE = 0x5444454e, TD_RESULT = 0x54445245 };
-typedef struct { uint32_t kind, version; } td_handle;
+
+typedef struct {
+	uint32_t kind, version;
+} td_handle;
+
 /* Reading a prefix does not certify an address or a released handle. */
 static inline teder_code td_prefix(const void *p, size_t size)
 {
 	uint32_t prefix[2];
-	if (!p) return TEDER_INVALID;
+	if (!p)
+		return TEDER_INVALID;
 	memcpy(prefix, p, sizeof(prefix));
 	return prefix[0] == size && prefix[1] == TEDER_ABI_VERSION ? TEDER_OK : TEDER_ABI_MISMATCH;
 }
+
 static inline teder_code td_handle_check(const void *p, uint32_t kind)
 {
 	td_handle header;
-	if (!p) return TEDER_INVALID;
+	if (!p)
+		return TEDER_INVALID;
 	memcpy(&header, p, sizeof(header));
-	if (header.version != TEDER_ABI_VERSION) return TEDER_ABI_MISMATCH;
+	if (header.version != TEDER_ABI_VERSION)
+		return TEDER_ABI_MISMATCH;
 	return header.kind == kind ? TEDER_OK : TEDER_BAD_STATE;
 }
-typedef struct { teder_text key, value; } td_tag;
+
+typedef struct {
+	teder_text key, value;
+} td_tag;
+
 typedef struct {
 	uint32_t kind, device_count;
 	const teder_probe_info *probe;
@@ -43,6 +55,7 @@ typedef struct {
 	const teder_artwork *artwork;
 	const teder_device_info *devices;
 } td_result_input;
+
 struct teder_result {
 	td_handle header;
 	td_arena *arena;
@@ -53,26 +66,76 @@ struct teder_result {
 	teder_artwork *artwork;
 	teder_device_info *devices;
 };
+
+typedef struct {
+	teder_target target;
+	uint64_t frame, track;
+	uint32_t flags;
+} td_media_input;
+
 typedef struct {
 	teder_request_info info;
+	td_media_input media;
 	teder_result *result;
 	uint8_t *input;
 	uint32_t input_bytes;
 	uint64_t completed;
 	bool cancelled, committed;
 } td_request_slot;
+
 /* Private dependency/test seam, never installed or exposed to callers.
  * Context survives destroy; execute borrows a RUNNING slot until return, calls
  * td_commit before any durable effect, and retires temporary work before return.
  * No operation or checkpoint runs while the engine gate is held. */
-enum { TD_INIT_LOCK = 1, TD_INIT_WAKE, TD_INIT_THREAD, TD_INIT_PUBLISH };
+enum {
+	TD_INIT_LOCK = 1,
+	TD_INIT_WAKE,
+	TD_INIT_THREAD,
+	TD_INIT_PUBLISH,
+	TD_INIT_PREPARE_WAKE,
+	TD_INIT_PREPARE_THREAD
+};
+
 enum { TD_STARTED = 1, TD_STOPPED };
+
+enum {
+	TD_PREPARE_STARTED = 10,
+	TD_PREPARE_STOPPED,
+	TD_MEDIA_BEFORE_COMMIT,
+	TD_MEDIA_AFTER_COMMIT,
+	TD_DECODE_IDLE
+};
+
 typedef struct {
 	void *context;
 	bool (*permit)(void *, uint32_t stage);
 	void (*checkpoint)(void *, uint32_t point);
 	teder_code (*execute)(void *, teder_engine *, uint32_t slot);
+	void (*media_checkpoint)(void *, uint64_t request, unsigned point);
+	/* Optional private consumer: one endpoint, joined here before PCM clear.
+	 * Without it, control owns the idle consumer; no device exists yet. */
+	void (*consumer_join)(void *);
 } td_runtime;
+
+enum {
+	TD_JOB_FREE,
+	TD_JOB_STAGING,
+	TD_JOB_PREPARED,
+	TD_JOB_ACTIVE,
+	TD_JOB_RETIRING,
+	TD_SOURCE_JOBS = 3
+};
+
+typedef struct {
+	teder_engine *engine;
+	struct td_source *source;
+	atomic_uint cancel;
+	size_t reservation;
+	uint64_t request;
+	uint32_t state, slot, path_bytes;
+	teder_code outcome;
+} td_source_job;
+
 struct teder_engine {
 	td_handle header;
 	td_arena *arena;
@@ -86,11 +149,16 @@ struct teder_engine {
 	td_runtime runtime;
 	td_mutex gate;
 	ma_event wake;
+	ma_event prepare_wake;
 	td_thread thread;
+	td_thread prepare_thread;
+	td_source_job sources[TD_SOURCE_JOBS];
+	uint64_t last_source;
 	atomic_uint lifecycle;
 	uint64_t last_request, last_completion;
 	uint32_t event_head, event_count;
 };
+
 /* Private seams use the same implementation as public creation. Allocator
  * contexts outlive all resulting arenas; no global allocator replacement.
  * Input structs and their views remain valid and immutable throughout creation. */
@@ -110,10 +178,21 @@ teder_code td_control_start(teder_engine *);
 void td_control_join(teder_engine *);
 void td_control_dispose(teder_engine *);
 void td_signal(teder_engine *);
+void td_prepare_signal(teder_engine *);
+void td_prepare_run(teder_engine *);
+bool td_decode_step(teder_engine *);
+void td_sources_close(teder_engine *);            /* prep joined and consumer quiescent */
+bool td_media_dispatch(teder_engine *, uint32_t); /* gate held; never performs I/O */
+teder_code td_submit_media(
+    teder_engine *, uint32_t, const void *, uint32_t, const td_media_input *, uint64_t *);
+void td_complete(teder_engine *, uint32_t, teder_code); /* gate held */
+void td_media_checkpoint(teder_engine *, uint64_t, unsigned);
 /* Internal producers validate typed inputs before this bounded byte-copy seam.
  * Public calls use try-lock; the worker blocks only for short bookkeeping. */
-teder_code td_submit(teder_engine *, uint32_t operation, const void *, uint32_t bytes, uint64_t *request);
+teder_code
+td_submit(teder_engine *, uint32_t operation, const void *, uint32_t bytes, uint64_t *request);
 teder_code td_commit(teder_engine *, uint32_t slot);
+teder_code td_commit_locked(teder_engine *, uint32_t slot);
 teder_code td_build_result(teder_engine *, uint32_t slot, const td_result_input *);
 teder_code td_emit(teder_engine *, const teder_event *);
 void td_limit_close(teder_engine *); /* gate held */

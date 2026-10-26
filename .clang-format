@@ -1,0 +1,26 @@
+# Formatting is pinned to clang-format 18 by tools/format-c.py.
+BasedOnStyle: LLVM
+ColumnLimit: 100
+IndentWidth: 4
+TabWidth: 4
+UseTab: ForIndentation
+ContinuationIndentWidth: 4
+BreakBeforeBraces: Linux
+AllowShortBlocksOnASingleLine: Never
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+# Preserve paragraph spacing; LLVM 18's Always mode reports redundant changes
+# for nested anonymous structs even immediately after formatting.
+SeparateDefinitionBlocks: Leave
+BinPackArguments: false
+BinPackParameters: false
+AlignAfterOpenBracket: Align
+SortIncludes: Never
+IncludeBlocks: Preserve
+ReflowComments: true
+BreakStringLiterals: false
+LineEnding: LF
+StatementMacros:
+  - START_TEST
+  - END_TEST

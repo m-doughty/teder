@@ -13,10 +13,17 @@
  * Inspect counters/configure fail_at only while allocator users are quiescent. */
 typedef struct {
 	ma_mutex lock;
-	struct { void *pointer; size_t size; const char *site; } blocks[128];
+
+	struct {
+		void *pointer;
+		size_t size;
+		const char *site;
+	} blocks[128];
+
 	size_t attempts, fail_at, live, bytes, peak, errors;
 	const char *failed_site;
 } th_tracker;
+
 bool th_tracker_init(th_tracker *);
 bool th_tracker_clean(th_tracker *);
 void th_tracker_uninit(th_tracker *); /* requires all blocks released */
@@ -27,12 +34,16 @@ ma_allocation_callbacks th_ma_allocator(th_tracker *);
 
 /* One-shot rendezvous: worker hits; controller awaits then releases.
  * Destroy only after joining all users. No timeout frees borrowed resources. */
-typedef struct { ma_event arrived, release; } th_gate;
+typedef struct {
+	ma_event arrived, release;
+} th_gate;
+
 bool th_gate_init(th_gate *);
 void th_gate_hit(th_gate *);
 void th_gate_await(th_gate *);
 void th_gate_release(th_gate *);
 void th_gate_uninit(th_gate *);
+
 typedef struct {
 #ifdef _WIN32
 	HANDLE handle;
@@ -42,11 +53,14 @@ typedef struct {
 	void (*run)(void *);
 	void *context;
 } th_thread;
+
 bool th_thread_start(th_thread *, void (*)(void *), void *);
 void th_thread_join(th_thread *);
 
 typedef size_t (*th_render)(void *, float *, size_t frames);
+
 typedef enum { TH_OK, TH_STOPPED, TH_BUSY, TH_CAPACITY, TH_DEVICE, TH_INVALID } th_status;
+
 typedef struct {
 	ma_mutex lock;
 	float *pcm; /* caller-owned, capacity * channels floats; outlives all steps */
@@ -55,6 +69,7 @@ typedef struct {
 	th_render render;
 	void *context;
 } th_sink;
+
 bool th_sink_init(th_sink *, float *, size_t capacity, size_t channels, th_render, void *);
 th_status th_sink_step(th_sink *, size_t frames, bool force_underrun);
 bool th_sink_stop(th_sink *); /* false means a callback still borrows storage */

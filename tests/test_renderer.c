@@ -1,4 +1,5 @@
 #include "teder_notcurses.h"
+
 int main(void)
 {
 	teder_build_info info = {0};
