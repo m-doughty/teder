@@ -224,6 +224,7 @@ teder_code td_output_enumerate(teder_engine *, uint32_t slot);
 void td_output_close(teder_engine *); /* lifecycle worker: device before context */
 void td_output_select(teder_engine *, uint32_t slot);
 void td_transport(teder_engine *, uint32_t slot);
+void td_stop(teder_engine *, uint32_t slot);
 teder_code td_output_quiesce(teder_engine *); /* control, producer already paused */
 teder_code td_output_start(teder_engine *);
 bool td_output_report(teder_engine *);                   /* current producer; no native control */

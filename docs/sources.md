@@ -20,8 +20,10 @@ commits the new source, prefills the bounded PCM pool and starts output. PLAYING
 is published only after native startup succeeds. Startup failure leaves output
 LOST and the new source PAUSED. A decode failure during prefill leaves FAILED.
 Ordinary open leaves READY; a seek during playback resumes the replacement.
-PLAY/PAUSE and gain/mute now use the [transport contract](api-contract.md#transport-controls-implemented-subset).
-Stop/rewind and live clocks are not implemented yet.
+PLAY/PAUSE/STOP and gain/mute use the [transport contract](api-contract.md#transport-controls-implemented-subset).
+STOP reserves the media slot through cancellation cleanup and staged rewind. It
+retains source identity, advances epoch and returns READY at frame zero. A failed
+rewind leaves FAILED. Live clocks are not implemented yet.
 
 Three fixed engine job records bound active, staged and retiring sources together.
 Each source reserves its arena plus an 8 MiB codec cap before construction.
@@ -58,7 +60,9 @@ Only regular disk files are accepted. Ogg, ID3-prefixed and other containers are
 unsupported. Truncated frames, CRC/MD5 failures, inconsistent sample positions or
 declared durations, and trailing bytes fail with CORRUPT. Unknown duration remains
 unknown until validated EOF. Seeking disables whole-stream MD5 checking in libFLAC;
-frame integrity checks remain. A seek exactly to known EOF produces no PCM.
+frame integrity checks remain. A seek exactly to known EOF produces no PCM and reports ENDED. Zero-offset
+preparation primes the fresh decoder directly, including empty input, preserving
+whole-stream MD5 validation. Positive seeks retain frame integrity checks.
 
 Call `td_source_plan` and reserve its total against engine memory before open.
 The total includes one arena (wrapper, immutable identities, copied/native path,

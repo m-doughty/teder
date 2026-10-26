@@ -263,6 +263,8 @@ static void checkpoint(void *p, uint64_t request, unsigned point)
 		hit(p, 12);
 	if (point == TD_TRANSPORT_PUBLISHED)
 		hit(p, 13);
+	if (point == TD_MEDIA_BEFORE_COMMIT)
+		hit(p, 14);
 }
 
 static void init(fixture *f)
@@ -1103,8 +1105,13 @@ static uint64_t gain_to(teder_engine *e, float gain, uint32_t mute)
 
 static void outcome(teder_engine *e, uint64_t id, teder_code expected)
 {
-	teder_code actual = terminal(e, id).outcome;
-	ck_assert_msg(actual == expected, "outcome %d, expected %d", actual, expected);
+	teder_request_info r = terminal(e, id);
+	ck_assert_msg(r.outcome == expected,
+	              "request %u operation %u: outcome %d, expected %d",
+	              (unsigned)id,
+	              r.operation,
+	              r.outcome,
+	              expected);
 	ack(e, id);
 }
 
@@ -1300,6 +1307,384 @@ START_TEST(transport_boundaries)
 }
 END_TEST
 
+static uint64_t seek_frame(teder_engine *e, uint64_t frame)
+{
+	teder_target target = status(e).current;
+	uint64_t id;
+	teder_code code;
+	RETRY(code, teder_seek(e, &target, frame, &id));
+	OK(code);
+	return id;
+}
+
+static void capture_track(fixture *f, teder_engine *e, unsigned first, unsigned count)
+{
+	while (atomic_load(&f->captured) < count)
+		step(f, 7);
+	ended(f, e, count);
+	for (unsigned i = 0; i < count; i++) {
+		ck_assert(f->capture[2 * i] == ((int)(first + i) - 8) * 1000 / 32768.0f);
+		ck_assert(f->capture[2 * i + 1] == -f->capture[2 * i]);
+	}
+}
+
+START_TEST(stop_rewind)
+{
+	for (unsigned mode = 0; mode < 5; mode++) {
+		fixture f;
+		init(&f);
+		f.manual = true;
+		teder_config config = INIT(teder_config);
+		config.pcm_frames = mode == 3 ? 32 : 4;
+		teder_engine *e = create(&f, config, false);
+		teder_target empty = status(e).current;
+		outcome(e, transport(e, TEDER_STOP), TEDER_OK);
+		ck_assert(status(e).transport == TEDER_EMPTY && status(e).current.epoch == empty.epoch);
+		load_track(e);
+		if (mode) {
+			outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
+			outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
+			step(&f, 2);
+		}
+		if (mode == 2) {
+			atomic_store(&f.point, 13);
+			boundary(&f, e, transport(e, TEDER_PAUSE));
+		}
+		if (mode == 4)
+			capture_track(&f, e, 0, 16);
+		const uint32_t states[] = {
+		    TEDER_READY, TEDER_PLAYING, TEDER_PAUSED, TEDER_DRAINING, TEDER_ENDED};
+		ck_assert(status(e).transport == states[mode]);
+		teder_target before = status(e).current;
+		uint64_t id = transport(e, TEDER_STOP);
+		teder_request_info r = terminal(e, id);
+		ck_assert(r.outcome == TEDER_OK && r.operation == TEDER_OP_TRANSPORT && r.track == 77 &&
+		          r.committed.epoch == before.epoch + 1 && r.committed.source == before.source);
+		ack(e, id);
+		teder_status s = status(e);
+		ck_assert(s.transport == TEDER_READY && s.source_frame == 0 && s.output_frame == 0 &&
+		          !s.media_request && !s.next_source && s.next_state == TEDER_NEXT_NONE);
+		ck_assert(!f.worker && s.gain == 1 && !s.mute);
+		teder_code code;
+		RETRY(code, teder_transport(e, &before, TEDER_PLAY, &id));
+		ck_assert(code == TEDER_STALE && !id);
+		outcome(e, transport(e, TEDER_STOP), TEDER_OK);
+		ck_assert(status(e).current.epoch == before.epoch + 2);
+		if (!mode)
+			outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
+		outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
+		capture_track(&f, e, 0, 16); /* no old partial block survives the rewind */
+		close_engine(&e);
+		dispose(&f);
+	}
+}
+END_TEST
+
+START_TEST(seek_states)
+{
+	for (unsigned mode = 0; mode < 5; mode++) {
+		fixture f;
+		init(&f);
+		f.manual = true;
+		teder_config config = INIT(teder_config);
+		config.pcm_frames = mode == 3 ? 32 : 4;
+		teder_engine *e = create(&f, config, false);
+		outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
+		load_track(e);
+		if (mode) {
+			outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
+			step(&f, 2);
+		}
+		if (mode == 2) {
+			atomic_store(&f.point, 13);
+			boundary(&f, e, transport(e, TEDER_PAUSE));
+		}
+		if (mode == 4)
+			capture_track(&f, e, 0, 16);
+		teder_status before = status(e);
+		outcome(e, seek_frame(e, 17), TEDER_INVALID);
+		ck_assert(status(e).current.epoch == before.current.epoch &&
+		          status(e).transport == before.transport);
+		outcome(e, seek_frame(e, 7), TEDER_OK);
+		teder_status s = status(e);
+		ck_assert(s.current.epoch == before.current.epoch + 1 &&
+		          s.current.source == before.current.source && s.track == 77 &&
+		          s.source_frame == 7);
+		if (mode == 1 || mode == 3)
+			ck_assert(s.transport == TEDER_PLAYING || s.transport == TEDER_DRAINING);
+		else {
+			ck_assert(s.transport == (mode == 2 ? TEDER_PAUSED : TEDER_READY));
+			outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
+		}
+		capture_track(&f, e, 7, 9);
+		outcome(e, seek_frame(e, 0), TEDER_OK);
+		ck_assert(status(e).transport == TEDER_READY);
+		if (mode) {
+			outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
+			if (mode == 2) {
+				atomic_store(&f.point, 13);
+				boundary(&f, e, transport(e, TEDER_PAUSE));
+			}
+		}
+		outcome(e, seek_frame(e, 16), TEDER_OK);
+		s = status(e);
+		ck_assert(s.transport == TEDER_ENDED && s.source_frame == 16 &&
+		          s.clock_flags == (TEDER_DURATION_KNOWN | TEDER_DECODE_EOF | TEDER_SUBMIT_EOF));
+		ck_assert(!f.worker);
+		close_engine(&e);
+		dispose(&f);
+	}
+	const char *empty_path = OUTPUT_DIR "/output-empty.flac";
+	th_make_track(empty_path, 0);
+	fixture f;
+	init(&f);
+	teder_config config = INIT(teder_config);
+	teder_engine *e = create(&f, config, false);
+	outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
+	outcome(e, autoplay(e, empty_path), TEDER_OK);
+	teder_status s = status(e);
+	ck_assert(s.transport == TEDER_ENDED && s.duration_frames == 0 &&
+	          s.clock_flags == (TEDER_DURATION_KNOWN | TEDER_DECODE_EOF | TEDER_SUBMIT_EOF));
+	outcome(e, transport(e, TEDER_STOP), TEDER_OK);
+	ck_assert(status(e).transport == TEDER_READY);
+	outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
+	ck_assert(status(e).transport == TEDER_ENDED && f.starts == 0);
+	outcome(e, seek_frame(e, 0), TEDER_OK);
+	ck_assert(status(e).transport == TEDER_ENDED);
+	outcome(e, seek_frame(e, 1), TEDER_INVALID);
+	close_engine(&e);
+	dispose(&f);
+	ck_assert(remove(empty_path) == 0);
+}
+END_TEST
+
+START_TEST(stop_supersession)
+{
+	for (unsigned mode = 0; mode < 4; mode++) {
+		fixture f;
+		init(&f);
+		f.manual = true;
+		teder_config config = INIT(teder_config);
+		config.pcm_frames = 4;
+		teder_engine *e = create(&f, config, false);
+		if (mode) {
+			outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
+			load_track(e);
+			outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
+			step(&f, 2);
+		}
+		teder_target before = status(e).current;
+		atomic_store(&f.point, 10);
+		uint64_t pending;
+		teder_code code;
+		if (mode == 2)
+			pending = seek_frame(e, 7);
+		else {
+			RETRY(code, teder_open(e, TRACK, sizeof(TRACK) - 1, 99, 0, &pending));
+			OK(code);
+		}
+		th_gate_await(&f.gate);
+		uint64_t stop = transport(e, TEDER_STOP);
+		while (status(e).media_request != stop || (mode && status(e).current.epoch == before.epoch))
+			th_yield();
+		teder_request_info r = INIT(teder_request_info);
+		do {
+			code = teder_request_get(e, pending, &r);
+		} while (code == TEDER_AGAIN);
+		ck_assert(code == TEDER_OK && r.state == TEDER_RUNNING);
+		uint64_t rejected = 99;
+		ck_assert(teder_open(e, TRACK, sizeof(TRACK) - 1, 0, 0, &rejected) == TEDER_BUSY &&
+		          !rejected);
+		RETRY(code, teder_request_cancel(e, stop));
+		OK(code); /* already committed: cancellation cannot undo the rewind */
+		if (mode == 3) {
+			OK(teder_request_close(e));
+			ck_assert(teder_destroy(&e) == TEDER_BUSY && e);
+		}
+		th_gate_release(&f.gate);
+		outcome(e, pending, TEDER_CANCELLED);
+		r = terminal(e, stop);
+		ck_assert(r.outcome == (mode == 3 ? TEDER_CANCELLED : TEDER_OK) &&
+		          r.committed.source == before.source &&
+		          r.committed.epoch == before.epoch + (mode != 0));
+		ack(e, stop);
+		if (mode && mode != 3) {
+			outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
+			capture_track(&f, e, 0, 16);
+		}
+		close_engine(&e);
+		dispose(&f);
+	}
+}
+END_TEST
+
+START_TEST(stop_boundaries)
+{
+	for (unsigned mode = 0; mode < 5; mode++) {
+		fixture f;
+		init(&f);
+		teder_config config = INIT(teder_config);
+		teder_engine *e = create(&f, config, false);
+		load_track(e);
+		teder_target before = status(e).current;
+		atomic_store(&f.point, mode == 2 ? 14 : mode == 3 ? 10 : mode == 4 ? 9 : 12);
+		uint64_t stop, pending = 0;
+		teder_code code;
+		if (mode == 2) {
+			RETRY(code, teder_open(e, TRACK, sizeof(TRACK) - 1, 99, 0, &pending));
+			OK(code);
+			th_gate_await(&f.gate);
+			stop = transport(e, TEDER_STOP);
+		} else {
+			stop = transport(e, TEDER_STOP);
+			th_gate_await(&f.gate);
+			if (mode == 1) {
+				RETRY(code, teder_open(e, TRACK, sizeof(TRACK) - 1, 99, 0, &pending));
+				OK(code); /* queued after stop, but outstanding when stop commits */
+			} else if (mode == 4) {
+				OK(teder_request_close(e));
+				ck_assert(teder_destroy(&e) == TEDER_BUSY && e);
+			} else {
+				RETRY(code, teder_request_cancel(e, stop));
+				OK(code);
+			}
+		}
+		th_gate_release(&f.gate);
+		outcome(e,
+		        stop,
+		        (mode == 0 || mode == 4) ? TEDER_CANCELLED
+		        : mode == 2              ? TEDER_STALE
+		                                 : TEDER_OK);
+		if (pending)
+			outcome(e, pending, mode == 2 ? TEDER_OK : TEDER_CANCELLED);
+		teder_status s = status(e);
+		ck_assert(s.current.epoch == before.epoch + (mode != 0) &&
+		          s.current.source == before.source + (mode == 2) &&
+		          s.track == (mode == 2 ? 99 : 77) && s.transport == TEDER_READY);
+		close_engine(&e);
+		dispose(&f);
+	}
+}
+END_TEST
+
+START_TEST(stop_failures)
+{
+	size_t count = 0;
+	for (size_t n = 0; n <= count; n++) {
+		fixture f;
+		init(&f);
+		teder_config config = INIT(teder_config);
+		teder_engine *e = create(&f, config, false);
+		load_track(e);
+		idle(&f, e);
+		size_t before = f.tracker.attempts;
+		f.tracker.fail_at = n ? before + n : 0;
+		teder_target target = status(e).current;
+		uint64_t id = transport(e, TEDER_STOP);
+		th_gate_release(&f.gate);
+		outcome(e, id, n ? TEDER_NO_MEMORY : TEDER_OK);
+		teder_status s = status(e);
+		ck_assert(s.current.epoch == target.epoch + 1 && s.current.source == target.source &&
+		          s.transport == (n ? TEDER_FAILED : TEDER_READY) &&
+		          s.last_error == (n ? TEDER_NO_MEMORY : TEDER_OK));
+		if (!n) {
+			idle(&f, e);
+			count = f.tracker.attempts - before;
+			ck_assert(count > 5);
+			th_gate_release(&f.gate);
+		}
+		ma_mutex_lock(&f.tracker.lock);
+		f.tracker.fail_at = 0;
+		ma_mutex_unlock(&f.tracker.lock);
+		outcome(e, seek_frame(e, 7), TEDER_OK); /* recover from actual rewind failure */
+		ck_assert(status(e).transport == TEDER_READY && status(e).source_frame == 7);
+		close_engine(&e);
+		dispose(&f);
+	}
+	printf("stop rewind allocation failures 1..%zu unwind\n", count);
+	for (unsigned mode = 0; mode < 3; mode++) {
+		fixture f;
+		init(&f);
+		f.manual = true;
+		teder_config config = INIT(teder_config);
+		teder_engine *e = create(&f, config, false);
+		outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
+		load_track(e);
+		if (!mode) {
+			outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
+			f.fail_stop = true;
+		} else {
+			idle(&f, e);
+			if (mode == 1)
+				e->config.engine_bytes_limit = e->owned_bytes;
+			else
+				e->status.current.epoch = UINT64_MAX;
+		}
+		teder_target before = status(e).current;
+		uint64_t id = transport(e, TEDER_STOP);
+		if (mode)
+			th_gate_release(&f.gate);
+		outcome(e, id, mode ? TEDER_LIMIT : TEDER_DEVICE_LOST);
+		ck_assert(status(e).current.epoch == (mode == 2 ? UINT64_MAX : before.epoch + 1));
+		if (mode != 2)
+			ck_assert(status(e).transport == TEDER_FAILED);
+		close_engine(&e);
+		dispose(&f);
+	}
+}
+END_TEST
+
+START_TEST(seek_failure)
+{
+	unsigned char bytes[4096];
+	FILE *file = fopen(TRACK, "rb");
+	ck_assert(file);
+	size_t size = fread(bytes, 1, sizeof(bytes), file);
+	ck_assert(size > 4 && size < sizeof(bytes) && fclose(file) == 0);
+	const char *path = OUTPUT_DIR "/output-seek-failure.flac";
+	fixture f;
+	init(&f);
+	f.manual = true;
+	teder_config config = INIT(teder_config);
+	teder_engine *e = create(&f, config, false);
+	outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
+	for (unsigned pass = 0; pass < 3; pass++) {
+		if (pass)
+			bytes[size - 4] ^= 1; /* corrupt, then restore the frame CRC */
+		file = fopen(path, "wb");
+		ck_assert(file && fwrite(bytes, 1, size, file) == size && fclose(file) == 0);
+		if (!pass) {
+			uint64_t id;
+			teder_code code;
+			RETRY(code, teder_open(e, path, (uint32_t)strlen(path), 77, 0, &id));
+			OK(code);
+			outcome(e, id, TEDER_OK);
+			idle(&f, e); /* active PCM is decoded before the file changes */
+		} else if (pass == 1) {
+			teder_target before = status(e).current;
+			th_gate_release(&f.gate);
+			outcome(e, seek_frame(e, 7), TEDER_CORRUPT);
+			ck_assert(status(e).current.epoch == before.epoch &&
+			          status(e).transport == TEDER_READY);
+			outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
+			capture_track(&f, e, 0, 16); /* failed seek leaves original PCM intact */
+			outcome(e, transport(e, TEDER_STOP), TEDER_CORRUPT);
+			ck_assert(status(e).current.epoch == before.epoch + 1 &&
+			          status(e).current.source == before.source &&
+			          status(e).transport == TEDER_FAILED && status(e).last_error == TEDER_CORRUPT);
+		} else {
+			outcome(e, seek_frame(e, 7), TEDER_OK);
+			ck_assert(status(e).transport == TEDER_READY);
+			outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
+			capture_track(&f, e, 7, 9);
+		}
+	}
+	close_engine(&e);
+	dispose(&f);
+	ck_assert(remove(path) == 0);
+}
+END_TEST
+
 START_TEST(native_select)
 {
 	size_t attempts = 0;
@@ -1377,6 +1762,18 @@ int main(int argc, char **argv)
 		test = transport_states;
 	else if (!strcmp(argv[1], "transport-boundaries"))
 		test = transport_boundaries;
+	else if (!strcmp(argv[1], "stop-rewind"))
+		test = stop_rewind;
+	else if (!strcmp(argv[1], "seek-states"))
+		test = seek_states;
+	else if (!strcmp(argv[1], "stop-supersession"))
+		test = stop_supersession;
+	else if (!strcmp(argv[1], "stop-boundaries"))
+		test = stop_boundaries;
+	else if (!strcmp(argv[1], "stop-failures"))
+		test = stop_failures;
+	else if (!strcmp(argv[1], "seek-failure"))
+		test = seek_failure;
 	else if (!strcmp(argv[1], "native-select"))
 		test = native_select;
 	else if (!strcmp(argv[1], "native"))

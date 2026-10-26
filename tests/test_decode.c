@@ -245,7 +245,8 @@ START_TEST(loading)
 	ck_assert(r.outcome == TEDER_OK && r.committed.epoch == 4);
 	ack(e, id);
 	s = status(e);
-	ck_assert(s.source_frame == 16 && s.clock_flags == (TEDER_DURATION_KNOWN | TEDER_DECODE_EOF));
+	ck_assert(s.source_frame == 16 && s.transport == TEDER_ENDED &&
+	          s.clock_flags == (TEDER_DURATION_KNOWN | TEDER_DECODE_EOF | TEDER_SUBMIT_EOF));
 	teder_target stale = {2, 1};
 	RETRY(code, teder_seek(e, &stale, 0, &rejected));
 	ck_assert(code == TEDER_STALE && !rejected);

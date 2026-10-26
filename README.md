@@ -1,8 +1,9 @@
 # teder
 
 A C17 playback and analysis library, with a separate notcurses
-renderer. Version 0.1.0 plays local FLAC, with play/pause and software gain/mute.
-Stop/rewind, clocks, gapless transitions, analysis and rendering remain in progress.
+renderer. Version 0.1.0 plays local FLAC, with play/pause/stop,
+seeking and software gain/mute. Clocks, gapless transitions, analysis and rendering
+remain in progress.
 
 Implemented exports:
 
@@ -10,7 +11,7 @@ Implemented exports:
 - `teder_create`, `teder_get_config`, `teder_get_status`,
   `teder_request_close`, and `teder_destroy`.
 - `teder_open`, `teder_seek`, `teder_enumerate_devices`, and `teder_select_device`.
-- `teder_transport` (PLAY/PAUSE) and `teder_set_gain`.
+- `teder_transport` (PLAY/PAUSE/STOP) and `teder_set_gain`.
 - `teder_request_poll`, `teder_request_get`, `teder_request_cancel`,
   `teder_request_take_result`, `teder_request_ack`, and `teder_event_poll`.
 - `teder_result_kind`, `teder_result_probe`, `teder_result_tag`,
@@ -52,11 +53,12 @@ silence through WASAPI and headless ALSA. Public device selection now opens a
 stopped output and rebuilds a retained track at its negotiated rate, preserving
 identity and the saved source position. Open with `TEDER_OPEN_AUTOPLAY` starts
 playback; it returns BAD_STATE without a selected output. Ordinary open stays READY.
-`teder_transport` accepts PLAY or PAUSE with a copied current target. PLAY resumes
+`teder_transport` accepts PLAY, PAUSE or STOP with a copied current target. PLAY resumes
 a paused source; pause preserves its next PCM frame while the device sends silence.
 `teder_set_gain` applies finite linear gain 0..1 and mute together. Active changes
 complete after a callback acknowledges them, without restarting the native stream.
-STOP currently returns UNSUPPORTED. See the [transport contract](docs/api-contract.md#transport-controls-implemented-subset).
+STOP cancels pending preparation, flushes old PCM and rewinds the retained source
+to READY at frame zero. Rewind failure leaves FAILED with the new epoch. See the [transport contract](docs/api-contract.md#transport-controls-implemented-subset).
 
 The private libFLAC build routes codec allocations through a bounded worker-owned
 budget. The source owns one arena for its wrapper, path, frame scratch and converter.

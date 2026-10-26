@@ -345,7 +345,7 @@ device/context, advances epoch and pauses the source. Explicit selection recover
 resumes PAUSED playback. Copy target from a successful status read. PLAY is a
 no-op while PLAYING/DRAINING; it fails BAD_STATE without an output or from
 EMPTY/ENDED/FAILED. PAUSE succeeds unchanged in READY/PAUSED and fails from
-EMPTY/ENDED/FAILED. STOP returns UNSUPPORTED until stop/rewind is implemented.
+EMPTY/ENDED/FAILED. STOP rewinds the retained source to READY at frame zero.
 Targets are checked at admission and again before commitment; mismatch is STALE.
 
 For example, with `status` from a successful `teder_get_status` call:
@@ -379,6 +379,26 @@ ordinary cancellation does not revoke the command. Close ends native borrows
 before deciding a pending command's outcome: an acknowledged change keeps its
 actual result; a change never applied returns CANCELLED. No timeout frees a
 callback borrower. Live positions and latency estimates are not implemented yet.
+
+STOP commits cancellation of the outstanding media request, then quiesces native
+output and advances epoch. Source ID, track label, output selection and gain/mute
+are retained. Old PCM is discarded only after the callback returns. Preparation
+reopens the retained path at frame zero; its source arena uses the same reservation
+and lifetime rules as seek. Failure leaves FAILED and reports the committed target.
+EMPTY stop succeeds without changing epoch, but still cancels pending preparation.
+Repeated stop with a retained source performs another rewind and advances epoch.
+
+During stop, `media_request` names the stop request until rewind completes. New
+media mutations return BUSY. Later controls remain queued in admission order;
+close is always available. Cancelled preparation keeps its slot and native resources
+until its worker returns. Stop never detaches a blocked file read. Cancellation
+before stop commitment preserves playback; cancellation afterward cannot undo it.
+Close during rewind waits for cleanup and returns CANCELLED if rewind did not finish.
+
+Seek to known duration, including a validated empty stream, yields ENDED with
+DECODE_EOF and SUBMIT_EOF: no remaining PCM needs submission. An earlier seek
+preserves paused/playing intent; from ENDED or FAILED it yields READY. Invalid
+ranges and decoder failures before commitment preserve the existing stream.
 
 ### Analysis and rendering (planned)
 

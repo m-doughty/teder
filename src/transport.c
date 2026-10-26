@@ -11,8 +11,6 @@ teder_code TEDER_CALL teder_transport(teder_engine *e,
 	*request = 0;
 	if (!target || action < TEDER_PLAY || action > TEDER_STOP)
 		return TEDER_INVALID;
-	if (action == TEDER_STOP)
-		return TEDER_UNSUPPORTED; /* Cancellation and staged rewind are not implemented yet. */
 	td_media_input input = {.target = *target, .flags = action};
 	return td_submit_media(e, TEDER_OP_TRANSPORT, NULL, 0, &input, request);
 }
@@ -57,6 +55,11 @@ static teder_code applied(teder_engine *e, uint64_t revision)
 
 void td_transport(teder_engine *e, uint32_t slot)
 {
+	if (e->requests[slot].info.operation == TEDER_OP_TRANSPORT &&
+	    e->requests[slot].media.flags == TEDER_STOP) {
+		td_stop(e, slot);
+		return;
+	}
 	td_refill_pause(e);
 	td_output_report(e);
 	td_media_checkpoint(e, e->requests[slot].info.request, TD_TRANSPORT_BEFORE_COMMIT);
