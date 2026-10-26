@@ -19,6 +19,9 @@ foreach(line IN LISTS lines)
 	if(ALLOW_PCM AND symbol MATCHES "^_?td_pcm_(select|peek|consume)$")
 		continue()
 	endif()
+	if(ALLOW_RENDER AND symbol MATCHES "^_?td_audio_render$")
+		continue()
+	endif()
 	# Sanitizer instrumentation is diagnostic, not part of production callback work.
 	if(NOT symbol MATCHES "^_*(memcpy|memset|chkstk(_ms)?|stack_chk_fail|security_check_cookie|security_cookie)$" AND
 		NOT symbol MATCHES "^_+(asan|ubsan|tsan)_[A-Za-z0-9_]+$")

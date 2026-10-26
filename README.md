@@ -34,12 +34,15 @@ No whole-track allocation is introduced.
 
 The private callback core now renders stereo float PCM with gain, mute and
 silence filling. It borrows the existing pool and allocates nothing. Tests cover
-variable requests and concurrent production; native device wiring and audible
-playback are not implemented yet. No additional public function is available yet.
+variable requests and concurrent production. A private device owner now connects
+this core to miniaudio, with native start/stop and callback-safe teardown.
+Engine wiring and audible playback are not implemented yet; no new public export is available.
 
 Backend contexts now have a private owner and bounded allocator. Enumeration
 copies up to 128 outputs into detached results, with engine-scoped opaque keys.
-This foundation does not open devices or implement the public device requests yet.
+Each device owns a separate arena and borrows its context until native teardown
+finishes. Configuration changes require a stopped device. Native tests submit
+silence through WASAPI and headless ALSA. Public device requests are not implemented yet.
 
 The private libFLAC build routes codec allocations through a bounded worker-owned
 budget. The source owns one arena for its wrapper, path, frame scratch and converter.

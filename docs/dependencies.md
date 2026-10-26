@@ -28,7 +28,12 @@ patch anchors; downloaded sources stay unchanged. The fixes release the internal
 log and backend APIs on failed initialization, unwind context mutex stages, and
 release WASAPI/ALSA/PulseAudio libraries on their early failure paths.
 `backend.unwind` checks the reproduced Windows handle leak; allocator and native
-enumeration tests cover the context owner.
+enumeration tests cover the context owner. `cmake/MiniaudioDevice.cmake` also
+repairs device initialization cleanup: release the stop event on backend failure,
+and run the resource destructor when initialization fails before a worker starts.
+CoreAudio now checks and tracks its separate stop event and frees it after unit
+disposal. Windows handle counts and post-init destructor assertions reproduce
+the device defects.
 
 libFLAC serves both playback decoding and metadata probing. This avoids a second
 FLAC decoder and keeps frame/error/metadata handling in the maintained codec.
@@ -87,7 +92,9 @@ a blocked OS read is not forcibly interruptible by the codec.
 
 Arena use remains required for teder-owned objects with a common destruction
 boundary. External objects still need their proper destructor before their
-containing source/engine region is released.
+containing source/engine region is released. The private device callback, audio
+renderer and PCM consumer have separate import audits with deliberate-free
+negative controls.
 
 Source evidence: miniaudio's `ma_allocation_callbacks` and
 `ma_data_converter_init_preallocated`; libFLAC's `stream_decoder.c` constructor,

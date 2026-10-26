@@ -54,6 +54,12 @@ teder_target(teder_audio_callback)
 add_library(teder_backend OBJECT src/backend.c src/backend_heap.c)
 teder_target(teder_backend)
 target_link_libraries(teder_backend PRIVATE teder_miniaudio)
+add_library(teder_device OBJECT src/device.c)
+teder_target(teder_device)
+target_link_libraries(teder_device PRIVATE teder_miniaudio)
+add_library(teder_device_callback OBJECT src/device_callback.c)
+teder_target(teder_device_callback)
+target_link_libraries(teder_device_callback PRIVATE teder_miniaudio)
 add_library(teder_pcm OBJECT src/pcm_pool.c src/retire.c)
 teder_target(teder_pcm)
 add_library(teder_lifetime OBJECT src/engine.c src/result.c src/control.c src/request.c src/decode_worker.c)
@@ -71,6 +77,7 @@ add_library(teder src/build.c $<TARGET_OBJECTS:teder_memory>
 	$<TARGET_OBJECTS:teder_pcm> $<TARGET_OBJECTS:teder_pcm_callback>
 	$<TARGET_OBJECTS:teder_audio_callback>
 	$<TARGET_OBJECTS:teder_backend>
+	$<TARGET_OBJECTS:teder_device> $<TARGET_OBJECTS:teder_device_callback>
 	$<TARGET_OBJECTS:teder_lifetime>
 	$<TARGET_OBJECTS:teder_source>
 	$<TARGET_OBJECTS:teder_miniaudio> $<TARGET_OBJECTS:teder_kissfft>)

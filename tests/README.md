@@ -151,6 +151,28 @@ Linux needs the ALSA or PulseAudio runtime library; Ubuntu packages are
 `libasound2t64` and `libpulse0`. A headless ALSA context may enumerate zero devices.
 This is context/enumeration evidence, not playback or native callback-stop evidence.
 
+## Native device ownership
+
+`-R '^device\.'` selects lifecycle, failures, closing, unwind and two callback
+import audits. The tests use real miniaudio lifecycle functions with synthetic
+backend callbacks. They verify exact PCM/guards/counters, negotiated fields,
+context BUSY loans, immutable running configuration, post-init allocation failure,
+and start/stop failure after a native borrower exists. The closing gates sit in
+synthetic native dispatch/teardown, outside the production audio callback.
+Native uninit must join that borrower before releasing the device arena.
+The Windows unwind check preserves exact handle counts over 16 rejected opens.
+
+The adapter may import only the separately audited `td_audio_render` and allowed
+compiler primitives. It cannot allocate, release, signal or control the device.
+Its counters describe raw missing PCM, including EOF; they are not clock or
+public underrun classification. Configuration/report access requires quiescence.
+
+Run `build/bin/teder_test_device native` separately. It opens the current default
+on Windows, or the first enumerated output elsewhere, submits three silent PCM
+frames, stops, closes and injects failure at every observed device-init allocation.
+Missing backend/device support fails the test. Headless ALSA output and silent
+WASAPI submission are native lifecycle evidence, not audible music acceptance.
+
 ## Linux ThreadSanitizer in Docker
 
 From the package root, run `python tools/run-tsan-docker.py` with Python 3 and

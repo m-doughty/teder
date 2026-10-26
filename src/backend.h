@@ -47,5 +47,16 @@ td_backend_enumerate(td_backend *, uint64_t result_limit, uint32_t key_limit, te
 /* Decode only validated backend-specific bytes; no native access, pointer or
  * OS-handle deserialization. Output is unchanged on failure. */
 teder_code td_backend_key(td_backend *, teder_blob, ma_device_id *);
+typedef struct {
+	ma_context *context;
+	ma_device_id id;
+	td_allocator allocator;
+	uint32_t backend;
+} td_backend_loan;
+/* Lifecycle-owner only. Empty key resolves the current default to a fixed ID.
+ * A successful borrow prevents context close until device uninit and return. */
+teder_code td_backend_borrow(td_backend *, teder_blob key, td_backend_loan *);
+void td_backend_return(td_backend *);
+teder_code td_backend_error(td_backend *);
 teder_code td_backend_close(td_backend **);
 #endif

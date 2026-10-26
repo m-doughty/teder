@@ -9,7 +9,7 @@ struct td_backend {
 	td_backend_heap heap;
 	ma_context native;
 	uint64_t token;
-	uint32_t backend, count, key_limit;
+	uint32_t backend, count, key_limit, borrowers;
 	teder_code error;
 	bool initialized;
 	teder_device_info devices[DEVICE_LIMIT];
@@ -218,11 +218,52 @@ teder_code td_backend_key(td_backend *b, teder_blob key, ma_device_id *out)
 	return TEDER_OK;
 }
 
+teder_code td_backend_error(td_backend *b)
+{
+	return td_backend_heap_error(&b->heap);
+}
+
+teder_code td_backend_borrow(td_backend *b, teder_blob key, td_backend_loan *out)
+{
+	if (!b || !out || !b->initialized)
+		return TEDER_INVALID;
+	if (b->borrowers == UINT32_MAX)
+		return TEDER_LIMIT;
+	teder_code code = td_backend_error(b);
+	if (code != TEDER_OK)
+		return code;
+	ma_device_id id;
+	if (!key.data && !key.bytes) {
+		ma_device_info info;
+		ma_result result =
+		    ma_context_get_device_info(&b->native, ma_device_type_playback, NULL, &info);
+		code = td_backend_error(b);
+		if (code != TEDER_OK || result != MA_SUCCESS)
+			return code != TEDER_OK ? code : TEDER_DEVICE_LOST;
+		unsigned char encoded[KEY_LIMIT];
+		uint32_t bytes = encode(b, &info.id, encoded);
+		code = td_backend_key(b, (teder_blob){encoded, bytes}, &id);
+	} else
+		code = td_backend_key(b, key, &id);
+	if (code != TEDER_OK)
+		return code;
+	*out = (td_backend_loan){&b->native, id, b->allocator, b->backend};
+	b->borrowers++;
+	return TEDER_OK;
+}
+
+void td_backend_return(td_backend *b)
+{
+	b->borrowers--;
+}
+
 teder_code td_backend_close(td_backend **owner)
 {
 	if (!owner || !*owner)
 		return TEDER_INVALID;
 	td_backend *b = *owner;
+	if (b->borrowers)
+		return TEDER_BUSY;
 	ma_result result = MA_SUCCESS;
 	if (b->initialized) {
 		result = b->api.uninit(&b->native);

@@ -84,6 +84,22 @@ foreach(case snapshot validation failures heap unwind)
 	add_test(NAME backend.${case} COMMAND teder_test_backend ${case})
 	set_tests_properties(backend.${case} PROPERTIES TIMEOUT 30 LABELS "unit;backend;lifetime")
 endforeach()
+add_executable(teder_test_device test_device.c)
+teder_target(teder_test_device)
+target_compile_definitions(teder_test_device PRIVATE TEDER_STATIC)
+target_link_libraries(teder_test_device PRIVATE teder_device teder_device_callback teder_audio_callback
+	teder_backend teder_lifetime teder_source FLAC teder_test_support Check::check)
+foreach(case lifecycle failures closing unwind)
+	add_test(NAME device.${case} COMMAND teder_test_device ${case})
+	set_tests_properties(device.${case} PROPERTIES TIMEOUT 40 LABELS "unit;device;lifetime")
+endforeach()
+add_test(NAME device.callback-symbols COMMAND "${CMAKE_COMMAND}" "-DNM=${teder_callback_nm}"
+	"-DOBJECT=$<TARGET_OBJECTS:teder_device_callback>" -DALLOW_RENDER=ON
+	-P "${CMAKE_CURRENT_SOURCE_DIR}/support/callback_symbols.cmake")
+add_test(NAME device.callback-control COMMAND "${CMAKE_COMMAND}" "-DNM=${teder_callback_nm}"
+	"-DOBJECT=$<TARGET_OBJECTS:teder_callback_control>" -DALLOW_RENDER=ON
+	-P "${CMAKE_CURRENT_SOURCE_DIR}/support/callback_control.cmake")
+set_tests_properties(device.callback-symbols device.callback-control PROPERTIES TIMEOUT 20 LABELS "device;callback-audit")
 foreach(case memory hooks sink gates)
 	add_test(NAME harness.${case} COMMAND teder_test_harness ${case})
 	set_tests_properties(harness.${case} PROPERTIES TIMEOUT 20 LABELS "harness")

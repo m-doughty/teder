@@ -97,6 +97,7 @@ foreach(field pApplicationName pServerName)
 	teder_ma_replace(teder_ma_header "${prefix}return MA_OUT_OF_MEMORY;"
 		"${prefix}\n#ifndef MA_NO_RUNTIME_LINKING\n        ma_dlclose(ma_context_get_log(pContext), pContext->pulse.pulseSO);\n#endif\n        return MA_OUT_OF_MEMORY;")
 endforeach()
+include(cmake/MiniaudioDevice.cmake)
 set(teder_ma_patched "${PROJECT_BINARY_DIR}/miniaudio-patched")
 file(MAKE_DIRECTORY "${teder_ma_patched}")
 file(WRITE "${teder_ma_patched}/miniaudio.h" "${teder_ma_header}")
