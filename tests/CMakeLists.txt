@@ -61,6 +61,21 @@ teder_target(teder_callback_control)
 add_test(NAME pcm.callback-control COMMAND "${CMAKE_COMMAND}" "-DNM=${teder_callback_nm}"
 	"-DOBJECT=$<TARGET_OBJECTS:teder_callback_control>" -P "${CMAKE_CURRENT_SOURCE_DIR}/support/callback_control.cmake")
 set_tests_properties(pcm.callback-control PROPERTIES TIMEOUT 20 LABELS "pcm;callback-audit;negative-control")
+add_executable(teder_test_audio test_audio_callback.c)
+teder_target(teder_test_audio)
+target_link_libraries(teder_test_audio PRIVATE teder_audio_callback teder_test_support Check::check)
+foreach(case samples controls generations bounds concurrent)
+	add_test(NAME audio.${case} COMMAND teder_test_audio ${case})
+	set_tests_properties(audio.${case} PROPERTIES TIMEOUT 30 LABELS "unit;audio;lifetime")
+endforeach()
+add_test(NAME audio.callback-symbols COMMAND "${CMAKE_COMMAND}" "-DNM=${teder_callback_nm}"
+	"-DOBJECT=$<TARGET_OBJECTS:teder_audio_callback>" -DALLOW_PCM=ON
+	-P "${CMAKE_CURRENT_SOURCE_DIR}/support/callback_symbols.cmake")
+add_test(NAME audio.callback-control COMMAND "${CMAKE_COMMAND}" "-DNM=${teder_callback_nm}"
+	"-DOBJECT=$<TARGET_OBJECTS:teder_callback_control>" -DALLOW_PCM=ON
+	-P "${CMAKE_CURRENT_SOURCE_DIR}/support/callback_control.cmake")
+set_tests_properties(audio.callback-symbols PROPERTIES TIMEOUT 20 LABELS "audio;callback-audit")
+set_tests_properties(audio.callback-control PROPERTIES TIMEOUT 20 LABELS "audio;callback-audit;negative-control")
 foreach(case memory hooks sink gates)
 	add_test(NAME harness.${case} COMMAND teder_test_harness ${case})
 	set_tests_properties(harness.${case} PROPERTIES TIMEOUT 20 LABELS "harness")

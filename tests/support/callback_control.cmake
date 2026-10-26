@@ -1,4 +1,5 @@
 execute_process(COMMAND "${CMAKE_COMMAND}" "-DNM=${NM}" "-DOBJECT=${OBJECT}"
+	"-DALLOW_PCM=${ALLOW_PCM}"
 	-P "${CMAKE_CURRENT_LIST_DIR}/callback_symbols.cmake"
 	RESULT_VARIABLE code OUTPUT_VARIABLE output ERROR_VARIABLE error)
 if(code EQUAL 0 OR NOT error MATCHES "Unexpected callback dependency: [^\n]*free")

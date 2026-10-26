@@ -14,6 +14,11 @@ foreach(line IN LISTS lines)
 	if(symbol STREQUAL "_GLOBAL_OFFSET_TABLE_")
 		continue()
 	endif()
+	# The renderer may call only these audited consumer operations. The PCM
+	# object is separately checked without this allowance (no recursive escape).
+	if(ALLOW_PCM AND symbol MATCHES "^_?td_pcm_(select|peek|consume)$")
+		continue()
+	endif()
 	# Sanitizer instrumentation is diagnostic, not part of production callback work.
 	if(NOT symbol MATCHES "^_*(memcpy|memset|chkstk(_ms)?|stack_chk_fail|security_check_cookie|security_cookie)$" AND
 		NOT symbol MATCHES "^_+(asan|ubsan|tsan)_[A-Za-z0-9_]+$")

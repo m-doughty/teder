@@ -119,6 +119,23 @@ consumer-quiescence handshake permits close. The external consumer is a private
 native test endpoint, not evidence of real device output. Source conversion tests
 also compare primed and direct conversion against the independent references.
 
+## Callback rendering
+
+`-R '^audio\.'` selects five rendering cases and two callback audits.
+Exact checks cover partial/cross-block output, source-final boundaries, gain,
+mute consumption, disabled preservation, stale/future generations, zero frames,
+invalid capacities/configuration and untouched guard samples. A 4,000-block
+producer/renderer race checks every stereo sample, silence suffix and frame count.
+Heap guards verify no callback allocation/release; retired source arenas remain
+live until the producer reaps their last returned blocks.
+
+The audio object may import only `td_pcm_select`, `td_pcm_peek`, `td_pcm_consume`
+and the existing compiler/sanitizer/memory primitives. The PCM object has its own
+stricter audit, and deliberate `free` imports must fail both audit modes. These
+tests supply coherent configuration by value; they do not certify future control
+publication, native device stop, hardware deadlines, public underrun classification
+or audible output. Missing frames are raw unavailable PCM, including after EOF.
+
 ## Linux ThreadSanitizer in Docker
 
 From the package root, run `python tools/run-tsan-docker.py` with Python 3 and

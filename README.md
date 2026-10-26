@@ -32,6 +32,11 @@ reads, generation switches and source retirement. The private FLAC source now
 streams decoded/converted PCM into this pool; device wiring follows.
 No whole-track allocation is introduced.
 
+The private callback core now renders stereo float PCM with gain, mute and
+silence filling. It borrows the existing pool and allocates nothing. Tests cover
+variable requests and concurrent production; native device wiring and audible
+playback are not implemented yet. No additional public function is available yet.
+
 The private libFLAC build routes codec allocations through a bounded worker-owned
 budget. The source owns one arena for its wrapper, path, frame scratch and converter.
 Tests cover decoding, staged seeking, conversion, cancellation and resource retirement.
