@@ -61,6 +61,13 @@ int main(int argc, char **argv)
 		return 21;
 	if (teder_set_gain(NULL, 0.5f, 0, &invalid_request) != TEDER_INVALID || invalid_request != 0)
 		return 22;
+	if (teder_prepare_next(NULL, &invalid_target, 0, NULL, 0, 42, &invalid_request) !=
+	        TEDER_INVALID ||
+	    invalid_request != 0)
+		return 23;
+	if (teder_clear_next(NULL, &invalid_target, 0, &invalid_request) != TEDER_INVALID ||
+	    invalid_request != 0)
+		return 24;
 	teder_config config = {0};
 	config.struct_size = sizeof(config);
 	config.abi_version = TEDER_ABI_VERSION;

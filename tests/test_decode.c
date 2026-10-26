@@ -21,8 +21,8 @@
 
 typedef struct {
 	th_tracker tracker;
-	th_gate gate, consumer;
-	atomic_uint point, request, hit, starts, stops, joins, wait_join;
+	th_gate gate, consumer, publication;
+	atomic_uint point, request, hit, starts, stops, joins, wait_join, publication_point;
 	atomic_uint opened[32], closed[32], reads[32], idle;
 	uint32_t fail_stage;
 } context;
@@ -30,6 +30,8 @@ typedef struct {
 static void checkpoint(void *p, uint64_t request, unsigned point)
 {
 	context *c = p;
+	if (point == atomic_load(&c->publication_point))
+		th_gate_hit(&c->publication);
 	if (point == TD_PREPARE_STARTED)
 		atomic_fetch_add(&c->starts, 1);
 	if (point == TD_PREPARE_STOPPED)
@@ -67,6 +69,7 @@ static void init(context *c)
 {
 	memset(c, 0, sizeof(*c));
 	atomic_init(&c->point, 0);
+	atomic_init(&c->publication_point, 0);
 	atomic_init(&c->request, 0);
 	atomic_init(&c->hit, 0);
 	atomic_init(&c->starts, 0);
@@ -80,7 +83,8 @@ static void init(context *c)
 		atomic_init(&c->reads[i], 0);
 	}
 	ck_assert(th_tracker_init(&c->tracker));
-	ck_assert(th_gate_init(&c->gate) && th_gate_init(&c->consumer));
+	ck_assert(th_gate_init(&c->gate) && th_gate_init(&c->consumer) &&
+	          th_gate_init(&c->publication));
 }
 
 static void arm(context *c, uint32_t point, uint32_t request)
@@ -194,6 +198,7 @@ static void finish(context *c, teder_engine **e)
 	ck_assert(th_tracker_clean(&c->tracker));
 	th_tracker_uninit(&c->tracker);
 	th_gate_uninit(&c->consumer);
+	th_gate_uninit(&c->publication);
 	th_gate_uninit(&c->gate);
 }
 
@@ -474,6 +479,7 @@ START_TEST(failures)
 		th_tracker_uninit(&c.tracker);
 		th_gate_uninit(&c.gate);
 		th_gate_uninit(&c.consumer);
+		th_gate_uninit(&c.publication);
 	}
 }
 END_TEST
@@ -589,6 +595,296 @@ START_TEST(closing)
 }
 END_TEST
 
+static uint64_t prepare(teder_engine *e, const char *path, uint64_t track)
+{
+	teder_status s = status(e);
+	uint64_t id;
+	teder_code code;
+	RETRY(
+	    code,
+	    teder_prepare_next(e, &s.current, s.next_source, path, (uint32_t)strlen(path), track, &id));
+	OK(code);
+	return id;
+}
+
+static uint64_t clear(teder_engine *e)
+{
+	teder_status s = status(e);
+	uint64_t id;
+	teder_code code;
+	RETRY(code, teder_clear_next(e, &s.current, s.next_source, &id));
+	OK(code);
+	return id;
+}
+
+static void done(teder_engine *e, uint64_t id, teder_code expected)
+{
+	ck_assert_msg(
+	    terminal(e, id).outcome == expected, "request %u expected %d", (unsigned)id, expected);
+	ack(e, id);
+}
+
+static teder_engine *with_next(context *c, bool external)
+{
+	init(c);
+	teder_engine *e = create(c, external, 32, 0);
+	done(e, open_path(e, A, 77), TEDER_OK);
+	done(e, prepare(e, A, 77), TEDER_OK);
+	teder_status s = status(e);
+	ck_assert(s.current.epoch == 2 && s.current.source == 1 && s.track == 77 &&
+	          s.next_source == 2 && s.next_track == 77 && s.next_state == TEDER_NEXT_READY);
+	return e;
+}
+
+START_TEST(next_basic)
+{
+	context c;
+	teder_engine *e = with_next(&c, true);
+	teder_status original = status(e);
+	uint64_t rejected = 99;
+	teder_code code;
+	RETRY(code, teder_prepare_next(e, &original.current, 0, A, sizeof(A) - 1, 0, &rejected));
+	ck_assert(code == TEDER_STALE && !rejected);
+	ck_assert(teder_prepare_next(e, NULL, 2, A, sizeof(A) - 1, 0, &rejected) == TEDER_INVALID);
+	ck_assert(teder_prepare_next(e, &original.current, 2, "relative", 8, 0, &rejected) ==
+	          TEDER_INVALID);
+	ck_assert(teder_clear_next(e, NULL, 2, &rejected) == TEDER_INVALID && !rejected);
+	size_t reservation;
+	OK(td_source_plan(sizeof(A) - 1, 8 * 1024 * 1024, &reservation));
+	td_lock(e);
+	size_t ceiling = e->owned_bytes + reservation;
+	td_unlock(e);
+	for (unsigned i = 0; i < 8; i++) {
+		uint64_t id = prepare(e, A, 77);
+		teder_request_info r = terminal(e, id);
+		ck_assert(r.outcome == TEDER_OK && r.committed.epoch == 2 && r.committed.source == 3 + i &&
+		          r.track == 77);
+		ack(e, id);
+		teder_status s = status(e);
+		ck_assert(s.next_state == TEDER_NEXT_READY && s.next_source == 3 + i &&
+		          s.current.source == 1 && s.current.epoch == 2 && !s.output_frame);
+		td_lock(e);
+		ck_assert(e->owned_bytes <= ceiling);
+		td_unlock(e);
+		/* Never poll events: retained notifications cannot own source arenas. */
+	}
+	done(e, clear(e), TEDER_OK);
+	ck_assert(status(e).next_state == TEDER_NEXT_NONE && !status(e).next_source);
+	done(e, clear(e), TEDER_OK); /* zero/none is an acknowledged no-op */
+	samples(e, original.current, 77, track_a, 0, 16);
+	finish(&c, &e);
+}
+END_TEST
+
+START_TEST(next_failures)
+{
+	size_t count = 0;
+	for (size_t n = 0; n <= count; n++) {
+		context c;
+		teder_engine *e = with_next(&c, true);
+		/* Hold the control/producer after all active allocation has finished. */
+		arm(&c, TD_DECODE_IDLE, 0);
+		td_signal(e);
+		th_gate_await(&c.gate);
+		ma_mutex_lock(&c.tracker.lock);
+		size_t before = c.tracker.attempts;
+		c.tracker.fail_at = n ? before + n : 0;
+		ma_mutex_unlock(&c.tracker.lock);
+		uint64_t id = prepare(e, B, 88);
+		th_gate_release(&c.gate);
+		teder_request_info r = terminal(e, id);
+		ck_assert(r.outcome == (n ? TEDER_NO_MEMORY : TEDER_OK));
+		if (!n) {
+			ma_mutex_lock(&c.tracker.lock);
+			count = c.tracker.attempts - before;
+			ma_mutex_unlock(&c.tracker.lock);
+			ck_assert(count > 5);
+		}
+		ack(e, id);
+		teder_status s = status(e);
+		ck_assert(s.current.source == 1 && s.current.epoch == 2 && s.track == 77 &&
+		          s.next_source == (n ? 2 : 3) && s.next_track == (n ? 77 : 88));
+		samples(e, s.current, 77, track_a, 0, 16);
+		finish(&c, &e);
+	}
+	printf("successor replacement fail-at-1..%u: active and prior successor preserved\n",
+	       (unsigned)count);
+	context c;
+	teder_engine *e = with_next(&c, true);
+	done(e, prepare(e, FIXTURE_DIR "/missing.flac", 88), TEDER_IO);
+	done(e, prepare(e, FIXTURE_DIR "/track-a.pcm", 88), TEDER_UNSUPPORTED);
+	td_lock(e);
+	e->config.engine_bytes_limit = e->owned_bytes;
+	td_unlock(e);
+	done(e, prepare(e, B, 88), TEDER_LIMIT);
+	ck_assert(status(e).next_source == 2 && status(e).next_track == 77);
+	samples(e, status(e).current, 77, track_a, 0, 16);
+	finish(&c, &e);
+}
+END_TEST
+
+START_TEST(next_cancellation)
+{
+	for (unsigned action = 0; action < 3; action++)
+		for (unsigned after = 0; after < 2; after++) {
+			context c;
+			teder_engine *e = with_next(&c, true);
+			arm(&c, after ? TD_MEDIA_AFTER_COMMIT : TD_MEDIA_BEFORE_COMMIT, 3);
+			uint64_t id = action == 1 ? clear(e) : prepare(e, B, 88);
+			th_gate_await(&c.gate);
+			teder_code code;
+			if (action == 2)
+				OK(teder_request_close(e));
+			else {
+				RETRY(code, teder_request_cancel(e, id));
+				OK(code);
+			}
+			th_gate_release(&c.gate);
+			done(e, id, after ? TEDER_OK : TEDER_CANCELLED);
+			if (action != 2) {
+				teder_status s = status(e);
+				ck_assert(s.next_source == (after ? (action == 1 ? 0 : 3) : 2));
+				samples(e, s.current, 77, track_a, 0, 16);
+			}
+			finish(&c, &e);
+		}
+}
+END_TEST
+
+START_TEST(next_progress)
+{
+	context c;
+	init(&c);
+	teder_engine *e = create(&c, true, 4, 0);
+	done(e, open_path(e, A, 77), TEDER_OK);
+	arm(&c, TD_SOURCE_READ, 2);
+	uint64_t id = prepare(e, B, 88);
+	th_gate_await(&c.gate);
+	teder_status s = status(e);
+	ck_assert(s.media_request == id && s.next_state == TEDER_NEXT_NONE);
+	samples(e, s.current, 77, track_a, 0, 16); /* active decode runs during blocked preparation */
+	th_gate_release(&c.gate);
+	done(e, id, TEDER_OK);
+	ck_assert(status(e).next_source == 2);
+	finish(&c, &e);
+	for (unsigned action = 0; action < 3; action++) {
+		e = with_next(&c, false);
+		if (action == 0)
+			id = seek_to(e, status(e).current, 7);
+		else if (action == 1)
+			id = open_path(e, B, 88);
+		else {
+			s = status(e);
+			teder_code code;
+			RETRY(code, teder_transport(e, &s.current, TEDER_STOP, &id));
+			OK(code);
+		}
+		done(e, id, TEDER_OK);
+		s = status(e);
+		ck_assert(s.next_state == TEDER_NEXT_NONE && !s.next_source && !s.next_track &&
+		          s.current.epoch == 3 && s.current.source == (action == 1 ? 3 : 1));
+		finish(&c, &e);
+	}
+}
+END_TEST
+
+typedef struct {
+	teder_engine *engine;
+	td_source *source;
+	teder_code code;
+} publisher;
+
+static void publish_next(void *p)
+{
+	publisher *pub = p;
+	do {
+		pub->code = td_source_pump(pub->source, &pub->engine->pcm);
+	} while (pub->code == TEDER_AGAIN);
+}
+
+START_TEST(next_adoption)
+{
+	for (unsigned action = 0; action < 4; action++) {
+		context c;
+		teder_engine *e = with_next(&c, true);
+		teder_status s = status(e);
+		samples(e, s.current, 77, track_a, 0, 16);
+		uint64_t id = 0;
+		arm(&c, action == 1 ? TD_MEDIA_BEFORE_COMMIT : TD_DECODE_IDLE, action == 1 ? 3 : 0);
+		if (action == 1)
+			id = prepare(e, B, 88); /* replacement staged before old successor adoption */
+		else
+			td_signal(e);
+		th_gate_await(&c.gate);
+		/* Control has paused refill. Borrow its exclusive producer for the real
+		 * source pump; production boundary scheduling is not exercised here. */
+		publisher pub = {.engine = e};
+		td_lock(e);
+		for (unsigned i = 0; i < TD_SOURCE_JOBS; i++)
+			if (e->sources[i].state == TD_JOB_NEXT)
+				pub.source = e->sources[i].source;
+		td_unlock(e);
+		ck_assert(pub.source);
+		if (action == 0)
+			id = clear(e); /* admitted while READY, loses at worker commitment */
+		atomic_store(&c.publication_point,
+		             action == 2 ? TD_NEXT_BEFORE_PUBLISH : TD_NEXT_AFTER_PUBLISH);
+		th_thread worker;
+		ck_assert(th_thread_start(&worker, publish_next, &pub));
+		th_gate_await(&c.publication);
+		td_pcm_view held = {0};
+		if (action != 2) {
+			s = status(e);
+			ck_assert(s.next_state == TEDER_NEXT_COMMITTED && s.next_source == 2 &&
+			          s.current.source == 1 && s.current.epoch == 2);
+			held = peek(e, 2);
+			ck_assert(held.generation->source == 2 && held.generation->track == 77 &&
+			          held.frames == 16);
+			for (unsigned i = 0; i < 32; i++)
+				ck_assert(held.samples[i] == track_a[i] / 32768.0f);
+		}
+		if (action == 0) {
+			uint64_t rejected = 99;
+			teder_code code;
+			code = teder_clear_next(e, &s.current, 2, &rejected);
+			ck_assert(code == TEDER_BUSY && !rejected);
+		} else if (action >= 2) {
+			atomic_store(&c.wait_join, 1);
+			OK(teder_request_close(e));
+			ck_assert(teder_destroy(&e) == TEDER_BUSY);
+		}
+		th_gate_release(&c.publication);
+		th_thread_join(&worker);
+		ck_assert(pub.code == (action == 2 ? TEDER_CANCELLED : TEDER_OK));
+		th_gate_release(&c.gate);
+		if (action <= 1)
+			done(e, id, TEDER_TOO_LATE);
+		if (action == 1) {
+			ck_assert(atomic_load(&c.closed[3]) == 1 && !atomic_load(&c.closed[2]));
+		}
+		if (action == 0) {
+			uint64_t rejected = 99;
+			teder_code code;
+			RETRY(code, teder_clear_next(e, &s.current, 2, &rejected));
+			ck_assert(code == TEDER_TOO_LATE && !rejected);
+			teder_target stale = {s.current.epoch - 1, s.current.source};
+			RETRY(code, teder_clear_next(e, &stale, 2, &rejected));
+			ck_assert(code == TEDER_STALE && !rejected);
+		}
+		if (action >= 2)
+			th_gate_await(&c.consumer);
+		if (action != 2) {
+			ck_assert(!atomic_load(&c.closed[2]));
+			ck_assert(held.samples[0] == track_a[0] / 32768.0f);
+			OK(td_pcm_consume(&e->pcm, held.frames));
+		}
+		if (action >= 2)
+			th_gate_release(&c.consumer);
+		finish(&c, &e);
+	}
+}
+END_TEST
+
 int main(int argc, char **argv)
 {
 	if (argc != 2)
@@ -608,6 +904,16 @@ int main(int argc, char **argv)
 		test = closing;
 	else if (!strcmp(argv[1], "identity"))
 		test = identity;
+	else if (!strcmp(argv[1], "next-basic"))
+		test = next_basic;
+	else if (!strcmp(argv[1], "next-failures"))
+		test = next_failures;
+	else if (!strcmp(argv[1], "next-cancellation"))
+		test = next_cancellation;
+	else if (!strcmp(argv[1], "next-progress"))
+		test = next_progress;
+	else if (!strcmp(argv[1], "next-adoption"))
+		test = next_adoption;
 	else
 		return 2;
 	Suite *suite = suite_create("decode");

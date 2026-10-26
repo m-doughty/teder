@@ -2,7 +2,7 @@
 
 A C17 playback and analysis library, with a separate notcurses
 renderer. Version 0.1.0 plays local FLAC, with play/pause/stop,
-seeking, submitted playback clocks and software gain/mute. Gapless transitions,
+seeking, successor preparation, submitted playback clocks and software gain/mute. Gapless transitions,
 analysis and rendering remain in progress.
 
 Implemented exports:
@@ -12,6 +12,7 @@ Implemented exports:
   `teder_request_close`, and `teder_destroy`.
 - `teder_open`, `teder_seek`, `teder_enumerate_devices`, and `teder_select_device`.
 - `teder_transport` (PLAY/PAUSE/STOP) and `teder_set_gain`.
+- `teder_prepare_next` and `teder_clear_next`; readiness is in status.
 - `teder_request_poll`, `teder_request_get`, `teder_request_cancel`,
   `teder_request_take_result`, `teder_request_ack`, and `teder_event_poll`.
 - `teder_result_kind`, `teder_result_probe`, `teder_result_tag`,
@@ -20,8 +21,9 @@ Implemented exports:
 
 Build queries still report zero capabilities/backend mask. FLAC open and seek
 prepare sources asynchronously and stream bounded PCM. AUTOPLAY starts the selected
-output after bounded prefill. Other declarations
-remain draft contracts and will not link.
+output after bounded prefill. Successor preparation retains a separate source without starting it. Automatic
+gapless splicing is not implemented yet. See [successor usage](docs/sources.md#prepared-successors).
+Other declarations remain draft contracts and will not link.
 
 Each engine owns one arena containing its handle, copied configuration and
 fixed request/input/event/PCM storage. Each result owns a separate arena with

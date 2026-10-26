@@ -27,10 +27,11 @@ rewind leaves FAILED. The [playback clock](api-contract.md#playback-clock-implem
 tracks consumed PCM, not decoder read-ahead, and preserves the final submitted
 source position across device replacement.
 
-Three fixed engine job records bound active, staged and retiring sources together.
+Three fixed engine job records bound active, ready, staged and retiring sources together.
 Each source reserves its arena plus an 8 MiB codec cap before construction.
 The cap is a reservation, not an eager allocation. Exhausting the engine/codec
 budget returns LIMIT. A pending media mutation or no free job returns BUSY.
+Clear-next needs no free source job; it still needs a request slot.
 A retired source still holds its reservation until every PCM reference returns.
 
 The private worker API in `src/source.h` implements this handoff; its header is
@@ -102,3 +103,56 @@ so the final native buffer is not cut off. Empty validated input ends without
 starting output. Public underruns exclude pause/EOF silence. Source positions
 advance only through consumed PCM; conversion reports estimated positions. Hardware
 latency remains unknown, so no estimated audible-end flag is published.
+
+## Prepared successors
+
+`teder_prepare_next` copies the current target, expected successor ID, absolute
+UTF-8 path and track label. Use zero as the expected ID when no successor exists.
+To replace one, pass `status.next_source`. Both identities are checked again at
+commitment. A changed target/successor returns STALE. Admission returns BUSY while
+another media mutation is pending; retry from a fresh status snapshot later.
+
+```c
+teder_status status = {
+	.struct_size = sizeof(status), .abi_version = TEDER_ABI_VERSION
+};
+uint64_t request = 0;
+teder_code code = teder_get_status(engine, &status);
+if (code == TEDER_OK)
+	code = teder_prepare_next(engine, &status.current, status.next_source,
+	                          absolute_path, path_bytes, track_label, &request);
+```
+
+The snippet assumes a live engine and an absolute UTF-8 path with its byte count.
+OK admits the request; poll it to TERMINAL, check its outcome, then acknowledge it.
+AGAIN/BUSY requires a later retry, scheduled outside an audio callback. Successful
+preparation sets `next_state=TEDER_NEXT_READY`, `next_source` and `next_track`.
+Its request outcome identifies the successor; transport commands still target
+`status.current`. During preparation, existing next fields remain unchanged and
+`media_request` identifies the pending operation.
+
+Each successful preparation creates a distinct source ID, even for the same file
+and track label. It preserves the active epoch, playback position and transport.
+The new source owns its decoder, file, converter and primed sample in the existing
+bounded source lifetime. Failed/cancelled preparation preserves the prior ready
+successor unless an independent stream change invalidates it. Slow preparation
+runs separately from active decoding. Repeated replacement shares the same three
+job slots and existing PCM pool; it never allocates an entire track.
+
+`teder_clear_next(engine, &status.current, status.next_source, &request)` removes
+a matching ready successor. Zero when none exists is a successful no-op. Both
+clear and prepare support request cancellation before their state change; after
+that change, their actual outcome stands. Cancelling an already completed prepare
+request does not clear its successor: submit clear-next instead.
+
+Successful load/seek, stop and device replacement/loss invalidate successor intent.
+Playback failure or EOF discards an uncommitted ready successor. EMPTY/ENDED/FAILED
+reject preparation with BAD_STATE. EOF during preparation completes it TOO_LATE.
+Close joins preparation and playback before freeing their source arenas.
+
+Readiness alone currently does not start the next track. Automatic
+splicing and transition reporting are not implemented yet. Their ownership hook is already implemented:
+the first successor PCM publication changes READY to COMMITTED. Replacement or
+clear that loses to publication returns TOO_LATE, and published PCM pins its source
+until returned and reaped. A validated empty successor may become READY but has no
+PCM to publish; its transition scheduling is also not implemented yet.

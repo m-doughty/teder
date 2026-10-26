@@ -42,13 +42,18 @@ static teder_code submit(teder_engine *e,
 		goto done;
 	}
 	if (mutation) {
-		bool available = false;
+		bool available = operation == TEDER_OP_CLEAR_NEXT;
 		for (unsigned i = 0; i < TD_SOURCE_JOBS; i++)
 			if (e->sources[i].state == TD_JOB_FREE)
 				available = true;
 		if (e->status.media_request || !available) {
 			code = TEDER_BUSY;
 			goto done;
+		}
+		if (operation == TEDER_OP_PREPARE || operation == TEDER_OP_CLEAR_NEXT) {
+			code = td_successor_check(e, media, operation == TEDER_OP_PREPARE, false);
+			if (code != TEDER_OK)
+				goto done;
 		}
 		if (operation == TEDER_OP_SEEK) {
 			if (media->target.epoch != e->status.current.epoch ||

@@ -15,6 +15,8 @@ typedef struct {
 	const atomic_uint *cancel;    /* optional; stable until retirement */
 	const atomic_uint *lifecycle; /* optional engine close latch; LIVE permits work */
 	void *context;
+	/* Optional first-publication ownership hook; never runs on the consumer. */
+	teder_code (*publish)(void *, td_pcm_pool *, uint32_t, const td_pcm_meta *);
 	void (*checkpoint)(void *, unsigned); /* private native-test seam, no public callback */
 } td_source_config;
 

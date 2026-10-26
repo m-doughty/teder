@@ -399,7 +399,9 @@ static teder_code publish(td_source *s, bool final)
 	                 s->filled,
 	                 (s->published ? 0 : TD_PCM_BOUNDARY | (s->start ? TD_PCM_DISCONTINUITY : 0)) |
 	                     (final ? TD_PCM_FINAL : 0)};
-	teder_code code = td_pcm_publish(s->pool, s->slot, &m);
+	teder_code code = !s->published && s->config.publish
+	                      ? s->config.publish(s->config.context, s->pool, s->slot, &m)
+	                      : td_pcm_publish(s->pool, s->slot, &m);
 	if (code != TEDER_OK)
 		return fail(s, code);
 	s->output += s->filled;

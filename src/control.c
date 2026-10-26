@@ -101,6 +101,11 @@ static void control(teder_engine *e)
 		progress = td_output_report(e) || progress;
 		td_lock(e);
 		bool failed = e->status.transport == TEDER_FAILED;
+		if ((failed || e->status.transport == TEDER_ENDED) &&
+		    e->status.next_state == TEDER_NEXT_READY) {
+			td_successor_drop(e, false);
+			progress = true; /* retire on the next pass even if refill reported EOF */
+		}
 		td_unlock(e);
 		if (failed)
 			td_output_quiesce(e);
@@ -130,6 +135,11 @@ static void control(teder_engine *e)
 		    (s->info.operation == TEDER_OP_TRANSPORT || s->info.operation == TEDER_OP_GAIN)) {
 			td_unlock(e);
 			td_transport(e, slot);
+			continue;
+		}
+		if (!cancel && !e->runtime.execute && s->info.operation == TEDER_OP_CLEAR_NEXT) {
+			td_unlock(e);
+			td_successor_clear(e, slot);
 			continue;
 		}
 		if (!cancel && !e->runtime.execute && s->info.operation == TEDER_OP_SELECT_DEVICE) {

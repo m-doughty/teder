@@ -69,11 +69,13 @@ bool td_media_dispatch(teder_engine *e, uint32_t slot)
 	teder_code code = TEDER_OK;
 	bool retarget = r->info.operation == TEDER_OP_SELECT_DEVICE ||
 	                (r->info.operation == TEDER_OP_TRANSPORT && r->media.flags == TEDER_STOP);
+	bool next = r->info.operation == TEDER_OP_PREPARE;
 	size_t reservation = 0, total = 0;
-	if (r->info.operation != TEDER_OP_OPEN && r->info.operation != TEDER_OP_SEEK && !retarget)
+	if (r->info.operation != TEDER_OP_OPEN && r->info.operation != TEDER_OP_SEEK && !retarget &&
+	    !next)
 		code = TEDER_UNSUPPORTED;
-	else if ((e->status.current.epoch == UINT64_MAX && !retarget) ||
-	         (r->info.operation == TEDER_OP_OPEN && e->last_source == UINT64_MAX)) {
+	else if ((e->status.current.epoch == UINT64_MAX && !retarget && !next) ||
+	         ((r->info.operation == TEDER_OP_OPEN || next) && e->last_source == UINT64_MAX)) {
 		td_complete(e, slot, TEDER_LIMIT);
 		td_limit_close(e);
 		return false;
@@ -83,7 +85,9 @@ bool td_media_dispatch(teder_engine *e, uint32_t slot)
 	else if (r->info.operation == TEDER_OP_SEEK && e->status.clock_flags & TEDER_DURATION_KNOWN &&
 	         r->media.frame > e->status.duration_frames)
 		code = TEDER_INVALID;
-	else
+	else if (next)
+		code = td_successor_check(e, &r->media, true, true);
+	if (code == TEDER_OK)
 		code = td_source_plan(r->input_bytes, TD_CODEC_BYTES, &reservation);
 	if (code == TEDER_OK &&
 	    (!td_size_add(e->owned_bytes, reservation, &total) || total > e->config.engine_bytes_limit))
@@ -137,8 +141,9 @@ void td_prepare_run(teder_engine *e)
 		bool selected = r->info.operation == TEDER_OP_SELECT_DEVICE;
 		bool stopped = r->info.operation == TEDER_OP_TRANSPORT;
 		bool retarget = selected || stopped;
+		bool next = r->info.operation == TEDER_OP_PREPARE;
 		bool seek = r->info.operation == TEDER_OP_SEEK || retarget;
-		td_source_config c = {.generation = r->media.target.epoch + (retarget ? 0 : 1),
+		td_source_config c = {.generation = r->media.target.epoch + (retarget || next ? 0 : 1),
 		                      .source = seek ? r->media.target.source : e->last_source + 1,
 		                      .track = seek ? e->status.track : r->media.track,
 		                      .output_rate = e->status.output_rate,
@@ -147,7 +152,8 @@ void td_prepare_run(teder_engine *e)
 		                      .cancel = &j->cancel,
 		                      .lifecycle = &e->lifecycle,
 		                      .context = j,
-		                      .checkpoint = source_checkpoint};
+		                      .checkpoint = source_checkpoint,
+		                      .publish = next ? td_successor_publish : NULL};
 		uint64_t frame = r->media.frame;
 		td_unlock(e);
 		teder_code code =
@@ -193,9 +199,23 @@ static void prepared(teder_engine *e, td_source_job *j)
 {
 	uint32_t slot = j->slot;
 	td_media_checkpoint(e, j->request, TD_MEDIA_BEFORE_COMMIT);
+	if (e->requests[slot].info.operation == TEDER_OP_PREPARE)
+		td_output_report(e);
 	td_lock(e);
 	td_request_slot *r = &e->requests[slot];
 	teder_code code = j->outcome;
+	if (r->info.operation == TEDER_OP_PREPARE) {
+		code = td_successor_ready(e, j);
+		td_unlock(e);
+		if (code == TEDER_OK)
+			td_media_checkpoint(e, j->request, TD_MEDIA_AFTER_COMMIT);
+		else if (!retire(e, j))
+			abort(); /* preparation has never published PCM */
+		td_lock(e);
+		td_complete(e, slot, code);
+		td_unlock(e);
+		return;
+	}
 	bool selected = r->info.operation == TEDER_OP_SELECT_DEVICE;
 	bool stopped = r->info.operation == TEDER_OP_TRANSPORT;
 	bool retarget = selected || stopped;
@@ -245,8 +265,7 @@ static void prepared(teder_engine *e, td_source_job *j)
 			e->status.transport = TEDER_ENDED;
 			e->status.clock_flags |= TEDER_SUBMIT_EOF;
 		}
-		e->status.next_source = e->status.next_track = 0;
-		e->status.next_state = TEDER_NEXT_NONE;
+		td_successor_drop(e, true);
 		r->info.committed = e->status.current;
 		r->info.track = e->status.track;
 	}
@@ -350,6 +369,9 @@ bool td_decode_pump(teder_engine *e)
 
 void td_sources_close(teder_engine *e)
 {
+	td_lock(e);
+	td_successor_drop(e, true);
+	td_unlock(e);
 	for (unsigned i = 0; i < TD_SOURCE_JOBS; i++)
 		if (e->sources[i].state != TD_JOB_FREE && !retire(e, &e->sources[i]))
 			abort();
@@ -359,6 +381,9 @@ void td_sources_close(teder_engine *e)
  * through the existing queues; do not reset live cursors or reuse descriptors. */
 void td_sources_suspend(teder_engine *e, uint64_t epoch)
 {
+	td_lock(e);
+	td_successor_drop(e, true);
+	td_unlock(e);
 	for (unsigned i = 0; i < TD_SOURCE_JOBS; i++) {
 		td_source_job *j = &e->sources[i];
 		td_lock(e);

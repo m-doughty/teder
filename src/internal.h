@@ -71,7 +71,7 @@ struct teder_result {
 
 typedef struct {
 	teder_target target;
-	uint64_t frame, track;
+	uint64_t frame, track, next;
 	uint32_t flags;
 	float gain;
 } td_media_input;
@@ -122,7 +122,9 @@ enum {
 	TD_REFILL_PAUSING,
 	TD_REFILL_RESUMED,
 	TD_TRANSPORT_BEFORE_COMMIT,
-	TD_TRANSPORT_PUBLISHED
+	TD_TRANSPORT_PUBLISHED,
+	TD_NEXT_BEFORE_PUBLISH,
+	TD_NEXT_AFTER_PUBLISH
 };
 
 typedef struct {
@@ -146,6 +148,8 @@ enum {
 	TD_JOB_ACTIVE,
 	TD_JOB_RETIRING,
 	TD_JOB_SUSPENDED,
+	TD_JOB_NEXT,
+	TD_JOB_ADOPTED,
 	TD_SOURCE_JOBS = 3
 };
 
@@ -225,6 +229,13 @@ void td_output_close(teder_engine *); /* lifecycle worker: device before context
 void td_output_select(teder_engine *, uint32_t slot);
 void td_transport(teder_engine *, uint32_t slot);
 void td_stop(teder_engine *, uint32_t slot);
+/* Successor bookkeeping requires the gate; retirement additionally requires
+ * exclusive producer ownership. Adopted PCM retains its generation references. */
+teder_code td_successor_check(teder_engine *, const td_media_input *, bool prepare, bool finishing);
+teder_code td_successor_ready(teder_engine *, td_source_job *);
+void td_successor_clear(teder_engine *, uint32_t slot);
+void td_successor_drop(teder_engine *, bool adopted);
+teder_code td_successor_publish(void *, td_pcm_pool *, uint32_t, const td_pcm_meta *);
 teder_code td_output_quiesce(teder_engine *); /* control, producer already paused */
 teder_code td_output_start(teder_engine *);
 bool td_output_report(teder_engine *);                   /* current producer; no native control */

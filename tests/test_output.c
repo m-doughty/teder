@@ -1932,6 +1932,84 @@ START_TEST(native_select)
 }
 END_TEST
 
+START_TEST(next_states)
+{
+	for (unsigned mode = 0; mode < 5; mode++) {
+		fixture f;
+		init(&f);
+		f.manual = true;
+		teder_config config = INIT(teder_config);
+		config.pcm_frames = 32;
+		teder_engine *e = create(&f, config, false);
+		outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
+		load_track(e);
+		outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
+		teder_status s = status(e);
+		uint64_t id;
+		teder_code code;
+		RETRY(code, teder_prepare_next(e, &s.current, 0, TRACK, sizeof(TRACK) - 1, 88, &id));
+		OK(code);
+		outcome(e, id, TEDER_OK);
+		s = status(e);
+		ck_assert(s.next_source == 2 && s.next_track == 88 && s.next_state == TEDER_NEXT_READY);
+		if (mode < 2) {
+			atomic_store(&f.point, 10);
+			RETRY(code, teder_prepare_next(e, &s.current, 2, TRACK, sizeof(TRACK) - 1, 99, &id));
+			OK(code);
+			th_gate_await(&f.gate);
+			if (mode == 0) {
+				step(&f, 16);
+				while (status(e).transport != TEDER_ENDED)
+					th_yield();
+				th_gate_release(&f.gate);
+				outcome(e, id, TEDER_TOO_LATE);
+			} else {
+				uint64_t stop = transport(e, TEDER_STOP);
+				while (status(e).current.epoch == s.current.epoch)
+					th_yield();
+				th_gate_release(&f.gate);
+				outcome(e, id, TEDER_CANCELLED);
+				outcome(e, stop, TEDER_OK);
+			}
+		} else if (mode == 2) {
+			outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
+			ck_assert(status(e).current.epoch == s.current.epoch + 1 &&
+			          status(e).transport == TEDER_PAUSED);
+		} else if (mode == 3) {
+			td_device_feed *feed = f.native->pUserData;
+			/* Manual output is idle: inject a stable callback error report. */
+			atomic_store(&feed->error, TEDER_IO);
+			td_signal(e);
+			while (status(e).transport != TEDER_FAILED || status(e).next_source)
+				th_yield();
+		} else {
+			step(&f, 16);
+			while (status(e).transport != TEDER_ENDED || status(e).next_source)
+				th_yield();
+		}
+		s = status(e);
+		ck_assert(s.next_state == TEDER_NEXT_NONE && !s.next_source && !s.next_track);
+		/* No new submission/wake may be needed to release discarded sources. */
+		for (;;) {
+			td_lock(e);
+			unsigned free = 0;
+			for (unsigned i = 0; i < TD_SOURCE_JOBS; i++)
+				free += e->sources[i].state == TD_JOB_FREE;
+			td_unlock(e);
+			if (free == TD_SOURCE_JOBS - 1)
+				break;
+			th_yield();
+		}
+		if (mode == 0 || mode >= 3) {
+			RETRY(code, teder_prepare_next(e, &s.current, 0, TRACK, sizeof(TRACK) - 1, 88, &id));
+			ck_assert(code == TEDER_BAD_STATE && !id);
+		}
+		close_engine(&e);
+		dispose(&f);
+	}
+}
+END_TEST
+
 int main(int argc, char **argv)
 {
 	if (argc != 2)
@@ -1985,6 +2063,8 @@ int main(int argc, char **argv)
 		test = clock_changes;
 	else if (!strcmp(argv[1], "clock-readers"))
 		test = clock_readers;
+	else if (!strcmp(argv[1], "next-states"))
+		test = next_states;
 	else if (!strcmp(argv[1], "native-select"))
 		test = native_select;
 	else if (!strcmp(argv[1], "native"))
