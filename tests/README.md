@@ -99,6 +99,17 @@ These are private codec tests, not asynchronous source/player acceptance.
 The existing fixture test uses stdio; its CRT-owned file buffers are outside
 the codec budget. Production source callbacks will own/account I/O separately.
 
+`-R '^source\.'` selects five private source cases. Tests generate original PCM
+through the pinned encoder, then compare decoded output against independent integer
+formulas. Coverage includes every depth 4–32, all layouts 1–8, rate endpoints,
+maximum-size frames, UTF-8 filenames, five-byte reads, staged seeks/EOF, corruption,
+unknown duration, full pools, gated open/seek cancellation and retained PCM views.
+`fixtures/conversion_reference.py` independently computes the binary64 Butterworth
+and interpolation vectors; converted samples allow 1e-6 absolute error. Pool sizes
+64 and 3 must agree, including fractional 44100-to-48000 conversion and exact counts.
+Failure sweeps cover both sequential decode and staged seek; codec/file/arena
+baselines must recover. These tests do not exercise public scheduling or real devices.
+
 ## Linux ThreadSanitizer in Docker
 
 From the package root, run `python tools/run-tsan-docker.py` with Python 3 and

@@ -28,11 +28,15 @@ including after engine destruction. See the [ownership contract](docs/api-contra
 PCM storage is split into blocks of up to 1024 stereo frames, with bounded
 publication and return queues in the same arena. The default still reserves
 512 KiB of samples, plus block/queue bookkeeping. Private tests exercise partial
-reads, generation switches and source retirement; decoder/device wiring follows. No whole-track allocation is introduced.
+reads, generation switches and source retirement. The private FLAC source now
+streams decoded/converted PCM into this pool; engine/device wiring follows.
+No whole-track allocation is introduced.
 
 The private libFLAC build routes codec allocations through a bounded worker-owned
-budget. Tests cover real decoder allocation failures and cleanup. Source staging,
-conversion and integration with the engine's budget are not implemented yet.
+budget. The source owns one arena for its wrapper, path, frame scratch and converter.
+Tests cover decoding, staged seeking, conversion, cancellation and resource retirement.
+See the [source contract](docs/sources.md). Public loading and engine reservation
+integration are not implemented yet; the private source checks its supplied reservation.
 
 Creation starts one control/lifecycle worker at LIVE/EMPTY with gain 1, no source
 and no output device. Accepted requests retain their completion slots until

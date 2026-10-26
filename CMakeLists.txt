@@ -52,6 +52,9 @@ teder_target(teder_pcm_callback)
 add_library(teder_pcm OBJECT src/pcm_pool.c src/retire.c)
 teder_target(teder_pcm)
 add_library(teder_lifetime OBJECT src/engine.c src/result.c src/control.c src/request.c)
+add_library(teder_source OBJECT src/source_flac.c src/source_file.c src/convert.c)
+teder_target(teder_source)
+target_link_libraries(teder_source PRIVATE teder_miniaudio FLAC)
 teder_target(teder_lifetime)
 target_link_libraries(teder_lifetime PRIVATE teder_miniaudio Threads::Threads)
 if(BUILD_SHARED_LIBS)
@@ -62,6 +65,7 @@ endif()
 add_library(teder src/build.c $<TARGET_OBJECTS:teder_memory>
 	$<TARGET_OBJECTS:teder_pcm> $<TARGET_OBJECTS:teder_pcm_callback>
 	$<TARGET_OBJECTS:teder_lifetime>
+	$<TARGET_OBJECTS:teder_source>
 	$<TARGET_OBJECTS:teder_miniaudio> $<TARGET_OBJECTS:teder_kissfft>)
 add_library(teder::teder ALIAS teder)
 teder_target(teder)
@@ -100,7 +104,7 @@ if(TEDER_WITH_NOTCURSES)
 endif()
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(FILES README.md DESTINATION ${CMAKE_INSTALL_DOCDIR})
-install(FILES docs/api-contract.md docs/build.md docs/dependencies.md
+install(FILES docs/api-contract.md docs/build.md docs/dependencies.md docs/sources.md
 	DESTINATION ${CMAKE_INSTALL_DOCDIR}/docs)
 set(teder_config_dir "${CMAKE_INSTALL_LIBDIR}/cmake/teder")
 configure_package_config_file(cmake/tederConfig.cmake.in

@@ -106,6 +106,9 @@ split into blocks of at most 1024 stereo float frames; a final shorter block
 preserves the exact configured frame count. Block records and both handoff queues
 also count against the engine byte limit. This private handoff is exercised by
 native tests; public playback producers and a device callback are not implemented yet.
+Private FLAC sources now stream into this handoff; their format, conversion and
+reservation rules are specified in [sources.md](sources.md). Public source requests
+and their engine-budget integration remain unimplemented.
 Snapshot fields are resolved limits; the independent snapshot pool is not implemented yet.
 Current result accessors read immutable copies built by private tests; public
 result producers are not implemented yet. `result_tag` requires distinct key
