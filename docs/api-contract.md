@@ -228,7 +228,8 @@ the request ends TOO_LATE and its staged source retires.
 
 Gapless guarantees require successor PCM ready before the native commitment
 deadline. A matching-format transition equals concatenated reference PCM;
-mixed formats use a fixed output stream and the defined conversion reference.
+mixed formats use a fixed output stream and the
+[defined conversion reference and limits](sources.md#gapless-playback).
 No native transition depends on event polling. Late preparation reports its
 outcome; starvation emits UNDERRUN and initialized silence, never invented media.
 EOF without a committed successor ends this sequence; late readiness alone

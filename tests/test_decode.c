@@ -690,7 +690,7 @@ START_TEST(next_failures)
 		size_t before = c.tracker.attempts;
 		c.tracker.fail_at = n ? before + n : 0;
 		ma_mutex_unlock(&c.tracker.lock);
-		uint64_t id = prepare(e, B, 88);
+		uint64_t id = prepare(e, FIXTURE_DIR "/mono-24.flac", 88);
 		th_gate_release(&c.gate);
 		teder_request_info r = terminal(e, id);
 		ck_assert(r.outcome == (n ? TEDER_NO_MEMORY : TEDER_OK));
@@ -713,7 +713,6 @@ START_TEST(next_failures)
 	teder_engine *e = with_next(&c, true);
 	done(e, prepare(e, FIXTURE_DIR "/missing.flac", 88), TEDER_IO);
 	done(e, prepare(e, FIXTURE_DIR "/track-a.pcm", 88), TEDER_UNSUPPORTED);
-	done(e, prepare(e, FIXTURE_DIR "/mono-24.flac", 88), TEDER_UNSUPPORTED);
 	td_lock(e);
 	e->config.engine_bytes_limit = e->owned_bytes;
 	td_unlock(e);

@@ -5,6 +5,7 @@
 #include <math.h>
 #include "source.h"
 #include "support/track.h"
+#include "support/mixed.h"
 #define LONG_TRACK OUTPUT_DIR "/output-long.flac"
 enum { LONG_FRAMES = 32769 };
 #define TRACK FIXTURE_DIR "/track-a.flac"
@@ -33,7 +34,7 @@ typedef struct {
 	atomic_uint point;
 	unsigned opened, closed, enumerated;
 	bool reject, enum_error, device_error;
-	unsigned devices, releases, starts, stops;
+	unsigned devices, releases, starts, stops, rate;
 	void *native_heap;
 #ifdef _WIN32
 	DWORD caller, owner;
@@ -89,7 +90,7 @@ static ma_result device_init(ma_device *d,
 	ck_assert(id == 'A' || id == 'B');
 	playback->format = ma_format_f32;
 	playback->channels = 2;
-	playback->sampleRate = id == 'A' ? 44100 : 22050;
+	playback->sampleRate = f->rate ? f->rate : id == 'A' ? 44100 : 22050;
 	playback->periodSizeInFrames = 8;
 	f->native = d;
 	f->devices++;
@@ -2204,33 +2205,193 @@ END_TEST
 
 START_TEST(gapless_failures)
 {
-	for (unsigned adopted = 0; adopted < 2; adopted++) {
-		th_make_track(GAP_B, adopted ? 2048 : 512);
-		FILE *file = fopen(GAP_B, "r+b");
-		ck_assert(file && !fseek(file, -1, SEEK_END));
-		int byte = fgetc(file);
-		ck_assert(byte != EOF && !fseek(file, -1, SEEK_END));
-		ck_assert(fputc(byte ^ 1, file) != EOF && !fclose(file));
-		fixture f;
-		init(&f);
-		f.manual = true;
-		teder_config config = INIT(teder_config);
-		config.pcm_frames = 4096;
-		teder_engine *e = create(&f, config, false);
-		outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
-		load_track(e);
-		gap_prepare(e, GAP_B); /* first FLAC frame is valid; later CRC fails */
-		outcome(e, transport(e, TEDER_PLAY), adopted ? TEDER_CORRUPT : TEDER_OK);
-		if (!adopted)
-			capture_track(&f, e, 0, 16);
-		teder_status s = status(e);
-		ck_assert(s.current.source == 1 && s.last_error == TEDER_CORRUPT &&
-		          s.transport == (adopted ? TEDER_FAILED : TEDER_ENDED) &&
-		          s.next_state == (adopted ? TEDER_NEXT_COMMITTED : TEDER_NEXT_NONE) &&
-		          f.starts == (adopted ? 0 : 1));
-		close_engine(&e);
-		dispose(&f);
+	for (unsigned mixed = 0; mixed < 2; mixed++)
+		for (unsigned adopted = 0; adopted < 2; adopted++) {
+			if (mixed)
+				th_make_mixed(GAP_B, (th_format){48000, 8, 24, adopted ? 2048 : 512});
+			else
+				th_make_track(GAP_B, adopted ? 2048 : 512);
+			FILE *file = fopen(GAP_B, "r+b");
+			ck_assert(file && !fseek(file, -1, SEEK_END));
+			int byte = fgetc(file);
+			ck_assert(byte != EOF && !fseek(file, -1, SEEK_END));
+			ck_assert(fputc(byte ^ 1, file) != EOF && !fclose(file));
+			fixture f;
+			init(&f);
+			f.manual = true;
+			teder_config config = INIT(teder_config);
+			config.pcm_frames = 4096;
+			teder_engine *e = create(&f, config, false);
+			outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
+			load_track(e);
+			gap_prepare(e, GAP_B); /* first FLAC frame is valid; later CRC fails */
+			outcome(e, transport(e, TEDER_PLAY), adopted ? TEDER_CORRUPT : TEDER_OK);
+			if (!adopted)
+				capture_track(&f, e, 0, 16);
+			teder_status s = status(e);
+			ck_assert(s.current.source == 1 && s.last_error == TEDER_CORRUPT &&
+			          s.transport == (adopted ? TEDER_FAILED : TEDER_ENDED) &&
+			          s.next_state == (adopted ? TEDER_NEXT_COMMITTED : TEDER_NEXT_NONE) &&
+			          f.starts == (adopted ? 0 : 1));
+			close_engine(&e);
+			dispose(&f);
+		}
+}
+END_TEST
+
+static double mixed_pair(th_format a, th_format b, unsigned rate, unsigned chunk)
+{
+	th_make_mixed(GAP_A, a);
+	th_make_mixed(GAP_B, b);
+	unsigned first = th_mixed_frames(a, rate), second = th_mixed_frames(b, rate);
+	fixture f;
+	init(&f);
+	f.manual = true;
+	f.rate = rate;
+	teder_config config = INIT(teder_config);
+	config.pcm_frames = first + second + 2048;
+	teder_engine *e = create(&f, config, false);
+	outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
+	gap_load(e, GAP_A);
+	gap_prepare(e, GAP_B);
+	outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
+	ck_assert(status(e).next_state == TEDER_NEXT_COMMITTED);
+	unsigned submitted = first && second && chunk > 1 ? first - 1 : first;
+	for (unsigned remaining = submitted; remaining;) {
+		unsigned count = remaining < chunk ? remaining : chunk;
+		step(&f, count);
+		remaining -= count;
 	}
+	if (submitted) {
+		teder_status s = clock_at(e, submitted);
+		ck_assert(s.current.source == 1 && s.source_rate == a.rate &&
+		          s.source_channels == a.channels && s.duration_frames == a.frames &&
+		          s.output_rate == rate);
+		if (submitted == first)
+			ck_assert(s.source_frame == a.frames);
+	}
+	/* Consume through the boundary in one callback, including empty markers. */
+	do {
+		step(&f, chunk);
+	} while (atomic_load(&f.captured) < first + second);
+	teder_status s;
+	do {
+		s = status(e);
+		th_yield();
+	} while (s.transport != TEDER_ENDED);
+	ck_assert(s.current.epoch == 3 && s.current.source == 2 && s.track == 77 &&
+	          s.source_rate == b.rate && s.source_channels == b.channels &&
+	          s.source_frame == b.frames && s.duration_frames == b.frames &&
+	          s.output_frame == first + second && s.output_rate == rate && s.output_channels == 2 &&
+	          !s.underrun_frames && !s.next_source && s.next_state == TEDER_NEXT_NONE &&
+	          (s.clock_flags & TEDER_SUBMIT_EOF) && s.last_error == TEDER_OK);
+	ck_assert(s.position_quality ==
+	          (b.rate == rate ? TEDER_QUALITY_MEASURED : TEDER_QUALITY_ESTIMATED));
+	ck_assert(atomic_load(&f.captured) == first + second && f.starts == 1 && !f.stops &&
+	          f.devices == 1 && !f.releases);
+	double left = th_check_mixed(f.capture, a, rate);
+	double right = th_check_mixed(f.capture + first * 2, b, rate);
+	gap_event(e, 1, 2, first);
+	close_engine(&e);
+	dispose(&f);
+	return left > right ? left : right;
+}
+
+START_TEST(gapless_rates)
+{
+	const unsigned rates[] = {8000, 22050, 44100, 48000, 88200, 96000, 192000};
+	double worst = 0;
+	for (unsigned output = 44100; output <= 48000; output += 3900)
+		for (unsigned a = 0; a < 7; a++)
+			for (unsigned b = 0; b < 7; b++) {
+				double error = mixed_pair(
+				    (th_format){rates[a], 2, 16, 37}, (th_format){rates[b], 2, 24, 29}, output, 7);
+				if (error > worst)
+					worst = error;
+			}
+	printf("98 rate pairs; worst independent-reference sample error %.9g\n", worst);
+}
+END_TEST
+
+START_TEST(gapless_formats)
+{
+	double worst = 0;
+	for (unsigned a = 1; a <= 8; a++)
+		for (unsigned b = 1; b <= 8; b++) {
+			double error = mixed_pair(
+			    (th_format){22050, a, 4 * a, 41}, (th_format){96000, b, 4 * b, 23}, 48000, 31);
+			if (error > worst)
+				worst = error;
+		}
+	for (unsigned bits = 4; bits <= 32; bits++) {
+		double error = mixed_pair(
+		    (th_format){44100, 2, bits, 31}, (th_format){44100, 2, 36 - bits, 19}, 44100, 257);
+		if (error > worst)
+			worst = error;
+	}
+	printf("64 layout pairs and 29 depth pairs; worst sample error %.9g\n", worst);
+}
+END_TEST
+
+START_TEST(gapless_edges)
+{
+	const unsigned lengths[][2] = {{0, 0}, {0, 1}, {1, 0}, {1, 1}, {1031, 513}};
+	const unsigned chunks[] = {1, 7, 257};
+	for (unsigned pair = 0; pair < 5; pair++)
+		for (unsigned chunk = 0; chunk < 3; chunk++)
+			for (unsigned reverse = 0; reverse < 2; reverse++)
+				mixed_pair((th_format){reverse ? 96000 : 22050, 8, 32, lengths[pair][0]},
+				           (th_format){reverse ? 22050 : 96000, 1, 4, lengths[pair][1]},
+				           48000,
+				           chunks[chunk]);
+	/* Both inclusive conversion-ratio limits, and the largest FLAC source rate. */
+	mixed_pair((th_format){125, 1, 4, 17}, (th_format){512000, 8, 32, 1031}, 8000, 257);
+	mixed_pair((th_format){512000, 8, 32, 1031}, (th_format){125, 1, 4, 17}, 8000, 257);
+	mixed_pair((th_format){1048575, 8, 32, 1031}, (th_format){44100, 1, 4, 17}, 44100, 7);
+}
+END_TEST
+
+START_TEST(gapless_limits)
+{
+	th_make_mixed(GAP_A, (th_format){8000, 2, 16, 8193});
+	th_make_mixed(GAP_B, (th_format){16000, 8, 24, 31});
+	fixture f;
+	init(&f);
+	f.manual = true;
+	f.rate = 8000;
+	teder_config config = INIT(teder_config);
+	config.pcm_frames = 4096;
+	teder_engine *e = create(&f, config, false);
+	outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
+	gap_load(e, GAP_A);
+	gap_prepare(e, GAP_B);
+	outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
+	step(&f, 7);
+	teder_status before = clock_at(e, 7);
+	ck_assert(before.next_state == TEDER_NEXT_READY);
+	size_t bytes = owned(e);
+	const unsigned rejected[] = {1, 124, 512001, 1048575};
+	for (unsigned i = 0; i < 4; i++) {
+		const char *path = OUTPUT_DIR "/gapless-rejected.flac";
+		th_make_mixed(path, (th_format){rejected[i], 8, 32, 17});
+		uint64_t id;
+		teder_code code;
+		RETRY(code,
+		      teder_prepare_next(
+		          e, &before.current, before.next_source, path, (uint32_t)strlen(path), 99, &id));
+		OK(code);
+		outcome(e, id, TEDER_UNSUPPORTED);
+		teder_status s = status(e);
+		ck_assert(s.current.epoch == before.current.epoch && s.current.source == 1 &&
+		          s.next_source == 2 && s.next_track == 77 && s.next_state == TEDER_NEXT_READY &&
+		          s.transport == TEDER_PLAYING && s.source_frame == 7 && s.output_frame == 7 &&
+		          owned(e) == bytes && f.starts == 1 && !f.stops && !f.releases);
+	}
+	step(&f, 7);
+	ck_assert(clock_at(e, 14).source_frame == 14);
+	th_check_mixed(f.capture, (th_format){8000, 2, 16, 14}, 8000);
+	close_engine(&e);
+	dispose(&f);
 }
 END_TEST
 
@@ -2297,6 +2458,14 @@ int main(int argc, char **argv)
 		test = gapless_cutoff;
 	else if (!strcmp(argv[1], "gapless-failures"))
 		test = gapless_failures;
+	else if (!strcmp(argv[1], "gapless-rates"))
+		test = gapless_rates;
+	else if (!strcmp(argv[1], "gapless-formats"))
+		test = gapless_formats;
+	else if (!strcmp(argv[1], "gapless-edges"))
+		test = gapless_edges;
+	else if (!strcmp(argv[1], "gapless-limits"))
+		test = gapless_limits;
 	else if (!strcmp(argv[1], "native-select"))
 		test = native_select;
 	else if (!strcmp(argv[1], "native"))

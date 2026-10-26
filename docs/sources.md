@@ -39,7 +39,10 @@ not installed. Source tests in `tests/test_source.c` cover conversion separately
 
 Inputs support 4–32-bit integer PCM, 1–8 channels in FLAC order, sample rates
 1–1048575 Hz, and FLAC frames up to 65535 samples per channel. Output is stereo
-float at a private caller-selected rate in the same range; zero selects the native rate. Capacity exhaustion returns
+float at a private caller-selected rate in the same range; zero selects the native rate.
+Resampling supports ratios from 1:64 through 64:1, inclusive. More extreme ratios
+return UNSUPPORTED before priming; the float filter loses precision at those cutoffs.
+Matching rates remain supported across the full source range. Capacity exhaustion returns
 LIMIT; supported format values do not override the caller's memory reservation.
 Integer samples divide by `2^(bits-1)`; binary32 rounding applies to wide samples.
 
@@ -55,8 +58,11 @@ at EOF, retaining exactly `ceil(remaining_source_frames * output_rate / source_r
 frames. This is the defined conversion reference, not a claim of exact frequency-
 independent filter delay. Source ranges use rational frame mapping and are estimates
 after conversion. Independent numerical vectors and chunk-size comparisons test it.
-Matching-source transitions concatenate these per-source converted outputs.
-Changes of source format are not implemented yet.
+Gapless transitions concatenate these per-source converted outputs, including
+source-format changes. Each source starts with its own filter history, trims its
+reported startup latency and drains to its exact output-frame count. Filter tail
+inside that duration is retained; no additional decay frames extend the track.
+Frame rounding is per source, with less than one output frame of rounding per track.
 
 Paths are absolute UTF-8 without NUL, at most 32767 bytes. Windows accepts drive
 and ordinary UNC paths, converted losslessly to UTF-16; device/extended namespace
@@ -154,9 +160,12 @@ Close joins preparation and playback before freeing their source arenas.
 
 ## Gapless playback
 
-Matching sources must have the same sample rate, channel count and bit depth.
-Other source-format combinations return UNSUPPORTED during preparation, preserving
-the previous successor.
+Adjacent sources may differ in sample rate, channel count and bit depth. Each
+source must satisfy the input and conversion-ratio limits above. Both convert to
+the selected device's fixed stereo float format before entering the PCM queue.
+The device stays open across the boundary, with no rate switch or callback-side
+conversion. An unsupported conversion returns UNSUPPORTED during preparation,
+preserving current playback and the previous ready successor.
 
 Select an output, open the first track without AUTOPLAY, and prepare its successor.
 Wait for successful preparation before submitting PLAY with a fresh current target.

@@ -247,6 +247,13 @@ teder_code td_source_open(const char *path,
 	if (s->error == TEDER_OK) {
 		if (!s->config.output_rate)
 			s->config.output_rate = s->info.sample_rate;
+		/* Very narrow float-filter cutoffs lose coefficient precision. Reject
+		 * these conversions before priming or replacing any active source. */
+		if ((uint64_t)s->info.sample_rate > 64ull * s->config.output_rate ||
+		    (uint64_t)s->config.output_rate > 64ull * s->info.sample_rate)
+			s->error = TEDER_UNSUPPORTED;
+	}
+	if (s->error == TEDER_OK) {
 		ma_data_converter_config c = td_convert_config(s->info.sample_rate, s->config.output_rate);
 		size_t needed;
 		if (ma_data_converter_get_heap_size(&c, &needed) != MA_SUCCESS ||

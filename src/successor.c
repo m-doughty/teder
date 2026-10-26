@@ -79,16 +79,8 @@ teder_code td_successor_ready(teder_engine *e, td_source_job *j)
 	teder_code code = td_successor_check(e, &r->media, true, true);
 	if (code == TEDER_OK)
 		code = j->outcome;
-	if (code == TEDER_OK)
-		for (unsigned i = 0; i < TD_SOURCE_JOBS; i++) {
-			td_source_job *old = &e->sources[i];
-			if (old->state != TD_JOB_ACTIVE && old->state != TD_JOB_SUSPENDED)
-				continue;
-			teder_probe_info *a = &old->source->info, *b = &j->source->info;
-			if (a->sample_rate != b->sample_rate || a->channels != b->channels ||
-			    a->bits_per_sample != b->bits_per_sample)
-				code = TEDER_UNSUPPORTED; /* mixed-format boundaries are not implemented yet */
-		}
+	/* Preparation has already initialized and primed this source's converter.
+	 * Every published block uses the selected device's stereo float format. */
 	if (code == TEDER_OK)
 		code = td_commit_locked(e, j->slot);
 	if (code != TEDER_OK)

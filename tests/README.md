@@ -266,3 +266,28 @@ a checksum-verified Moby default seccomp profile. Tests run offline, with all
 capabilities dropped and no-new-privileges; host ASLR settings remain unchanged.
 Builds use the default policy. The helper does not disable TSan checks or retry
 failing tests. Ordinary native sanitizer builds keep their existing CMake flags.
+
+## Mixed-format gapless references
+
+`output.gapless-rates` checks every ordered pair of 8000, 22050, 44100,
+48000, 88200, 96000 and 192000 Hz at fixed 44100 and 48000 Hz outputs (98 pairs).
+`output.gapless-formats` covers all 64 ordered FLAC channel-layout pairs and
+all 29 bit depths (4–32) in both source positions. `output.gapless-edges` checks
+empty, one-frame and multiblock sources with 1/7/257-frame callbacks, both ratio
+limits and the largest FLAC rate. Boundary events, source clocks, exact output
+lengths, zero underruns and a single native start are checked for every pair.
+
+`support/mixed.h` independently computes stereo mapping, four binary64 RBJ
+Butterworth sections and rational-time interpolation. It calls no production
+converter and compares every captured sample, including drained tails. Absolute
+full-scale tolerances are 1e-5 through 24:1 and 1e-4 through 64:1 in either direction;
+narrow-cutoff binary32 coefficient/accumulator error motivates the latter bound.
+The reference trims floor(9*out/in) startup frames and retains ceil(N*out/in).
+Equal rates bypass filtering and retain N frames. These are numerical conversion
+checks, not bit-perfect or analog frequency-response claims.
+
+`output.gapless-limits` rejects ratios outside 1:64–64:1 during live playback,
+retaining the previous ready successor, source position, device and reservation.
+`decode.next-failures` injects every allocation failure into a mixed-format
+replacement. `output.gapless-failures` exercises corrupt successor input before
+and after adoption with both matching and mixed formats. All cases check cleanup.
