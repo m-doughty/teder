@@ -291,3 +291,18 @@ retaining the previous ready successor, source position, device and reservation.
 `decode.next-failures` injects every allocation failure into a mixed-format
 replacement. `output.gapless-failures` exercises corrupt successor input before
 and after adoption with both matching and mixed formats. All cases check cleanup.
+
+## Private metadata reader
+
+`metadata.reference` checks repeated tags, embedded NUL values, exact artwork
+bytes/fields, Unicode paths, omitted artwork and detached result ownership.
+`metadata.validation` uses independent wire fixtures, seven malformed/encoding
+mutations and every truncated prefix. STREAMINFO duration is reported without
+decoding frames; zero means unknown. This does not validate audio integrity or images.
+`metadata.limits` checks 1024 tags, 16 pictures, 256 blocks and work/result budgets.
+Counts are checked after parsing; the codec heap is bounded throughout, including
+unrequested pictures and other metadata. Padding is skipped through checked seeks.
+`metadata.failures` rejects each allocation in turn and checks complete unwind.
+`metadata.cancellation` gates open, partial parsing and close, and runs two readers
+with independent allocators/cancellation. All temporary owners die before return;
+only one result arena survives success. Public scheduling/close integration is not implemented yet.

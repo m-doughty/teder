@@ -26,7 +26,7 @@ static void *reserve(pack *p, size_t count, size_t size, size_t alignment)
 	return data;
 }
 
-static bool utf8(const unsigned char *s, size_t bytes)
+bool td_utf8(const unsigned char *s, size_t bytes)
 {
 	for (size_t i = 0; i < bytes;) {
 		uint32_t cp = s[i++], minimum;
@@ -77,7 +77,7 @@ static teder_blob blob(pack *p, const void *data, uint64_t bytes, bool text)
 	void *copy = reserve(p, (size_t)bytes, 1, 1);
 	if (p->code != TEDER_OK)
 		return out;
-	if (text && !utf8(data, (size_t)bytes)) {
+	if (text && !td_utf8(data, (size_t)bytes)) {
 		p->code = TEDER_ENCODING;
 		return out;
 	}

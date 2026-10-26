@@ -2,6 +2,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+bool td_source_cancelled(td_source *s)
+{
+	return td_file_cancelled(&s->file);
+}
+
 static teder_code layout(uint32_t bytes,
                          size_t codec,
                          size_t *capacity,
@@ -45,7 +50,7 @@ read_pcm(const FLAC__StreamDecoder *d, FLAC__byte *data, size_t *bytes, void *ct
 	(void)d;
 	td_source *s = ctx;
 	if (s->error == TEDER_OK)
-		s->error = td_file_read(s, data, bytes);
+		s->error = td_file_read(&s->file, data, bytes);
 	if (s->error != TEDER_OK) {
 		*bytes = 0;
 		return FLAC__STREAM_DECODER_READ_STATUS_ABORT;
@@ -60,7 +65,7 @@ seek_file(const FLAC__StreamDecoder *d, FLAC__uint64 offset, void *ctx)
 	(void)d;
 	td_source *s = ctx;
 	if (s->error == TEDER_OK)
-		s->error = td_file_seek(s, offset);
+		s->error = td_file_seek(&s->file, offset);
 	return s->error == TEDER_OK ? FLAC__STREAM_DECODER_SEEK_STATUS_OK
 	                            : FLAC__STREAM_DECODER_SEEK_STATUS_ERROR;
 }
@@ -69,7 +74,7 @@ static FLAC__StreamDecoderTellStatus
 tell_file(const FLAC__StreamDecoder *d, FLAC__uint64 *offset, void *ctx)
 {
 	(void)d;
-	*offset = ((td_source *)ctx)->file_cursor;
+	*offset = ((td_source *)ctx)->file.cursor;
 	return FLAC__STREAM_DECODER_TELL_STATUS_OK;
 }
 
@@ -77,7 +82,7 @@ static FLAC__StreamDecoderLengthStatus
 length_file(const FLAC__StreamDecoder *d, FLAC__uint64 *bytes, void *ctx)
 {
 	(void)d;
-	*bytes = ((td_source *)ctx)->file_size;
+	*bytes = ((td_source *)ctx)->file.size;
 	return FLAC__STREAM_DECODER_LENGTH_STATUS_OK;
 }
 
@@ -85,7 +90,7 @@ static FLAC__bool eof_file(const FLAC__StreamDecoder *d, void *ctx)
 {
 	(void)d;
 	td_source *s = ctx;
-	return s->file_cursor >= s->file_size;
+	return s->file.cursor >= s->file.size;
 }
 
 static void metadata(const FLAC__StreamDecoder *d, const FLAC__StreamMetadata *m, void *ctx)
@@ -207,12 +212,17 @@ teder_code td_source_open(const char *path,
 	memcpy(s->path, path, bytes);
 	s->converter_heap = base + heap;
 	s->converter_bytes = name - heap;
-	s->error = td_file_open(s, bytes);
+	s->file.config = (td_file_config){s->config.read_size,
+	                                  config->cancel,
+	                                  config->lifecycle,
+	                                  config->context,
+	                                  config->checkpoint};
+	s->error = td_file_open(&s->file, s->path, bytes, s->native_path);
 	unsigned char magic[4];
 	size_t cursor = 0;
 	while (s->error == TEDER_OK && cursor < sizeof(magic)) {
 		size_t count = sizeof(magic) - cursor;
-		s->error = td_file_read(s, magic + cursor, &count);
+		s->error = td_file_read(&s->file, magic + cursor, &count);
 		if (!count && s->error == TEDER_OK)
 			s->error = TEDER_CORRUPT;
 		cursor += count;
@@ -220,7 +230,7 @@ teder_code td_source_open(const char *path,
 	if (s->error == TEDER_OK && memcmp(magic, "fLaC", 4))
 		s->error = TEDER_UNSUPPORTED;
 	if (s->error == TEDER_OK)
-		s->error = td_file_seek(s, 0);
+		s->error = td_file_seek(&s->file, 0);
 	td_flac_heap *previous = td_flac_scope(&s->heap);
 	if (s->error == TEDER_OK) {
 		s->decoder = FLAC__stream_decoder_new();
@@ -317,7 +327,7 @@ static void advance(td_source *s)
 	    FLAC__stream_decoder_get_state(s->decoder) == FLAC__STREAM_DECODER_END_OF_STREAM) {
 		checked(s, FLAC__stream_decoder_finish(s->decoder));
 		if (s->error == TEDER_OK &&
-		    (s->frame_end != s->file_size ||
+		    (s->frame_end != s->file.size ||
 		     (s->info.duration_known && s->decoded != s->info.duration_frames)))
 			s->error = TEDER_CORRUPT;
 		s->eof = true;
@@ -521,10 +531,10 @@ teder_code td_source_retire(td_source **owner)
 		ma_data_converter_uninit(&s->converter, NULL);
 		s->converted = false;
 	}
-	td_file_close(s);
+	td_file_close(&s->file);
 	if (s->pool)
 		td_pcm_reap(s->pool);
-	bool close_failed = s->close_failed;
+	bool close_failed = s->file.close_failed;
 	td_pcm_generation *g = &s->generation;
 	teder_code code = td_pcm_retire(&g);
 	if (code == TEDER_OK) {

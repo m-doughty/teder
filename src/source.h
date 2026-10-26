@@ -1,11 +1,17 @@
 #ifndef TEDER_SOURCE_H
 #define TEDER_SOURCE_H
 #include "pcm.h"
+#include "file.h"
 #include "flac_heap.h"
 #include "miniaudio.h"
 #include <FLAC/stream_decoder.h>
 
-enum { TD_SOURCE_OPENED = 1, TD_SOURCE_READ, TD_SOURCE_CLOSED, TD_FLAC_FRAMES = 65535 };
+enum {
+	TD_SOURCE_OPENED = TD_FILE_OPENED,
+	TD_SOURCE_READ = TD_FILE_READ,
+	TD_SOURCE_CLOSED = TD_FILE_CLOSED,
+	TD_FLAC_FRAMES = 65535
+};
 
 typedef struct {
 	uint64_t generation, source, track, output_start;
@@ -29,10 +35,10 @@ typedef struct td_source {
 	FLAC__StreamDecoder *decoder;
 	ma_data_converter converter;
 	td_pcm_pool *pool;
-	intptr_t file;
-	uint64_t file_size, file_cursor, frame_end, decoded, start, output, skip;
+	td_file file;
+	uint64_t frame_end, decoded, start, output, skip;
 	uint32_t input_frames, input_offset, slot, filled;
-	bool file_open, converted, eof, done, published, pending, close_failed, priming;
+	bool converted, eof, done, published, pending, priming;
 	float tail[2];
 	teder_code error;
 	float pcm[TD_FLAC_FRAMES * 2];
@@ -63,12 +69,6 @@ teder_code td_source_pump(td_source *, td_pcm_pool *);
 teder_code
 td_source_retire(td_source **); /* BUSY until PCM returned/reaped; final IO still clears owner */
 bool td_source_cancelled(td_source *);
-void td_source_checkpoint(td_source *, unsigned);
-teder_code td_path_validate(const char *, uint32_t);
-teder_code td_file_open(td_source *, uint32_t path_bytes);
-teder_code td_file_read(td_source *, void *, size_t *);
-teder_code td_file_seek(td_source *, uint64_t);
-void td_file_close(td_source *);
 ma_data_converter_config td_convert_config(uint32_t in, uint32_t out);
 bool td_rate_frames(uint64_t, uint32_t numerator, uint32_t denominator, bool ceil, uint64_t *);
 void td_downmix(float *, const int32_t *const *, uint32_t frames, uint32_t channels, uint32_t bits);

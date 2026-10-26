@@ -26,6 +26,10 @@ track within the same device stream. See [successor usage](docs/sources.md#prepa
 and [gapless behavior](docs/sources.md#gapless-playback).
 Other declarations remain draft contracts and will not link.
 
+A private metadata reader now builds detached FLAC tag/artwork results without
+decoding audio. It uses a bounded temporary codec heap and copies accepted data
+into one result arena. Public asynchronous `teder_probe` integration is not implemented yet.
+
 Each engine owns one arena containing its handle, copied configuration and
 fixed request/input/event/PCM storage. Each result owns a separate arena with
 copied metadata or device data. Result views remain valid until result release,

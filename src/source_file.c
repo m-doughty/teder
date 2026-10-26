@@ -2,7 +2,7 @@
 #define _POSIX_C_SOURCE 200809L
 #define _FILE_OFFSET_BITS 64
 #endif
-#include "source.h"
+#include "file.h"
 #include <stdlib.h>
 #include <string.h>
 #ifdef _WIN32
@@ -13,14 +13,14 @@
 #include <sys/stat.h>
 #include <errno.h>
 #endif
-bool td_source_cancelled(td_source *s)
+bool td_file_cancelled(const td_file *s)
 {
 	return (s->config.cancel && atomic_load_explicit(s->config.cancel, memory_order_relaxed)) ||
 	       (s->config.lifecycle &&
 	        atomic_load_explicit(s->config.lifecycle, memory_order_relaxed) != TEDER_LIVE);
 }
 
-void td_source_checkpoint(td_source *s, unsigned point)
+static void checkpoint(td_file *s, unsigned point)
 {
 	if (s->config.checkpoint)
 		s->config.checkpoint(s->config.context, point);
@@ -74,14 +74,14 @@ teder_code td_path_validate(const char *path, uint32_t bytes)
 	return TEDER_OK;
 }
 
-teder_code td_file_open(td_source *s, uint32_t bytes)
+teder_code td_file_open(td_file *s, const char *path, uint32_t bytes, void *native_path)
 {
-	if (td_source_cancelled(s))
+	if (td_file_cancelled(s))
 		return TEDER_CANCELLED;
 #ifdef _WIN32
-	wchar_t *native = s->native_path;
+	wchar_t *native = native_path;
 	int count =
-	    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s->path, (int)bytes, native, (int)bytes);
+	    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, (int)bytes, native, (int)bytes);
 	if (!count)
 		return TEDER_ENCODING;
 	native[count] = 0;
@@ -94,96 +94,97 @@ teder_code td_file_open(td_source *s, uint32_t bytes)
 	                          NULL);
 	if (file == INVALID_HANDLE_VALUE)
 		return TEDER_IO;
-	s->file = (intptr_t)file;
-	s->file_open = true;
-	td_source_checkpoint(s, TD_SOURCE_OPENED);
+	s->handle = (intptr_t)file;
+	s->opened = true;
+	checkpoint(s, TD_FILE_OPENED);
 	BY_HANDLE_FILE_INFORMATION info;
 	if (GetFileType(file) != FILE_TYPE_DISK || !GetFileInformationByHandle(file, &info) ||
 	    (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
 		td_file_close(s);
 		return TEDER_UNSUPPORTED;
 	}
-	s->file_size = ((uint64_t)info.nFileSizeHigh << 32) | info.nFileSizeLow;
+	s->size = ((uint64_t)info.nFileSizeHigh << 32) | info.nFileSizeLow;
 #else
 	(void)bytes;
-	int file = open(s->path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+	(void)native_path;
+	int file = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
 	if (file < 0)
 		return TEDER_IO;
-	s->file = file;
-	s->file_open = true;
-	td_source_checkpoint(s, TD_SOURCE_OPENED);
+	s->handle = file;
+	s->opened = true;
+	checkpoint(s, TD_FILE_OPENED);
 	struct stat info;
 	if (fstat(file, &info) || !S_ISREG(info.st_mode) || info.st_size < 0) {
 		td_file_close(s);
 		return TEDER_UNSUPPORTED;
 	}
-	s->file_size = (uint64_t)info.st_size;
+	s->size = (uint64_t)info.st_size;
 #endif
 	return TEDER_OK;
 }
 
-teder_code td_file_read(td_source *s, void *out, size_t *bytes)
+teder_code td_file_read(td_file *s, void *out, size_t *bytes)
 {
-	td_source_checkpoint(s, TD_SOURCE_READ);
-	if (td_source_cancelled(s)) {
+	checkpoint(s, TD_FILE_READ);
+	if (td_file_cancelled(s)) {
 		*bytes = 0;
 		return TEDER_CANCELLED;
 	}
 	size_t count = *bytes < s->config.read_size ? *bytes : s->config.read_size;
 #ifdef _WIN32
 	DWORD got = 0;
-	if (!ReadFile((HANDLE)s->file, out, (DWORD)count, &got, NULL)) {
+	if (!ReadFile((HANDLE)s->handle, out, (DWORD)count, &got, NULL)) {
 		*bytes = 0;
 		return TEDER_IO;
 	}
 #else
 	ssize_t got;
 	do {
-		got = read((int)s->file, out, count);
-	} while (got < 0 && errno == EINTR && !td_source_cancelled(s));
+		got = read((int)s->handle, out, count);
+	} while (got < 0 && errno == EINTR && !td_file_cancelled(s));
 	if (got < 0) {
 		*bytes = 0;
-		return td_source_cancelled(s) ? TEDER_CANCELLED : TEDER_IO;
+		return td_file_cancelled(s) ? TEDER_CANCELLED : TEDER_IO;
 	}
 #endif
 	*bytes = (size_t)got;
-	s->file_cursor += (size_t)got;
-	return td_source_cancelled(s) ? TEDER_CANCELLED : TEDER_OK;
+	s->cursor += (size_t)got;
+	return td_file_cancelled(s) ? TEDER_CANCELLED : TEDER_OK;
 }
 
-teder_code td_file_seek(td_source *s, uint64_t offset)
+teder_code td_file_seek(td_file *s, uint64_t offset)
 {
-	if (td_source_cancelled(s))
+	if (td_file_cancelled(s))
 		return TEDER_CANCELLED;
-	if (offset > s->file_size || offset > INT64_MAX)
+	if (offset > s->size || offset > INT64_MAX)
 		return TEDER_IO;
 #ifdef _WIN32
 	LARGE_INTEGER where;
 	where.QuadPart = (LONGLONG)offset;
-	if (!SetFilePointerEx((HANDLE)s->file, where, NULL, FILE_BEGIN))
+	if (!SetFilePointerEx((HANDLE)s->handle, where, NULL, FILE_BEGIN))
 		return TEDER_IO;
 #else
-	if (lseek((int)s->file, (off_t)offset, SEEK_SET) < 0)
+	if (lseek((int)s->handle, (off_t)offset, SEEK_SET) < 0)
 		return TEDER_IO;
 #endif
-	s->file_cursor = offset;
+	s->cursor = offset;
 	return TEDER_OK;
 }
 
-void td_file_close(td_source *s)
+void td_file_close(td_file *s)
 {
-	if (!s->file_open)
+	if (!s->opened)
 		return;
 #ifdef _WIN32
-	if (!CloseHandle((HANDLE)s->file))
+	if (!CloseHandle((HANDLE)s->handle))
 		abort();
 #else
 	/* Linux/Darwin release this owned descriptor before reporting close errors.
 	 * Never retry: that number can already belong to another thread's file.
 	 * Owned workers are never pthread_cancel'ed. Preserve the diagnostic. */
-	if (close((int)s->file))
+	if (close((int)s->handle))
 		s->close_failed = true;
 #endif
-	s->file_open = false;
-	td_source_checkpoint(s, TD_SOURCE_CLOSED);
+	s->opened = false;
+	checkpoint(s, TD_FILE_CLOSED);
 }

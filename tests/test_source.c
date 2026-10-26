@@ -494,9 +494,9 @@ START_TEST(cancellation)
 	ck_assert(th_gate_init(&j.gate));
 	OK(open_source(&f, FIXTURE_DIR "/track-a.flac", 44100, &j.source));
 	j.pause_at = f.reads + 1;
-	j.source->config.cancel = &j.cancel;
-	j.source->config.context = &j;
-	j.source->config.checkpoint = gate_read;
+	j.source->file.config.cancel = &j.cancel;
+	j.source->file.config.context = &j;
+	j.source->file.config.checkpoint = gate_read;
 	ck_assert(th_thread_start(&thread, open_worker, &j));
 	th_gate_await(&j.gate);
 	atomic_store(&j.cancel, 1);

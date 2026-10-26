@@ -201,6 +201,7 @@ struct teder_engine {
 teder_code td_engine_create(const teder_config *, td_allocator, teder_engine **);
 teder_code td_engine_create_with(const teder_config *, td_allocator, td_runtime, teder_engine **);
 teder_code td_result_create(const td_result_input *, td_allocator, uint64_t limit, teder_result **);
+bool td_utf8(const unsigned char *, size_t bytes);
 /* Slot ownership only, not request admission/state/ID validation.
  * Attach consumes *owner only on success. Take clears the slot exactly once.
  * Producers must budget construction before allocation; attach is a second

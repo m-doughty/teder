@@ -177,3 +177,12 @@ endforeach()
 
 set_tests_properties(output.gapless-pairs output.gapless-repeat output.gapless-failures
 	output.gapless-rates output.gapless-formats output.gapless-edges output.gapless-limits PROPERTIES RESOURCE_LOCK gapless_fixture)
+
+add_executable(teder_test_metadata test_metadata.c)
+teder_target(teder_test_metadata)
+target_compile_definitions(teder_test_metadata PRIVATE TEDER_STATIC "FIXTURE_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/fixtures\"" "OUTPUT_DIR=\"${CMAKE_CURRENT_BINARY_DIR}\"")
+target_link_libraries(teder_test_metadata PRIVATE teder_lifetime teder_backend teder_device teder_device_callback teder_audio_callback teder_source FLAC teder_test_support Check::check)
+foreach(case reference validation limits failures cancellation)
+	add_test(NAME metadata.${case} COMMAND teder_test_metadata ${case})
+	set_tests_properties(metadata.${case} PROPERTIES TIMEOUT 40 LABELS "unit;metadata;lifetime" RESOURCE_LOCK metadata_fixture)
+endforeach()
