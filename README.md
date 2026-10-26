@@ -2,8 +2,8 @@
 
 A C17 playback and analysis library, with a separate notcurses
 renderer. Version 0.1.0 plays local FLAC, with play/pause/stop,
-seeking and software gain/mute. Clocks, gapless transitions, analysis and rendering
-remain in progress.
+seeking, submitted playback clocks and software gain/mute. Gapless transitions,
+analysis and rendering remain in progress.
 
 Implemented exports:
 
@@ -33,7 +33,9 @@ publication and return queues in the same arena. The default still reserves
 512 KiB of samples, plus block/queue bookkeeping. Private tests exercise partial
 reads, generation switches and source retirement. The private FLAC source now
 streams decoded/converted PCM into this pool while the device consumes it.
-No whole-track allocation is introduced.
+No whole-track allocation is introduced. Status now reports consumed source frames
+and submitted playback frames. Underrun silence advances only the output clock;
+pause and EOF freeze both. See the [clock contract](docs/api-contract.md#playback-clock-implemented).
 
 The private callback core now renders stereo float PCM with gain, mute and
 silence filling. It borrows the existing pool and allocates nothing. Tests cover

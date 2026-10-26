@@ -223,6 +223,37 @@ START_TEST(generations)
 }
 END_TEST
 
+START_TEST(positions)
+{
+	fixture f = {0};
+	init(&f);
+	td_pcm_generation *g = generation(&f, 1);
+	const uint64_t spans[] = {5, 0, UINT64_MAX - 10};
+	const uint64_t expected[][3] = {
+	    {11, 13, 15},
+	    {10, 10, 10},
+	    {UINT64_C(4611686018427387911), UINT64_C(13835058055282163713), UINT64_MAX}};
+	for (unsigned n = 0; n < 3; n++) {
+		uint32_t slot;
+		OK(td_pcm_acquire(&f.pool, g, &slot));
+		memset(f.pool.blocks[slot].samples, 0, 8 * sizeof(float));
+		td_pcm_meta m = {10, spans[n], n * 4, 4, TD_PCM_FINAL};
+		OK(td_pcm_publish(&f.pool, slot, &m));
+		const uint32_t chunks[] = {1, 2, 1};
+		for (unsigned i = 0; i < 3; i++) {
+			float out[4];
+			td_audio_result r;
+			OK(render(&f.pool, (td_audio_config){1, 1, 1, 1}, out, 4, chunks[i], &r));
+			ck_assert(r.source == 1 && r.track == 0 && r.source_frame == expected[n][i] &&
+			          r.pcm_frames == chunks[i] && r.final == (i == 2));
+		}
+		ck_assert(td_pcm_reap(&f.pool) == 1);
+	}
+	OK(td_pcm_retire(&g));
+	uninit(&f);
+}
+END_TEST
+
 START_TEST(bounds)
 {
 	fixture f = {0};
@@ -359,6 +390,8 @@ int main(int argc, char **argv)
 		test = controls;
 	else if (!strcmp(argv[1], "generations"))
 		test = generations;
+	else if (!strcmp(argv[1], "positions"))
+		test = positions;
 	else if (!strcmp(argv[1], "bounds"))
 		test = bounds;
 	else if (!strcmp(argv[1], "concurrent"))

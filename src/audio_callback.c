@@ -47,11 +47,21 @@ teder_code td_audio_render(td_pcm_pool *pool,
 				target[i] = view.samples[i] * config.gain;
 		}
 		bool final = count == view.frames && (view.meta->flags & TD_PCM_FINAL);
+		uint64_t source = view.generation->source, track = view.generation->track;
+		uint64_t span = view.meta->source_frames, length = view.meta->frames;
+		uint64_t offset = (uint64_t)view.offset + count;
+		/* Quotient/remainder avoids overflow even for the largest valid span.
+		 * Matching rates are exact; converted block ranges are estimates. */
+		uint64_t position =
+		    view.meta->source_start + (span / length) * offset + (span % length) * offset / length;
 		/* No view access after consume: the producer may reclaim immediately. */
 		code = td_pcm_consume(pool, count);
 		if (code != TEDER_OK)
 			goto failed;
 		result->pcm_frames += count;
+		result->source = source;
+		result->track = track;
+		result->source_frame = position;
 		result->final |= final;
 	}
 	result->missing_frames = frames - result->pcm_frames;

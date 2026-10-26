@@ -228,12 +228,13 @@ static void prepared(teder_engine *e, td_source_job *j)
 		e->status.track = s->generation.track;
 		e->status.source_frame = s->start;
 		e->status.output_frame = 0;
+		e->status.underrun_frames = 0;
 		e->status.source_rate = s->info.sample_rate;
 		e->status.source_channels = s->info.channels;
 		e->status.duration_frames = s->info.duration_frames;
 		e->status.clock_flags =
 		    (s->info.duration_known ? TEDER_DURATION_KNOWN : 0) | (s->done ? TEDER_DECODE_EOF : 0);
-		e->status.position_quality = TEDER_QUALITY_UNKNOWN;
+		e->status.position_quality = TEDER_QUALITY_MEASURED; /* exact staged position */
 		e->status.last_error = TEDER_OK;
 		if (selected)
 			e->status.transport = TEDER_PAUSED;

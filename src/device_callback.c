@@ -28,6 +28,23 @@ void td_device_callback(ma_device *device, void *output, const void *input, ma_u
 	td_audio_result result;
 	teder_code code =
 	    td_audio_render(feed->pool, config, output, (size_t)frames * 2, frames, &result);
+	if (code == TEDER_OK && feed->report.error == TEDER_OK && config.enabled &&
+	    !feed->report.final) {
+		/* Intentional pause/EOF silence is outside the playback clock. A short
+		 * final buffer ends at its last PCM frame, not at the buffer's padding. */
+		uint32_t submitted = result.final ? result.pcm_frames : frames;
+		uint32_t missing = result.final ? 0 : result.missing_frames;
+		if (feed->report.output_frames > UINT64_MAX - submitted ||
+		    feed->report.underrun_frames > UINT64_MAX - missing)
+			code = TEDER_LIMIT;
+		feed->report.output_frames = add(feed->report.output_frames, submitted);
+		feed->report.underrun_frames = add(feed->report.underrun_frames, missing);
+		if (result.pcm_frames) {
+			feed->report.source = result.source;
+			feed->report.track = result.track;
+			feed->report.source_frame = result.source_frame;
+		}
+	}
 	feed->report.pcm_frames = add(feed->report.pcm_frames, result.pcm_frames);
 	feed->report.missing_frames = add(feed->report.missing_frames, result.missing_frames);
 	feed->report.final |= result.final;
@@ -40,6 +57,11 @@ void td_device_callback(ma_device *device, void *output, const void *input, ma_u
 		atomic_store(&feed->sequence, sequence + 1);
 		atomic_store(&feed->pcm_frames, feed->report.pcm_frames);
 		atomic_store(&feed->missing_frames, feed->report.missing_frames);
+		atomic_store(&feed->source, feed->report.source);
+		atomic_store(&feed->track, feed->report.track);
+		atomic_store(&feed->source_frame, feed->report.source_frame);
+		atomic_store(&feed->output_frames, feed->report.output_frames);
+		atomic_store(&feed->underrun_frames, feed->report.underrun_frames);
 		atomic_store(&feed->final, feed->report.final);
 		atomic_store(&feed->control, feed->report.control);
 		atomic_store(&feed->error, feed->report.error);

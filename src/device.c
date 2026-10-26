@@ -52,6 +52,11 @@ teder_code td_device_open(
 	atomic_init(&d->feed.sequence, 0);
 	atomic_init(&d->feed.pcm_frames, 0);
 	atomic_init(&d->feed.missing_frames, 0);
+	atomic_init(&d->feed.source, 0);
+	atomic_init(&d->feed.track, 0);
+	atomic_init(&d->feed.source_frame, 0);
+	atomic_init(&d->feed.output_frames, 0);
+	atomic_init(&d->feed.underrun_frames, 0);
 	atomic_init(&d->feed.final, 0);
 	atomic_init(&d->feed.error, TEDER_OK);
 	atomic_init(&d->feed.control, 0);
@@ -115,6 +120,11 @@ teder_code td_device_configure(td_device *d, td_audio_config config)
 		atomic_store(&d->feed.sequence, 0);
 		atomic_store(&d->feed.pcm_frames, 0);
 		atomic_store(&d->feed.missing_frames, 0);
+		atomic_store(&d->feed.source, 0);
+		atomic_store(&d->feed.track, 0);
+		atomic_store(&d->feed.source_frame, 0);
+		atomic_store(&d->feed.output_frames, 0);
+		atomic_store(&d->feed.underrun_frames, 0);
 		atomic_store(&d->feed.final, 0);
 		atomic_store(&d->feed.error, TEDER_OK);
 	}
@@ -204,6 +214,11 @@ teder_code td_device_get_report(td_device *d, td_device_report *out)
 	if (before & 1)
 		return TEDER_AGAIN;
 	td_device_report report = {.generation = d->feed.config.generation,
+	                           .source = atomic_load(&d->feed.source),
+	                           .track = atomic_load(&d->feed.track),
+	                           .source_frame = atomic_load(&d->feed.source_frame),
+	                           .output_frames = atomic_load(&d->feed.output_frames),
+	                           .underrun_frames = atomic_load(&d->feed.underrun_frames),
 	                           .pcm_frames = atomic_load(&d->feed.pcm_frames),
 	                           .control = atomic_load(&d->feed.control),
 	                           .missing_frames = atomic_load(&d->feed.missing_frames),

@@ -71,6 +71,7 @@ void td_stop(teder_engine *e, uint32_t slot)
 	if (loaded) {
 		e->status.transport = TEDER_READY;
 		e->status.source_frame = e->status.output_frame = 0;
+		e->status.underrun_frames = 0;
 		e->status.clock_flags &= TEDER_DURATION_KNOWN;
 		e->status.position_quality = TEDER_QUALITY_UNKNOWN;
 	}

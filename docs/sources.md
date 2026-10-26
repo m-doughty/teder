@@ -23,7 +23,9 @@ Ordinary open leaves READY; a seek during playback resumes the replacement.
 PLAY/PAUSE/STOP and gain/mute use the [transport contract](api-contract.md#transport-controls-implemented-subset).
 STOP reserves the media slot through cancellation cleanup and staged rewind. It
 retains source identity, advances epoch and returns READY at frame zero. A failed
-rewind leaves FAILED. Live clocks are not implemented yet.
+rewind leaves FAILED. The [playback clock](api-contract.md#playback-clock-implemented)
+tracks consumed PCM, not decoder read-ahead, and preserves the final submitted
+source position across device replacement.
 
 Three fixed engine job records bound active, staged and retiring sources together.
 Each source reserves its arena plus an 8 MiB codec cap before construction.
@@ -97,5 +99,6 @@ clears PCM and retires all sources before CLOSED. The callback publishes a bound
 atomic report; the producer observes final PCM submission and changes transport
 to ENDED with SUBMIT_EOF. Output continues with silence until close or replacement,
 so the final native buffer is not cut off. Empty validated input ends without
-starting output. Raw missing frames remain private and include EOF silence;
-public underrun classification and audible-position estimates remain future work.
+starting output. Public underruns exclude pause/EOF silence. Source positions
+advance only through consumed PCM; conversion reports estimated positions. Hardware
+latency remains unknown, so no estimated audible-end flag is published.

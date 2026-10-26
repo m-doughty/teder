@@ -238,7 +238,8 @@ does not silently start another track. A new open is required after ENDED.
 
 Positions count frames, not bytes or individual channel samples. Source frame
 uses source rate; output frame is the next frame submitted to the device within
-the epoch and includes underrun silence. Source position follows submitted PCM,
+the epoch and includes underrun silence, excluding intentional pause/EOF silence.
+Source position follows submitted PCM,
 never decoder read-ahead; it does not advance through underrun silence.
 Conversion may make it an estimate, reported by `position_quality`.
 Latency uses output frames and a measured/estimated/unknown qualifier.
@@ -332,10 +333,8 @@ Build capability bits remain unchanged while the broader contracts are incomplet
 
 The producer reads coherent, generation-tagged callback reports. Final PCM
 submission sets SUBMIT_EOF and ENDED; output continues with silence until explicit
-replacement or close. No audible-end estimate is published. Raw missing-frame
-counts include EOF silence and are not yet exposed as public underrun counts.
-Position/latency quality remains UNKNOWN; the current source-frame field retains
-the saved open/seek position until live accounting is implemented.
+replacement or close. No audible-end estimate is published. The public playback clock excludes EOF padding from underruns and advances source
+position only for consumed PCM. Latency quality remains UNKNOWN; see below.
 A selected context's native allocator failure during enumeration closes its
 device/context, advances epoch and pauses the source. Explicit selection recovers.
 
@@ -378,7 +377,7 @@ Cancellation before commitment preserves the old settings. After publication,
 ordinary cancellation does not revoke the command. Close ends native borrows
 before deciding a pending command's outcome: an acknowledged change keeps its
 actual result; a change never applied returns CANCELLED. No timeout frees a
-callback borrower. Live positions and latency estimates are not implemented yet.
+callback borrower. Submitted positions are reported by the playback clock below.
 
 STOP commits cancellation of the outstanding media request, then quiesces native
 output and advances epoch. Source ID, track label, output selection and gain/mute
@@ -399,6 +398,66 @@ Seek to known duration, including a validated empty stream, yields ENDED with
 DECODE_EOF and SUBMIT_EOF: no remaining PCM needs submission. An earlier seek
 preserves paused/playing intent; from ENDED or FAILED it yields READY. Invalid
 ranges and decoder failures before commitment preserve the existing stream.
+
+### Playback clock (implemented)
+
+`teder_get_status` copies a coherent worker-published snapshot. Its epoch, source,
+track, position, format and state belong together. It returns AGAIN with the
+output unchanged on gate contention. Callers own the copied value; it borrows no
+engine storage. A snapshot can lag the latest callback by worker scheduling time.
+
+`source_frame` is the next source-frame position represented by consumed PCM.
+`output_frame` counts submitted playback frames in the current epoch, including
+starvation silence. `underrun_frames` counts only that starvation silence and resets
+with the epoch. Gain zero and mute consume PCM normally. Pause freezes these
+counters; resume continues them. Final-buffer padding and later EOF silence do
+not count. ENDED means final PCM submitted, not measured audible completion.
+
+Source positions are MEASURED for matching rates and exact staged open/seek
+positions. After rate conversion they are ESTIMATED: within each PCM block, map
+the consumed fraction to that block's source range using integer floor division.
+The final endpoint equals the source duration. Missing PCM advances output time
+without advancing media time. Decoder read-ahead never advances `source_frame`.
+
+The clock uses monotonic integer frame counts within an epoch, not wall time.
+Elapsed playback seconds are `output_frame / output_rate`; media seconds are
+`source_frame / source_rate`. There is no wall-clock extrapolation, including
+while paused, stopped, ended or interrupted. A new epoch resets output and underrun
+counts. Seek sets the new source position; stop sets zero. Device replacement
+joins the old callback and saves its final submitted source position before
+reopening. Loss keeps that saved position with UNKNOWN quality and no output clock.
+
+For example, after declaring a live `teder_engine *engine`:
+
+```c
+teder_status status = {0};
+status.struct_size = sizeof(status);
+status.abi_version = TEDER_ABI_VERSION;
+if (teder_get_status(engine, &status) == TEDER_OK && status.source_rate) {
+    double media_seconds = (double)status.source_frame / status.source_rate;
+    /* Display media_seconds alongside status.position_quality. */
+    (void)media_seconds;
+}
+```
+
+UNDERRUN events coalesce missing frames since the preceding worker observation;
+`event.output_frame` is the observation endpoint, not the first missing frame.
+Their epoch/source/track identifies the affected playback. Events can be dropped
+by the bounded event queue; the status counter remains authoritative. Counter
+exhaustion reports LIMIT without wrapping; status retains its last valid clock.
+
+Latency remains `latency_quality=UNKNOWN`, `latency_frames=0` on all four backends.
+Zero with UNKNOWN does not mean zero latency. The pinned miniaudio device API has
+no portable live latency/cursor query, and its callback supplies no hardware
+presentation timestamp. `output_period_frames` is a scheduling period, not an
+end-to-end latency estimate. AUDIBLE_END_ESTIMATED remains clear.
+
+| Backend | Integration limit |
+|---|---|
+| WASAPI | Padding is queried internally for buffer submission; no presentation cursor is exported to teder. |
+| CoreAudio | Native timestamps stay inside the backend callback; teder receives frame counts only. |
+| ALSA | Buffer availability supports writes; teder has no delay query. |
+| PulseAudio | Internal buffering does not provide a latency value through the device API. |
 
 ### Analysis and rendering (planned)
 

@@ -265,6 +265,8 @@ static void checkpoint(void *p, uint64_t request, unsigned point)
 		hit(p, 13);
 	if (point == TD_MEDIA_BEFORE_COMMIT)
 		hit(p, 14);
+	if (point == TD_REFILL_PUMP)
+		hit(p, 15);
 }
 
 static void init(fixture *f)
@@ -983,8 +985,10 @@ START_TEST(playback)
 	OK(code);
 	ck_assert(report.generation == status(e).current.epoch && report.final == 1 &&
 	          report.pcm_frames == LONG_FRAMES && report.error == TEDER_OK);
-	ck_assert(status(e).position_quality == TEDER_QUALITY_UNKNOWN &&
-	          status(e).underrun_frames == 0);
+	ck_assert(status(e).position_quality == TEDER_QUALITY_MEASURED &&
+	          status(e).source_frame == LONG_FRAMES &&
+	          status(e).output_frame == LONG_FRAMES + status(e).underrun_frames &&
+	          status(e).underrun_frames == report.underrun_frames);
 	th_gate_release(&f.gate);
 	OK(terminal(e, enumeration).outcome);
 	close_engine(&e);
@@ -1016,7 +1020,7 @@ START_TEST(play_changes)
 	th_gate_release(&f.gate);
 	OK(terminal(e, id).outcome);
 	ended(&f, e, 9);
-	ck_assert(status(e).current.source == target.source && status(e).source_frame == 7);
+	ck_assert(status(e).current.source == target.source && status(e).source_frame == 16);
 	for (unsigned i = 0; i < 9; i++) {
 		float expected = ((int)i - 1) * 1000 / 32768.0f;
 		ck_assert(f.capture[i * 2] == expected && f.capture[i * 2 + 1] == -expected);
@@ -1685,6 +1689,207 @@ START_TEST(seek_failure)
 }
 END_TEST
 
+static teder_status clock_at(teder_engine *e, uint64_t output)
+{
+	teder_status s;
+	do {
+		s = status(e);
+		ck_assert(s.output_frame <= output);
+		th_yield();
+	} while (s.output_frame != output);
+	return s;
+}
+
+START_TEST(clock_progress)
+{
+	fixture f;
+	init(&f);
+	f.manual = true;
+	teder_config config = INIT(teder_config);
+	config.pcm_frames = 4;
+	teder_engine *e = create(&f, config, false);
+	outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
+	load_track(e);
+	outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
+	atomic_store(&f.point, 15);
+	th_gate_await(&f.gate); /* no producer can refill until released */
+	step(&f, 7);
+	step(&f, 5);
+	ck_assert(atomic_load(&f.captured) == 4);
+	th_gate_release(&f.gate);
+	teder_status s = clock_at(e, 12);
+	ck_assert(s.source_frame == 4 && s.underrun_frames == 8 && s.track == 77 &&
+	          s.position_quality == TEDER_QUALITY_MEASURED);
+	uint64_t missing = 0;
+	teder_event event = INIT(teder_event);
+	while (missing < 8) {
+		teder_code code = teder_event_poll(e, &event);
+		ck_assert(code == TEDER_OK || code == TEDER_AGAIN);
+		if (code == TEDER_OK && event.kind == TEDER_EVENT_UNDERRUN) {
+			ck_assert(event.epoch == s.current.epoch && event.from_source == s.current.source &&
+			          event.from_track == 77 && event.output_frame == 12);
+			missing += event.missing_frames;
+		}
+	}
+	ck_assert(missing == 8);
+	atomic_store(&f.point, 13);
+	boundary(&f, e, transport(e, TEDER_PAUSE));
+	step(&f, 31);
+	for (unsigned i = 0; i < 100; i++) {
+		s = status(e);
+		ck_assert(s.transport == TEDER_PAUSED && s.source_frame == 4 && s.output_frame == 12 &&
+		          s.underrun_frames == 8 && s.latency_quality == TEDER_QUALITY_UNKNOWN &&
+		          s.latency_frames == 0 && !(s.clock_flags & TEDER_AUDIBLE_END_ESTIMATED));
+	}
+	atomic_store(&f.point, 7);
+	td_signal(e);
+	th_gate_await(&f.gate); /* paused producer has finished filling the next bounded block */
+	ck_assert(e->pcm.free_count == 0);
+	th_gate_release(&f.gate);
+	atomic_store(&f.point, 13);
+	boundary(&f, e, transport(e, TEDER_PLAY));
+	s = clock_at(e, 13);
+	ck_assert(s.source_frame == 5 && s.underrun_frames == 8);
+	atomic_store(&f.point, 13);
+	boundary(&f, e, gain_to(e, 0, 1));
+	s = clock_at(e, 14);
+	ck_assert(s.source_frame == 6 && s.underrun_frames == 8); /* mute still consumes media */
+	atomic_store(&f.point, 13);
+	boundary(&f, e, transport(e, TEDER_PAUSE));
+	outcome(e, seek_frame(e, 7), TEDER_OK);
+	s = status(e);
+	ck_assert(s.transport == TEDER_PAUSED && s.source_frame == 7 && !s.output_frame &&
+	          !s.underrun_frames && s.position_quality == TEDER_QUALITY_MEASURED);
+	outcome(e, transport(e, TEDER_STOP), TEDER_OK);
+	ck_assert(status(e).source_frame == 0 && status(e).output_frame == 0);
+	close_engine(&e);
+	dispose(&f);
+}
+END_TEST
+
+START_TEST(clock_changes)
+{
+	fixture f;
+	init(&f);
+	f.manual = true;
+	teder_config config = INIT(teder_config);
+	config.pcm_frames = 64;
+	teder_engine *e = create(&f, config, false);
+	uint64_t id = submit(e);
+	OK(terminal(e, id).outcome);
+	teder_result *list = take(e, id);
+	teder_device_info b = entry(list, 1);
+	outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
+	load_track(e);
+	outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
+	step(&f, 2);
+	ck_assert(clock_at(e, 2).source_frame == 2);
+	teder_target before = status(e).current;
+	atomic_store(&f.point, 11);
+	id = select_device(e, b.key);
+	teder_result_release(list);
+	th_gate_await(&f.gate); /* refill is paused, native stop has not joined yet */
+	step(&f, 3);
+	ck_assert(status(e).source_frame == 2);
+	th_gate_release(&f.gate);
+	outcome(e, id, TEDER_OK);
+	teder_status s = status(e);
+	ck_assert(s.current.epoch == before.epoch + 1 && s.current.source == before.source &&
+	          s.source_frame == 5 && !s.output_frame && s.transport == TEDER_PAUSED &&
+	          s.output_rate == 22050 && s.position_quality == TEDER_QUALITY_MEASURED);
+	outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
+	step(&f, 1);
+	s = clock_at(e, 1);
+	ck_assert(s.source_frame == 6 && s.position_quality == TEDER_QUALITY_ESTIMATED);
+	step(&f, 2);
+	ck_assert(clock_at(e, 3).source_frame == 10);
+	step(&f, 7);
+	ended(&f, e, 6);
+	s = status(e);
+	ck_assert(s.source_frame == 16 && s.output_frame == 6 && !s.underrun_frames);
+	step(&f, 31);
+	ck_assert(status(e).output_frame == 6 && status(e).source_frame == 16);
+	outcome(e, seek_frame(e, 7), TEDER_OK);
+	ck_assert(status(e).source_frame == 7 && status(e).output_frame == 0);
+	outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
+	step(&f, 1);
+	s = clock_at(e, 1);
+	ck_assert(s.source_frame == 8);
+	f.device_error = true;
+	outcome(e, select_device(e, (teder_blob){0}), TEDER_DEVICE_LOST);
+	s = status(e);
+	ck_assert(s.source_frame == 8 && !s.output_frame && s.output_state == TEDER_OUTPUT_LOST &&
+	          s.position_quality == TEDER_QUALITY_UNKNOWN &&
+	          s.latency_quality == TEDER_QUALITY_UNKNOWN);
+	close_engine(&e);
+	dispose(&f);
+}
+END_TEST
+
+typedef struct {
+	teder_engine *engine;
+	atomic_uint stop;
+	unsigned reads;
+} clock_reader;
+
+static void read_clock(void *p)
+{
+	clock_reader *reader = p;
+	teder_status before = {0};
+	while (!atomic_load(&reader->stop)) {
+		teder_status s = status(reader->engine);
+		uint64_t source = s.current.source;
+		if (source) {
+			ck_assert(s.track == 1000 + source && s.current.epoch >= 3 * source &&
+			          s.current.epoch <= 3 * source + 2 && s.duration_frames == 16 &&
+			          s.source_rate == 44100 && s.source_frame <= 16);
+			if (s.current.epoch == 3 * source + 1)
+				ck_assert(s.source_frame >= 7);
+			if (s.current.epoch == 3 * source + 2)
+				ck_assert(!s.source_frame && !s.output_frame && !s.underrun_frames);
+		}
+		if (before.current.epoch == s.current.epoch)
+			ck_assert(s.source_frame >= before.source_frame &&
+			          s.output_frame >= before.output_frame);
+		before = s;
+		reader->reads++;
+	}
+}
+
+START_TEST(clock_readers)
+{
+	fixture f;
+	init(&f);
+	teder_config config = INIT(teder_config);
+	teder_engine *e = create(&f, config, false);
+	outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
+	clock_reader readers[2] = {{.engine = e}, {.engine = e}};
+	th_thread threads[2];
+	for (unsigned i = 0; i < 2; i++) {
+		atomic_init(&readers[i].stop, 0);
+		ck_assert(th_thread_start(&threads[i], read_clock, &readers[i]));
+	}
+	for (unsigned i = 1; i <= 32; i++) {
+		uint64_t id;
+		teder_code code;
+		RETRY(code, teder_open(e, TRACK, sizeof(TRACK) - 1, 1000 + i, TEDER_OPEN_AUTOPLAY, &id));
+		OK(code);
+		outcome(e, id, TEDER_OK);
+		ended(&f, e, 16);
+		outcome(e, seek_frame(e, 7), TEDER_OK);
+		outcome(e, transport(e, TEDER_STOP), TEDER_OK);
+	}
+	OK(th_close(e));
+	for (unsigned i = 0; i < 2; i++) {
+		atomic_store(&readers[i].stop, 1);
+		th_thread_join(&threads[i]);
+		ck_assert(readers[i].reads > 0);
+	}
+	close_engine(&e);
+	dispose(&f);
+}
+END_TEST
+
 START_TEST(native_select)
 {
 	size_t attempts = 0;
@@ -1774,6 +1979,12 @@ int main(int argc, char **argv)
 		test = stop_failures;
 	else if (!strcmp(argv[1], "seek-failure"))
 		test = seek_failure;
+	else if (!strcmp(argv[1], "clock-progress"))
+		test = clock_progress;
+	else if (!strcmp(argv[1], "clock-changes"))
+		test = clock_changes;
+	else if (!strcmp(argv[1], "clock-readers"))
+		test = clock_readers;
 	else if (!strcmp(argv[1], "native-select"))
 		test = native_select;
 	else if (!strcmp(argv[1], "native"))

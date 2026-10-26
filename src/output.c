@@ -70,6 +70,11 @@ static void device_close(teder_engine *e)
 	if (!e->device)
 		return;
 	td_refill_pause(e);
+	/* Save the final callback endpoint before native userdata is released.
+	 * Failed stop also joins native users, via uninit in the device owner. */
+	if (td_device_running(e->device))
+		td_device_stop(e->device);
+	td_output_report(e);
 	if (td_device_close(&e->device) != TEDER_OK)
 		abort();
 	td_lock(e);
@@ -95,6 +100,7 @@ static void invalidate(teder_engine *e, teder_code code)
 	e->status.output_rate = e->status.output_channels = e->status.output_period_frames = 0;
 	e->status.backend = 0;
 	e->status.output_frame = e->status.latency_frames = 0;
+	e->status.underrun_frames = 0;
 	e->status.latency_quality = e->status.position_quality = TEDER_QUALITY_UNKNOWN;
 	e->status.clock_flags &= TEDER_DURATION_KNOWN;
 	e->status.next_source = e->status.next_track = 0;
@@ -288,6 +294,8 @@ teder_code td_output_quiesce(teder_engine *e)
 	teder_code code = td_device_stop(e->device);
 	if (code != TEDER_OK)
 		invalidate(e, code);
+	else
+		td_output_report(e);
 	return code;
 }
 
@@ -317,7 +325,21 @@ bool td_output_report(teder_engine *e)
 	td_lock(e);
 	if (code != TEDER_OK)
 		report = (td_device_report){.generation = e->status.current.epoch, .error = code};
-	bool current = report.generation == e->status.current.epoch;
+	bool current = report.generation == e->status.current.epoch &&
+	               (!report.source ||
+	                (report.source == e->status.current.source && report.track == e->status.track));
+	uint64_t missing = 0;
+	if (current && report.error == TEDER_OK) {
+		e->status.output_frame = report.output_frames;
+		if (report.source) {
+			e->status.source_frame = report.source_frame;
+			e->status.position_quality = e->status.source_rate == e->status.output_rate
+			                                 ? TEDER_QUALITY_MEASURED
+			                                 : TEDER_QUALITY_ESTIMATED;
+		}
+		missing = report.underrun_frames - e->status.underrun_frames;
+		e->status.underrun_frames = report.underrun_frames;
+	}
 	bool failed = current && report.error != TEDER_OK && e->status.transport != TEDER_FAILED;
 	bool ended = current && report.error == TEDER_OK && report.final &&
 	             (e->status.transport == TEDER_PLAYING || e->status.transport == TEDER_DRAINING);
@@ -338,8 +360,18 @@ bool td_output_report(teder_engine *e)
 	                     .from_source = e->status.current.source,
 	                     .from_track = e->status.track,
 	                     .code = report.error};
+	teder_event underrun = {.struct_size = sizeof(underrun),
+	                        .abi_version = TEDER_ABI_VERSION,
+	                        .kind = TEDER_EVENT_UNDERRUN,
+	                        .epoch = e->status.current.epoch,
+	                        .output_frame = e->status.output_frame,
+	                        .from_source = e->status.current.source,
+	                        .from_track = e->status.track,
+	                        .missing_frames = missing};
 	td_unlock(e);
 	if (failed)
 		td_emit(e, &event);
+	if (missing)
+		td_emit(e, &underrun);
 	return failed || ended || draining;
 }

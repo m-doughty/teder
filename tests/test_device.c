@@ -303,6 +303,50 @@ START_TEST(controls)
 }
 END_TEST
 
+START_TEST(clock_counts)
+{
+	fixture f = {0};
+	init(&f, false);
+	OK(open_device(&f, (teder_blob){0}, 0));
+	OK(td_device_configure(f.device, (td_audio_config){1, 1, 0, 0}));
+	OK(td_device_start(f.device));
+	join(&f);
+	td_device_feed *feed = f.native->pUserData;
+	float pcm[22];
+	uint64_t revision;
+	td_device_report r;
+	OK(td_device_get_report(f.device, &r));
+	ck_assert(!r.output_frames && !r.underrun_frames && !r.source);
+	OK(td_device_control(f.device, (td_audio_config){1, 1, 1, 0}, &revision));
+	f.native->onData(f.native, pcm, NULL, 1);
+	OK(td_device_get_report(f.device, &r));
+	ck_assert(r.source == 1 && r.source_frame == 1 && r.output_frames == 1 && !r.underrun_frames);
+	f.native->onData(f.native, pcm, NULL, 11);
+	OK(td_device_get_report(f.device, &r));
+	ck_assert(r.source_frame == 3 && r.output_frames == 3 && !r.underrun_frames && r.final);
+	f.native->onData(f.native, pcm, NULL, 7);
+	OK(td_device_get_report(f.device, &r));
+	ck_assert(r.source_frame == 3 && r.output_frames == 3 && !r.underrun_frames);
+
+	OK(td_device_stop(f.device));
+	OK(td_device_configure(f.device, (td_audio_config){2, 1, 1, 0}));
+	f.native->onData(f.native, pcm, NULL, 7); /* empty generation: true starvation */
+	OK(td_device_get_report(f.device, &r));
+	ck_assert(r.generation == 2 && r.output_frames == 7 && r.underrun_frames == 7 && !r.source);
+	atomic_store(&feed->sequence, 3); /* failed coherent read must not modify caller storage */
+	td_device_report saved = r;
+	ck_assert(td_device_get_report(f.device, &r) == TEDER_AGAIN && !memcmp(&r, &saved, sizeof(r)));
+	atomic_store(&feed->sequence, 4);
+	feed->report.output_frames = UINT64_MAX - 2;
+	feed->report.underrun_frames = UINT64_MAX - 2;
+	f.native->onData(f.native, pcm, NULL, 7);
+	OK(td_device_get_report(f.device, &r));
+	ck_assert(r.output_frames == UINT64_MAX && r.underrun_frames == UINT64_MAX &&
+	          r.error == TEDER_LIMIT);
+	uninit(&f);
+}
+END_TEST
+
 START_TEST(failures)
 {
 	for (unsigned mode = 0; mode < 6; mode++) {
@@ -484,6 +528,8 @@ int main(int argc, char **argv)
 		test = lifecycle;
 	else if (!strcmp(argv[1], "controls"))
 		test = controls;
+	else if (!strcmp(argv[1], "clock-counts"))
+		test = clock_counts;
 	else if (!strcmp(argv[1], "failures"))
 		test = failures;
 	else if (!strcmp(argv[1], "closing"))

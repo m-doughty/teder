@@ -10,6 +10,7 @@ typedef struct {
 } td_device_info;
 typedef struct {
 	uint64_t generation, pcm_frames, missing_frames, control;
+	uint64_t source, track, source_frame, output_frames, underrun_frames;
 	uint32_t final;
 	teder_code error;
 } td_device_report;
@@ -49,6 +50,7 @@ typedef struct {
 	atomic_uint calls, final;
 	atomic_int error;
 	atomic_uint_fast64_t sequence, pcm_frames, missing_frames, control;
+	atomic_uint_fast64_t source, track, source_frame, output_frames, underrun_frames;
 	atomic_uint_fast64_t wanted, settings; /* owner publishes; callback takes one bounded read */
 	uint64_t applied; /* callback-owned cached settings; initialized at quiescence */
 } td_device_feed;

@@ -11,8 +11,9 @@ typedef struct {
 } td_audio_config;
 
 typedef struct {
-	uint32_t final;          /* final block fully consumed in this call */
-	uint32_t pcm_frames;     /* consumed, including muted frames */
+	uint64_t source, track, source_frame; /* last successfully consumed PCM endpoint */
+	uint32_t final;                       /* final block fully consumed in this call */
+	uint32_t pcm_frames;                  /* consumed, including muted frames */
 	uint32_t missing_frames; /* enabled but unavailable, not an EOF/underrun classification */
 } td_audio_result;
 
