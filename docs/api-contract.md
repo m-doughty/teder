@@ -110,8 +110,8 @@ Private FLAC sources now stream into this handoff; their format, conversion and
 reservation rules and implemented asynchronous open/seek behavior are specified
 in [sources.md](sources.md). Playback and device integration are not implemented yet.
 Snapshot fields are resolved limits; the independent snapshot pool is not implemented yet.
-Current result accessors read immutable copies built by private tests; public
-result producers are not implemented yet. `result_tag` requires distinct key
+Public enumeration produces detached device lists; other result producers remain
+planned. `result_tag` requires distinct key
 and value output pointers. Identical pointers return INVALID without changes.
 
 Create validates products/alignment and reserves fixed pools before publication.
@@ -264,6 +264,44 @@ Keys fit `max_input_bytes` and carry self-contained backend identity plus an
 engine-instance token; no growing engine-side ID registry is retained. All key
 lengths/fields are validated before backend access, including copied/fabricated
 input. This token is provenance validation, not a security credential.
+
+### Device enumeration (implemented)
+
+Submit `teder_enumerate_devices(engine, &request)` from the serialized host
+thread. OK means queued; BUSY means retry admission later, and LIMIT means no
+request slot is available. This call performs no native enumeration itself and
+does not occupy `media_request` or change source/transport/output status.
+
+Initialize `teder_request_info` with its size and ABI version. Poll/get until
+TERMINAL, then inspect `outcome` and `result_kind`. An OK completion has
+`TEDER_RESULT_DEVICES`. Take its result with `teder_request_take_result`, then
+acknowledge the request. Read `teder_result_device_count` and indexed
+`teder_result_device` views while retaining the result. Initialize each output
+struct's size/version. Release the result after all readers finish.
+Take/ack can return BUSY during brief bookkeeping; retry them later.
+Acknowledging without taking frees the list. Destroy also frees untaken lists.
+
+A successful list may be empty. It contains at most 128 outputs and fits
+`result_bytes_limit`; every key also fits `max_input_bytes`. Capacity overflow
+returns LIMIT without truncating the list. Missing native backend support returns
+UNSUPPORTED or DEVICE_LOST as the request outcome, never a synthetic device.
+Enumeration results remain valid after engine destruction; keys identify their
+originating engine, so another engine cannot adopt them.
+
+The first enumeration reserves a context arena and an 8 MiB dependency heap cap
+against `engine_bytes_limit`. The heap grows only within that reservation.
+Construction also reserves the lesser of remaining engine budget and the result
+limit before building the list. Taking transfers the result's bytes out of engine
+accounting. A committed context stays cached until close. A failed/cancelled first
+request releases its provisional context; later result failures retain a healthy
+context. A native allocator failure discards that context before retry.
+
+Cancellation before commitment discards the result; a racing commitment can win.
+A blocked native operation keeps cancellation/close pending until it returns;
+the UI thread does not join it. No device is selected or started by enumeration.
+`teder_select_device` remains an unimplemented declaration in this checkpoint.
+
+### Analysis and rendering (planned)
 
 Analysis taps post-software-gain, pre-device-mixer stereo PCM. Enable/configure
 is asynchronous and transactional; failure preserves the previous configuration.

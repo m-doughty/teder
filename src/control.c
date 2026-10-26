@@ -116,7 +116,7 @@ static void control(teder_engine *e)
 		td_request_slot *s = &e->requests[slot];
 		s->info.state = TEDER_RUNNING;
 		bool cancel = s->cancelled || atomic_load(&e->lifecycle) != TEDER_LIVE;
-		if (!cancel && !e->runtime.execute) {
+		if (!cancel && !e->runtime.execute && s->info.operation != TEDER_OP_DEVICES) {
 			bool dispatched = td_media_dispatch(e, slot);
 			td_unlock(e);
 			if (dispatched)
@@ -124,8 +124,9 @@ static void control(teder_engine *e)
 			continue;
 		}
 		td_unlock(e);
-		teder_code code =
-		    cancel ? TEDER_CANCELLED : e->runtime.execute(e->runtime.context, e, slot);
+		teder_code code = cancel               ? TEDER_CANCELLED
+		                  : e->runtime.execute ? e->runtime.execute(e->runtime.context, e, slot)
+		                                       : td_output_enumerate(e, slot);
 		td_lock(e);
 		td_complete(e, slot, code);
 		td_unlock(e);
@@ -136,6 +137,7 @@ static void control(teder_engine *e)
 	join(e->prepare_thread);
 	if (e->runtime.consumer_join)
 		e->runtime.consumer_join(e->runtime.context);
+	td_output_close(e);
 	td_pcm_clear(&e->pcm);
 	td_sources_close(e);
 	td_lock(e);

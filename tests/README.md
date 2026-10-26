@@ -173,6 +173,25 @@ frames, stops, closes and injects failure at every observed device-init allocati
 Missing backend/device support fails the test. Headless ALSA output and silent
 WASAPI submission are native lifecycle evidence, not audible music acceptance.
 
+## Public device enumeration
+
+`-R '^output\.'` selects five engine integration cases: snapshot, cancellation,
+failures, identity and closing. They check exact names/keys/defaults, detached
+results after destroy, cached context reservations, take/ack/destruction,
+cancellation on both sides of commitment, queue saturation and same-thread
+native initialization/uninitialization. Failed allocations cover the context
+arena, native initialization, native enumeration and result arena. Budget/key
+limits, missing backend, native errors, poisoned-context retry and token
+exhaustion are explicit. A blocked enumeration keeps close pending until release.
+The ordinary suite injects only native context operations; public request and
+result paths are production code.
+
+Run `build/bin/teder_test_output native` for real public enumeration and a sweep
+of every observed allocation failure. Results are read after engine destruction.
+It fails if no native backend can initialize; zero enumerated outputs is valid.
+This is enumeration evidence, not playback. The installed consumer also checks
+the public symbol and invalid-handle boundary without requiring an audio device.
+
 ## Linux ThreadSanitizer in Docker
 
 From the package root, run `python tools/run-tsan-docker.py` with Python 3 and

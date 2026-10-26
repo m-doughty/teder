@@ -8,7 +8,7 @@ Implemented exports:
 - `teder_get_build_info`; optional `teder_renderer_get_build_info`.
 - `teder_create`, `teder_get_config`, `teder_get_status`,
   `teder_request_close`, and `teder_destroy`.
-- `teder_open` and `teder_seek`.
+- `teder_open`, `teder_seek`, and `teder_enumerate_devices`.
 - `teder_request_poll`, `teder_request_get`, `teder_request_cancel`,
   `teder_request_take_result`, `teder_request_ack`, and `teder_event_poll`.
 - `teder_result_kind`, `teder_result_probe`, `teder_result_tag`,
@@ -38,11 +38,16 @@ variable requests and concurrent production. A private device owner now connects
 this core to miniaudio, with native start/stop and callback-safe teardown.
 Engine wiring and audible playback are not implemented yet; no new public export is available.
 
-Backend contexts now have a private owner and bounded allocator. Enumeration
+Public device enumeration now runs asynchronously on the lifecycle worker. It
 copies up to 128 outputs into detached results, with engine-scoped opaque keys.
+Contexts reserve their arena plus an 8 MiB dependency heap cap before opening;
+the cap reserves budget without allocating that whole amount. Cancellation and
+failed construction unwind before request completion. See the
+[enumeration contract](docs/api-contract.md#device-enumeration-implemented).
 Each device owns a separate arena and borrows its context until native teardown
 finishes. Configuration changes require a stopped device. Native tests submit
-silence through WASAPI and headless ALSA. Public device requests are not implemented yet.
+silence through WASAPI and headless ALSA. Public device selection and engine
+playback are not implemented yet.
 
 The private libFLAC build routes codec allocations through a bounded worker-owned
 budget. The source owns one arena for its wrapper, path, frame scratch and converter.

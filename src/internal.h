@@ -3,6 +3,7 @@
 #include "teder.h"
 #include "memory.h"
 #include "pcm.h"
+#include "backend.h"
 #include "miniaudio.h"
 #include <stdatomic.h>
 #include <string.h>
@@ -103,7 +104,9 @@ enum {
 	TD_PREPARE_STOPPED,
 	TD_MEDIA_BEFORE_COMMIT,
 	TD_MEDIA_AFTER_COMMIT,
-	TD_DECODE_IDLE
+	TD_DECODE_IDLE,
+	TD_OUTPUT_BEFORE_COMMIT,
+	TD_OUTPUT_AFTER_COMMIT
 };
 
 typedef struct {
@@ -115,6 +118,9 @@ typedef struct {
 	/* Optional private consumer: one endpoint, joined here before PCM clear.
 	 * Without it, control owns the idle consumer; no device exists yet. */
 	void (*consumer_join)(void *);
+	/* Zero uses native backends; otherwise all functions are required.
+	 * The descriptor is copied; its caller-owned context outlives destroy. */
+	td_backend_api backend;
 } td_runtime;
 
 enum {
@@ -154,6 +160,9 @@ struct teder_engine {
 	td_thread prepare_thread;
 	td_source_job sources[TD_SOURCE_JOBS];
 	uint64_t last_source;
+	td_backend *backend; /* lifecycle worker only; context outlives devices */
+	size_t backend_reservation;
+	uint64_t backend_token;
 	atomic_uint lifecycle;
 	uint64_t last_request, last_completion;
 	uint32_t event_head, event_count;
@@ -181,6 +190,9 @@ void td_signal(teder_engine *);
 void td_prepare_signal(teder_engine *);
 void td_prepare_run(teder_engine *);
 bool td_decode_step(teder_engine *);
+teder_code td_output_enumerate(teder_engine *, uint32_t slot);
+void td_output_close(teder_engine *); /* lifecycle worker, devices already closed */
+teder_code td_token_next(atomic_uint_fast64_t *, uint64_t *);
 void td_sources_close(teder_engine *);            /* prep joined and consumer quiescent */
 bool td_media_dispatch(teder_engine *, uint32_t); /* gate held; never performs I/O */
 teder_code td_submit_media(

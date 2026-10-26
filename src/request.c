@@ -26,7 +26,7 @@ static teder_code submit(teder_engine *e,
 		return TEDER_LIMIT;
 	if (atomic_load(&e->lifecycle) != TEDER_LIVE)
 		return TEDER_CLOSED;
-	if (!e->runtime.execute && !media)
+	if (!e->runtime.execute && !media && operation != TEDER_OP_DEVICES)
 		return TEDER_UNSUPPORTED;
 	if (!td_try_lock(e))
 		return TEDER_BUSY;

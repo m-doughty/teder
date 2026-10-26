@@ -48,6 +48,9 @@ int main(int argc, char **argv)
 		return 1;
 	if (info.abi_version != 1 || info.capabilities != 0 || info.backend_mask != 0)
 		return 2;
+	uint64_t invalid_request = 99;
+	if (teder_enumerate_devices(NULL, &invalid_request) != TEDER_INVALID || invalid_request != 0)
+		return 19;
 	teder_config config = {0};
 	config.struct_size = sizeof(config);
 	config.abi_version = TEDER_ABI_VERSION;
