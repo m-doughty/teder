@@ -55,6 +55,12 @@ int main(int argc, char **argv)
 	if (teder_select_device(NULL, NULL, 0, &invalid_request) != TEDER_INVALID ||
 	    invalid_request != 0)
 		return 20;
+	teder_target invalid_target = {0};
+	if (teder_transport(NULL, &invalid_target, TEDER_PLAY, &invalid_request) != TEDER_INVALID ||
+	    invalid_request != 0)
+		return 21;
+	if (teder_set_gain(NULL, 0.5f, 0, &invalid_request) != TEDER_INVALID || invalid_request != 0)
+		return 22;
 	teder_config config = {0};
 	config.struct_size = sizeof(config);
 	config.abi_version = TEDER_ABI_VERSION;

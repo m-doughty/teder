@@ -20,7 +20,8 @@ commits the new source, prefills the bounded PCM pool and starts output. PLAYING
 is published only after native startup succeeds. Startup failure leaves output
 LOST and the new source PAUSED. A decode failure during prefill leaves FAILED.
 Ordinary open leaves READY; a seek during playback resumes the replacement.
-Clocks and separate play/pause/stop controls are not implemented yet.
+PLAY/PAUSE and gain/mute now use the [transport contract](api-contract.md#transport-controls-implemented-subset).
+Stop/rewind and live clocks are not implemented yet.
 
 Three fixed engine job records bound active, staged and retiring sources together.
 Each source reserves its arena plus an 8 MiB codec cap before construction.

@@ -11,7 +11,7 @@
 
 /* Poll while control delegates a potentially active consumer's refill work.
  * This is not a latency guarantee. No callback signals a waiter. */
-static void interval(void)
+void td_worker_interval(void)
 {
 #ifdef _WIN32
 	Sleep(1);
@@ -39,7 +39,7 @@ void td_refill_run(teder_engine *e)
 			if (progress)
 				td_signal(e); /* retirement/status aggregation stays off the callback */
 			else
-				interval();
+				td_worker_interval();
 		}
 		/* Exactly one acknowledgement per resume, after the last producer access.
 		 * Control consumes it before resuming again, so it cannot become stale. */
@@ -79,6 +79,11 @@ void td_refill_resume(teder_engine *e)
 	/* Control owns source state here, after pause. Preparation owns only STAGING
 	 * jobs and cannot mutate any ACTIVE/RETIRING source inspected below. */
 	td_lock(e);
+	if (!e->runtime.consumer_join && e->status.transport != TEDER_PLAYING &&
+	    e->status.transport != TEDER_DRAINING) {
+		td_unlock(e);
+		return;
+	}
 	bool needed = td_device_running(e->device) &&
 	              (e->status.transport == TEDER_PLAYING || e->status.transport == TEDER_DRAINING);
 	for (unsigned i = 0; i < TD_SOURCE_JOBS; i++) {

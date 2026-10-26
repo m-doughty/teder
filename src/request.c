@@ -34,7 +34,14 @@ static teder_code submit(teder_engine *e,
 		code = TEDER_CLOSED;
 		goto done;
 	}
-	if (media) {
+	bool mutation = media && operation != TEDER_OP_TRANSPORT && operation != TEDER_OP_GAIN;
+	if (media && operation == TEDER_OP_TRANSPORT &&
+	    (media->target.epoch != e->status.current.epoch ||
+	     media->target.source != e->status.current.source)) {
+		code = TEDER_STALE;
+		goto done;
+	}
+	if (mutation) {
 		bool available = false;
 		for (unsigned i = 0; i < TD_SOURCE_JOBS; i++)
 			if (e->sources[i].state == TD_JOB_FREE)
@@ -85,7 +92,7 @@ static teder_code submit(teder_engine *e,
 		                               .state = TEDER_QUEUED};
 		*out = s->info.request;
 		code = TEDER_OK;
-		if (media)
+		if (mutation)
 			e->status.media_request = *out;
 		break;
 	}

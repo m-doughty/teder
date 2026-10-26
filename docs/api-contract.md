@@ -339,6 +339,47 @@ the saved open/seek position until live accounting is implemented.
 A selected context's native allocator failure during enumeration closes its
 device/context, advances epoch and pauses the source. Explicit selection recovers.
 
+### Transport controls (implemented subset)
+
+`teder_transport(engine, &target, TEDER_PLAY, &request)` starts READY output or
+resumes PAUSED playback. Copy target from a successful status read. PLAY is a
+no-op while PLAYING/DRAINING; it fails BAD_STATE without an output or from
+EMPTY/ENDED/FAILED. PAUSE succeeds unchanged in READY/PAUSED and fails from
+EMPTY/ENDED/FAILED. STOP returns UNSUPPORTED until stop/rewind is implemented.
+Targets are checked at admission and again before commitment; mismatch is STALE.
+
+For example, with `status` from a successful `teder_get_status` call:
+
+```c
+teder_target target = status.current;
+uint64_t request;
+teder_code code = teder_transport(engine, &target, TEDER_PAUSE, &request);
+```
+
+OK admits the request. Observe its terminal outcome, then acknowledge it using
+the existing request API. BUSY means retry admission later; the call performs no
+native wait. These controls do not occupy media_request and remain admissible
+during preparation. They execute in admission order; a source change can make a
+queued target stale. Neither pause/resume nor gain/mute changes the epoch.
+
+`teder_set_gain(engine, linear_gain, mute, &request)` follows the same outcome
+protocol. Gain must be finite and within 0..1; mute must be 0 or 1. Both apply
+as one change. Gain works without a source or output; those settings govern the
+next start. Repeating the current pair succeeds without another callback change.
+
+On running output, pause/resume and gain/mute complete after a callback applies
+them. Pause sends silence without consuming PCM; resume continues at the next
+unconsumed frame. The device stays open and running. Decode EOF with unsubmitted
+PCM reports DRAINING; EOF-seen paused playback resumes draining. If final
+submission wins a pause race, transport stays ENDED. Already-submitted hardware
+audio may remain audible after pause completion.
+
+Cancellation before commitment preserves the old settings. After publication,
+ordinary cancellation does not revoke the command. Close ends native borrows
+before deciding a pending command's outcome: an acknowledged change keeps its
+actual result; a change never applied returns CANCELLED. No timeout frees a
+callback borrower. Live positions and latency estimates are not implemented yet.
+
 ### Analysis and rendering (planned)
 
 Analysis taps post-software-gain, pre-device-mixer stereo PCM. Enable/configure

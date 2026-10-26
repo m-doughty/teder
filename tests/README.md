@@ -165,7 +165,9 @@ The Windows unwind check preserves exact handle counts over 16 rejected opens.
 The adapter may import only the separately audited `td_audio_render` and allowed
 compiler primitives. It cannot allocate, release, signal or control the device.
 Its counters describe raw missing PCM, including EOF; they are not clock or
-public underrun classification. Configuration requires quiescence. Live report
+public underrun classification. `device.controls` checks exact gain/mute samples,
+pause preservation, applied revisions, interrupted publication retaining old settings,
+stale generation rejection and revision exhaustion. Configuration requires quiescence. Live report
 reads use an atomic snapshot and return AGAIN on concurrent publication. Tests
 check generation reset, final PCM and sticky version exhaustion without wrap.
 
@@ -223,6 +225,15 @@ sample formula; callback allocation/import audits remain mandatory.
 For audible acceptance, build and run `teder_play` with an absolute FLAC path.
 Record actual output/format, human observation and process exit separately from
 these synthetic tests. The example flushes prompts even when stdout is piped.
+
+`output.transport-pcm` drives callbacks explicitly to verify partial-block pause,
+exact next-frame resume, atomic gain/mute, stable identity and one native start.
+It arms the next allocation failure and proves no allocation is attempted.
+`output.transport-states` covers empty/ready/playing/paused/draining/ended/failed
+validation, controls during preparation, stale targets and invalid gain values.
+`output.transport-boundaries` gates cancellation before commitment, FIFO changes
+after publication, close before acknowledgement and native startup failure.
+The installed consumer links both new public exports without requiring hardware.
 
 ## Refill scheduling
 

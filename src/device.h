@@ -1,6 +1,7 @@
 #ifndef TEDER_DEVICE_H
 #define TEDER_DEVICE_H
 #include "backend.h"
+#include <string.h>
 
 typedef struct td_device td_device;
 typedef struct {
@@ -8,7 +9,7 @@ typedef struct {
 	uint32_t native_rate, native_channels, native_format;
 } td_device_info;
 typedef struct {
-	uint64_t generation, pcm_frames, missing_frames;
+	uint64_t generation, pcm_frames, missing_frames, control;
 	uint32_t final;
 	teder_code error;
 } td_device_report;
@@ -21,9 +22,11 @@ typedef struct {
 teder_code td_device_plan(size_t *reservation);
 teder_code td_device_open(td_backend *, td_pcm_pool *, teder_blob key, uint32_t rate, td_device **);
 teder_code td_device_get_info(td_device *, td_device_info *);
-/* Configuration is immutable between start and successful stop. Live control
- * publication is not implemented yet; these setters return BUSY while a callback can run. */
+/* Generation configuration requires stopped output and quiescent report readers. */
 teder_code td_device_configure(td_device *, td_audio_config);
+/* Lifecycle owner publishes one control at a time for the configured generation.
+ * Completion requires report.control == revision. No native stop or allocation. */
+teder_code td_device_control(td_device *, td_audio_config, uint64_t *revision);
 teder_code td_device_start(td_device *);
 bool td_device_running(td_device *); /* lifecycle-owner observation, not a join */
 teder_code td_device_stop(td_device *);
@@ -45,7 +48,15 @@ typedef struct {
 	td_device_report report;
 	atomic_uint calls, final;
 	atomic_int error;
-	atomic_uint_fast64_t sequence, pcm_frames, missing_frames;
+	atomic_uint_fast64_t sequence, pcm_frames, missing_frames, control;
+	atomic_uint_fast64_t wanted, settings; /* owner publishes; callback takes one bounded read */
+	uint64_t applied; /* callback-owned cached settings; initialized at quiescence */
 } td_device_feed;
+static inline uint64_t td_device_pack(td_audio_config config)
+{
+	uint32_t bits;
+	memcpy(&bits, &config.gain, sizeof(bits));
+	return bits | ((uint64_t)config.mute << 32) | ((uint64_t)config.enabled << 33);
+}
 void td_device_callback(ma_device *, void *, const void *, ma_uint32);
 #endif

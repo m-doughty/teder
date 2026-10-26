@@ -54,6 +54,9 @@ teder_code td_device_open(
 	atomic_init(&d->feed.missing_frames, 0);
 	atomic_init(&d->feed.final, 0);
 	atomic_init(&d->feed.error, TEDER_OK);
+	atomic_init(&d->feed.control, 0);
+	atomic_init(&d->feed.wanted, 0);
+	atomic_init(&d->feed.settings, 0);
 	ma_device_config config = ma_device_config_init(ma_device_type_playback);
 	config.playback.format = ma_format_f32;
 	config.playback.channels = 2;
@@ -116,6 +119,34 @@ teder_code td_device_configure(td_device *d, td_audio_config config)
 		atomic_store(&d->feed.error, TEDER_OK);
 	}
 	d->feed.config = config;
+	d->feed.applied = td_device_pack(config);
+	d->feed.report.control = 0;
+	atomic_store(&d->feed.control, 0);
+	atomic_store(&d->feed.wanted, 0);
+	atomic_store(&d->feed.settings, d->feed.applied);
+	return TEDER_OK;
+}
+
+teder_code td_device_control(td_device *d, td_audio_config config, uint64_t *revision)
+{
+	if (!revision)
+		return TEDER_INVALID;
+	*revision = 0;
+	if (!d || !(config.gain >= 0 && config.gain <= 1) || config.mute > 1 || config.enabled > 1)
+		return TEDER_INVALID;
+	if (!d->active || d->failed)
+		return TEDER_BAD_STATE;
+	if (config.generation != d->feed.config.generation)
+		return TEDER_STALE;
+	uint64_t before = atomic_load(&d->feed.wanted);
+	if (before >= UINT64_MAX - 1)
+		return TEDER_LIMIT;
+	/* All fields are atomic; the callback retains its previous settings if
+	 * this bounded read overlaps publication. Revisions never wrap. */
+	atomic_store(&d->feed.wanted, before + 1);
+	atomic_store(&d->feed.settings, td_device_pack(config));
+	atomic_store(&d->feed.wanted, before + 2);
+	*revision = before + 2;
 	return TEDER_OK;
 }
 
@@ -174,6 +205,7 @@ teder_code td_device_get_report(td_device *d, td_device_report *out)
 		return TEDER_AGAIN;
 	td_device_report report = {.generation = d->feed.config.generation,
 	                           .pcm_frames = atomic_load(&d->feed.pcm_frames),
+	                           .control = atomic_load(&d->feed.control),
 	                           .missing_frames = atomic_load(&d->feed.missing_frames),
 	                           .final = atomic_load(&d->feed.final),
 	                           .error = atomic_load(&d->feed.error)};

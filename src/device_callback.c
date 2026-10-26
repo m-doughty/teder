@@ -12,9 +12,22 @@ void td_device_callback(ma_device *device, void *output, const void *input, ma_u
 {
 	(void)input;
 	td_device_feed *feed = device->pUserData;
+	uint64_t wanted = atomic_load(&feed->wanted);
+	if (!(wanted & 1)) {
+		uint64_t settings = atomic_load(&feed->settings);
+		if (wanted == atomic_load(&feed->wanted)) {
+			feed->applied = settings;
+			feed->report.control = wanted;
+		}
+	}
+	td_audio_config config = feed->config;
+	uint32_t bits = (uint32_t)feed->applied;
+	memcpy(&config.gain, &bits, sizeof(bits));
+	config.mute = (uint32_t)(feed->applied >> 32) & 1;
+	config.enabled = (uint32_t)(feed->applied >> 33) & 1;
 	td_audio_result result;
 	teder_code code =
-	    td_audio_render(feed->pool, feed->config, output, (size_t)frames * 2, frames, &result);
+	    td_audio_render(feed->pool, config, output, (size_t)frames * 2, frames, &result);
 	feed->report.pcm_frames = add(feed->report.pcm_frames, result.pcm_frames);
 	feed->report.missing_frames = add(feed->report.missing_frames, result.missing_frames);
 	feed->report.final |= result.final;
@@ -28,6 +41,7 @@ void td_device_callback(ma_device *device, void *output, const void *input, ma_u
 		atomic_store(&feed->pcm_frames, feed->report.pcm_frames);
 		atomic_store(&feed->missing_frames, feed->report.missing_frames);
 		atomic_store(&feed->final, feed->report.final);
+		atomic_store(&feed->control, feed->report.control);
 		atomic_store(&feed->error, feed->report.error);
 		atomic_store(&feed->sequence, sequence + 2);
 	} else

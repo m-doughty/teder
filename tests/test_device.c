@@ -258,6 +258,51 @@ START_TEST(lifecycle)
 }
 END_TEST
 
+START_TEST(controls)
+{
+	fixture f = {0};
+	init(&f, false);
+	OK(open_device(&f, (teder_blob){0}, 0));
+	OK(td_device_configure(f.device, (td_audio_config){1, 1, 0, 0}));
+	OK(td_device_start(f.device));
+	join(&f); /* the synthetic native endpoint is now driven serially below */
+	uint64_t revision = 99;
+	ck_assert(td_device_control(f.device, (td_audio_config){2, 1, 1, 0}, &revision) == TEDER_STALE);
+	ck_assert(!revision);
+	ck_assert(td_device_control(f.device, (td_audio_config){1, NAN, 1, 0}, &revision) ==
+	          TEDER_INVALID);
+	float pcm[2];
+	OK(td_device_control(f.device, (td_audio_config){1, 0.25f, 1, 0}, &revision));
+	ck_assert(revision == 2);
+	f.native->onData(f.native, pcm, NULL, 1);
+	ck_assert(pcm[0] == 0.0625f && pcm[1] == -0.0625f);
+	td_device_report report;
+	OK(td_device_get_report(f.device, &report));
+	ck_assert(report.control == 2 && report.pcm_frames == 1 && !report.final);
+
+	OK(td_device_control(f.device, (td_audio_config){1, 0.5f, 0, 0}, &revision));
+	f.native->onData(f.native, pcm, NULL, 1);
+	OK(td_device_get_report(f.device, &report));
+	ck_assert(pcm[0] == 0 && pcm[1] == 0 && report.control == 4 && report.pcm_frames == 1 &&
+	          !report.missing_frames);
+	OK(td_device_control(f.device, (td_audio_config){1, 0.5f, 1, 1}, &revision));
+	f.native->onData(f.native, pcm, NULL, 1);
+	OK(td_device_get_report(f.device, &report));
+	ck_assert(pcm[0] == 0 && pcm[1] == 0 && report.control == 6 && report.pcm_frames == 2);
+
+	td_device_feed *feed = f.native->pUserData;
+	atomic_store(&feed->wanted, 7); /* interrupted publication retains the complete old pair */
+	atomic_store(&feed->settings, td_device_pack((td_audio_config){1, 1, 1, 0}));
+	f.native->onData(f.native, pcm, NULL, 1);
+	OK(td_device_get_report(f.device, &report));
+	ck_assert(pcm[0] == 0 && pcm[1] == 0 && report.control == 6 && report.final == 1);
+	atomic_store(&feed->wanted, UINT64_MAX - 1);
+	ck_assert(td_device_control(f.device, (td_audio_config){1, 1, 1, 0}, &revision) == TEDER_LIMIT);
+	ck_assert(!revision && atomic_load(&feed->wanted) == UINT64_MAX - 1);
+	uninit(&f);
+}
+END_TEST
+
 START_TEST(failures)
 {
 	for (unsigned mode = 0; mode < 6; mode++) {
@@ -437,6 +482,8 @@ int main(int argc, char **argv)
 	const TTest *test = NULL;
 	if (!strcmp(argv[1], "lifecycle"))
 		test = lifecycle;
+	else if (!strcmp(argv[1], "controls"))
+		test = controls;
 	else if (!strcmp(argv[1], "failures"))
 		test = failures;
 	else if (!strcmp(argv[1], "closing"))

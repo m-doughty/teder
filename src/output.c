@@ -321,13 +321,16 @@ bool td_output_report(teder_engine *e)
 	bool failed = current && report.error != TEDER_OK && e->status.transport != TEDER_FAILED;
 	bool ended = current && report.error == TEDER_OK && report.final &&
 	             (e->status.transport == TEDER_PLAYING || e->status.transport == TEDER_DRAINING);
+	bool draining = current && !failed && !ended && e->status.transport == TEDER_PLAYING &&
+	                (e->status.clock_flags & TEDER_DECODE_EOF);
 	if (failed) {
 		e->status.transport = TEDER_FAILED;
 		e->status.last_error = report.error;
 	} else if (ended) {
 		e->status.clock_flags |= TEDER_SUBMIT_EOF;
 		e->status.transport = TEDER_ENDED;
-	}
+	} else if (draining)
+		e->status.transport = TEDER_DRAINING;
 	teder_event event = {.struct_size = sizeof(event),
 	                     .abi_version = TEDER_ABI_VERSION,
 	                     .kind = TEDER_EVENT_ERROR,
@@ -338,5 +341,5 @@ bool td_output_report(teder_engine *e)
 	td_unlock(e);
 	if (failed)
 		td_emit(e, &event);
-	return failed || ended;
+	return failed || ended || draining;
 }

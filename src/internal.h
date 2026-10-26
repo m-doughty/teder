@@ -73,6 +73,7 @@ typedef struct {
 	teder_target target;
 	uint64_t frame, track;
 	uint32_t flags;
+	float gain;
 } td_media_input;
 
 typedef struct {
@@ -119,7 +120,9 @@ enum {
 	TD_REFILL_PUMP,
 	TD_REFILL_PARKED,
 	TD_REFILL_PAUSING,
-	TD_REFILL_RESUMED
+	TD_REFILL_RESUMED,
+	TD_TRANSPORT_BEFORE_COMMIT,
+	TD_TRANSPORT_PUBLISHED
 };
 
 typedef struct {
@@ -211,6 +214,7 @@ void td_prepare_run(teder_engine *);
 /* Control holds the producer unless it has resumed refill. Pause acknowledges
  * the last pump/reap before control touches source or producer-owned state. */
 void td_refill_run(teder_engine *);
+void td_worker_interval(void);
 void td_refill_pause(teder_engine *);
 void td_refill_stop(teder_engine *); /* pause, request exit, then caller joins */
 void td_refill_resume(teder_engine *);
@@ -219,6 +223,7 @@ bool td_decode_step(teder_engine *); /* control, refill paused */
 teder_code td_output_enumerate(teder_engine *, uint32_t slot);
 void td_output_close(teder_engine *); /* lifecycle worker: device before context */
 void td_output_select(teder_engine *, uint32_t slot);
+void td_transport(teder_engine *, uint32_t slot);
 teder_code td_output_quiesce(teder_engine *); /* control, producer already paused */
 teder_code td_output_start(teder_engine *);
 bool td_output_report(teder_engine *);                   /* current producer; no native control */
