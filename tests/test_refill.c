@@ -1,6 +1,7 @@
 #include "support/harness.h"
 #include "support/engine.h"
 #include "source.h"
+#include "metadata.h"
 #include "support/track.h"
 #include <check.h>
 #include <stdio.h>
@@ -211,6 +212,49 @@ START_TEST(native_progress)
 }
 END_TEST
 
+START_TEST(probe_progress)
+{
+	th_make_track(PATH, FRAMES);
+	fixture f;
+	init(&f);
+	teder_engine *e;
+	OK(create(&f, &e));
+	teder_request_info opened = terminal(e, open_track(e));
+	OK(opened.outcome);
+	size_t work, headroom;
+	OK(td_metadata_plan(sizeof(PATH) - 1, &work));
+	OK(td_source_plan(e->config.max_input_bytes, 8 * 1024 * 1024, &headroom));
+	td_lock(e);
+	e->config.engine_bytes_limit = e->owned_bytes + work + headroom + 32768;
+	uint64_t limit = e->config.engine_bytes_limit;
+	td_unlock(e);
+	atomic_store(&f.block, TD_PROBE_READ);
+	uint64_t probe_id, next_id;
+	teder_code code;
+	do {
+		code = teder_probe(e, PATH, sizeof(PATH) - 1, 0, &probe_id);
+	} while (code == TEDER_BUSY);
+	OK(code);
+	th_gate_await(&f.pump);
+	do {
+		code = teder_prepare_next(e, &opened.committed, 0, PATH, sizeof(PATH) - 1, 43, &next_id);
+	} while (code == TEDER_BUSY);
+	OK(code);
+	teder_request_info next = terminal(e, next_id);
+	ck_assert(next.outcome == TEDER_OK && next.committed.source == 2 && next.track == 43);
+	drain(e, opened.committed); /* every sample, sixteen PCM pools, while probe I/O is held */
+	teder_status status = INIT(teder_status);
+	OK(th_read_status(e, &status));
+	ck_assert(status.next_state == TEDER_NEXT_READY && status.next_source == 2);
+	th_gate_release(&f.pump);
+	OK(terminal(e, probe_id).outcome);
+	OK(th_close(e));
+	OK(teder_destroy(&e));
+	ck_assert(f.tracker.peak <= limit && atomic_load(&f.closed) == 2);
+	dispose(&f);
+}
+END_TEST
+
 START_TEST(handoff)
 {
 	th_make_track(PATH, FRAMES);
@@ -357,6 +401,8 @@ int main(int argc, char **argv)
 	                                                         : NULL;
 	if (!strcmp(argv[1], "close-resume"))
 		test = close_resume;
+	if (!strcmp(argv[1], "probe-progress"))
+		test = probe_progress;
 	if (!test)
 		return 2;
 	Suite *suite = suite_create("refill");

@@ -121,6 +121,25 @@ int main(int argc, char **argv)
 	} while (code == TEDER_BUSY);
 	if (code != TEDER_OK || status_read(engine, &status) != TEDER_OK || status.source_frame != 7)
 		return 18;
+	do {
+		code = teder_probe(engine, argv[1], (uint32_t)strlen(argv[1]), TEDER_PROBE_ARTWORK, &id);
+		if (code == TEDER_BUSY)
+			tick();
+	} while (code == TEDER_BUSY);
+	if (code != TEDER_OK || completed(engine, id, &opened) != TEDER_OK ||
+	    opened.result_kind != TEDER_RESULT_PROBE)
+		return 25;
+	teder_result *metadata = NULL;
+	do {
+		code = teder_request_take_result(engine, id, &metadata);
+	} while (code == TEDER_BUSY);
+	if (code != TEDER_OK || !metadata)
+		return 26;
+	do {
+		code = teder_request_ack(engine, id);
+	} while (code == TEDER_BUSY);
+	if (code != TEDER_OK)
+		return 27;
 	if (teder_destroy(&engine) != TEDER_BUSY || !engine)
 		return 6;
 	if (teder_request_close(engine) != TEDER_OK)
@@ -143,6 +162,12 @@ int main(int argc, char **argv)
 		return 12;
 	if (teder_destroy(&engine) != TEDER_OK || engine)
 		return 9;
+	teder_probe_info probe = {.struct_size = sizeof(probe), .abi_version = TEDER_ABI_VERSION};
+	if (teder_result_probe(metadata, &probe) != TEDER_OK || probe.codec != TEDER_CODEC_FLAC ||
+	    probe.sample_rate != 44100 || probe.channels != 2 || probe.bits_per_sample != 16 ||
+	    !probe.duration_known || probe.duration_frames != 16)
+		return 28;
+	teder_result_release(metadata);
 	teder_result_release(NULL);
 	return 0;
 }

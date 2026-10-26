@@ -110,8 +110,8 @@ Private FLAC sources now stream into this handoff; their format, conversion and
 reservation rules and implemented asynchronous open/seek behavior are specified
 in [sources.md](sources.md). Playback and device integration are not implemented yet.
 Snapshot fields are resolved limits; the independent snapshot pool is not implemented yet.
-Public enumeration produces detached device lists; other result producers remain
-planned. `result_tag` requires distinct key
+Public enumeration and probing produce detached device lists and metadata.
+`result_tag` requires distinct key
 and value output pointers. Identical pointers return INVALID without changes.
 
 Create validates products/alignment and reserves fixed pools before publication.
@@ -266,6 +266,41 @@ Keys fit `max_input_bytes` and carry self-contained backend identity plus an
 engine-instance token; no growing engine-side ID registry is retained. All key
 lengths/fields are validated before backend access, including copied/fabricated
 input. This token is provenance validation, not a security credential.
+
+### Metadata probing (implemented)
+
+Submit `teder_probe(engine, path, path_bytes, flags, &request)` with an absolute
+UTF-8 path of at most `min(max_input_bytes, 32767)` bytes. Flags are zero or
+`TEDER_PROBE_ARTWORK`. OK means the input was copied into a retained request slot;
+BUSY means brief contention, and LIMIT means admission capacity was exhausted.
+Poll the request until terminal. On success, take its result, acknowledge the
+request, read immutable views and finally call `teder_result_release`. Taken
+results survive source replacement and engine destruction. The
+[installed consumer](../tests/consumer/main.c) demonstrates this sequence.
+
+One dedicated worker processes probes in request order. Queued input is bounded
+by the existing request pool; only one probe owns temporary parsing storage at a
+time. Playback, preparation and device control use independent workers. Before
+parsing, teder reserves scratch, an 8 MiB codec cap and the available result budget
+under the engine limit. It leaves room for one maximum-path source preparation,
+including that source's codec cap. Insufficient capacity produces terminal LIMIT.
+Other retained results and native operations still share the finite engine budget.
+
+The reader accepts up to 1024 tags, 16 pictures and 256 metadata blocks. These
+count checks follow parsing; the codec byte cap applies throughout, including
+unrequested artwork. The result cap includes its arena overhead. There are no
+partial results on excess. Repeated tags retain order/case and explicit UTF-8
+lengths; values may contain NUL. Picture bytes remain encoded and are never fetched
+from a network. Invalid UTF-8 gives ENCODING, malformed metadata CORRUPT, other
+container magic UNSUPPORTED, and native file errors IO. Duration is STREAMINFO's
+sample count; zero remains unknown. Success does not validate audio or image integrity.
+
+Commitment occurs after parsing, copying and temporary cleanup, immediately before
+attaching the result to its request. Cancellation/close before commitment discards
+the candidate; commitment first preserves its successful result. Cancellation is
+checked between native reads of at most 4096 bytes. A blocked OS call keeps close
+pending until it returns. CLOSED requires the probe worker to have joined; no
+timeout or cancellation flag permits freeing borrowed input or engine storage.
 
 ### Device enumeration (implemented)
 

@@ -305,4 +305,18 @@ unrequested pictures and other metadata. Padding is skipped through checked seek
 `metadata.failures` rejects each allocation in turn and checks complete unwind.
 `metadata.cancellation` gates open, partial parsing and close, and runs two readers
 with independent allocators/cancellation. All temporary owners die before return;
-only one result arena survives success. Public scheduling/close integration is not implemented yet.
+only one result arena survives success.
+
+`probe.results` checks public transfer, untaken-result acknowledgement, source
+replacement and retained results after engine destruction. `probe.admission`
+holds worker startup to prove copied input, bounded FIFO slots and queued cancellation.
+`probe.cancellation` gates reads and both sides of commitment against cancel/close;
+pending slots remain owned until terminal. `probe.limits` checks work/headroom
+rejection, exact result capacity and one byte below it. `probe.failures` injects all
+32 allocation failures; `probe.initialization` rejects each new event/thread stage
+and later publication, with joined workers and unchanged warmed Windows handle counts.
+
+`refill.probe-progress` holds a probe read while consuming 32,769 exact PCM frames
+and preparing a successor. Its constrained budget leaves just one source preparation
+plus 32 KiB of result space beyond existing owners and probe scratch/codec capacity.
+This verifies worker independence and memory headroom, not OS scheduling deadlines.

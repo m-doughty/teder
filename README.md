@@ -10,7 +10,7 @@ Implemented exports:
 - `teder_get_build_info`; optional `teder_renderer_get_build_info`.
 - `teder_create`, `teder_get_config`, `teder_get_status`,
   `teder_request_close`, and `teder_destroy`.
-- `teder_open`, `teder_seek`, `teder_enumerate_devices`, and `teder_select_device`.
+- `teder_open`, `teder_seek`, `teder_probe`, `teder_enumerate_devices`, and `teder_select_device`.
 - `teder_transport` (PLAY/PAUSE/STOP) and `teder_set_gain`.
 - `teder_prepare_next` and `teder_clear_next`; readiness is in status.
 - `teder_request_poll`, `teder_request_get`, `teder_request_cancel`,
@@ -26,9 +26,10 @@ track within the same device stream. See [successor usage](docs/sources.md#prepa
 and [gapless behavior](docs/sources.md#gapless-playback).
 Other declarations remain draft contracts and will not link.
 
-A private metadata reader now builds detached FLAC tag/artwork results without
-decoding audio. It uses a bounded temporary codec heap and copies accepted data
-into one result arena. Public asynchronous `teder_probe` integration is not implemented yet.
+`teder_probe` reads FLAC tags and optional artwork on a dedicated worker without
+decoding audio or blocking source preparation. It copies accepted data into one
+detached result arena. Work and result budgets leave room for one source preparation.
+See [metadata probing](docs/api-contract.md#metadata-probing-implemented).
 
 Each engine owns one arena containing its handle, copied configuration and
 fixed request/input/event/PCM storage. Each result owns a separate arena with
@@ -74,7 +75,7 @@ budget. The source owns one arena for its wrapper, path, frame scratch and conve
 Tests cover decoding, staged seeking, conversion, cancellation and resource retirement.
 See the [source contract](docs/sources.md) for public usage and memory reservations.
 
-Creation starts control/lifecycle, preparation and refill workers at LIVE/EMPTY
+Creation starts control/lifecycle, preparation, refill and probe workers at LIVE/EMPTY
 with gain 1, no source and no output device. Refill can continue during blocked
 native enumeration. Source replacement waits for its producer borrow to end. Accepted requests retain their completion slots until
 acknowledgement. Telemetry has a separate, lossy event ring. Close stops admission

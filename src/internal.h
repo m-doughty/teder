@@ -99,7 +99,9 @@ enum {
 	TD_INIT_PREPARE_THREAD,
 	TD_INIT_REFILL_WAKE,
 	TD_INIT_REFILL_IDLE,
-	TD_INIT_REFILL_THREAD
+	TD_INIT_REFILL_THREAD,
+	TD_INIT_PROBE_WAKE,
+	TD_INIT_PROBE_THREAD
 };
 
 enum { TD_STARTED = 1, TD_STOPPED };
@@ -124,7 +126,14 @@ enum {
 	TD_TRANSPORT_BEFORE_COMMIT,
 	TD_TRANSPORT_PUBLISHED,
 	TD_NEXT_BEFORE_PUBLISH,
-	TD_NEXT_AFTER_PUBLISH
+	TD_NEXT_AFTER_PUBLISH,
+	TD_PROBE_STARTED,
+	TD_PROBE_STOPPED,
+	TD_PROBE_OPENED,
+	TD_PROBE_READ,
+	TD_PROBE_CLOSED,
+	TD_PROBE_BEFORE_COMMIT,
+	TD_PROBE_AFTER_COMMIT
 };
 
 typedef struct {
@@ -178,10 +187,14 @@ struct teder_engine {
 	ma_event wake;
 	ma_event prepare_wake;
 	ma_event refill_wake, refill_idle;
+	ma_event probe_wake;
 	atomic_uint refill_enabled, refill_stop;
+	atomic_uint probe_cancel;
+	uint64_t probe_request; /* gate protected; worker borrows its RUNNING slot */
 	td_thread thread;
 	td_thread prepare_thread;
 	td_thread refill_thread;
+	td_thread probe_thread;
 	td_source_job sources[TD_SOURCE_JOBS];
 	uint64_t last_source;
 	bool prefill;        /* exclusive producer: PLAY may commit a ready successor */
@@ -199,6 +212,8 @@ struct teder_engine {
  * contexts outlive all resulting arenas; no global allocator replacement.
  * Input structs and their views remain valid and immutable throughout creation. */
 teder_code td_engine_create(const teder_config *, td_allocator, teder_engine **);
+void td_probe_run(teder_engine *);
+void td_probe_signal(teder_engine *);
 teder_code td_engine_create_with(const teder_config *, td_allocator, td_runtime, teder_engine **);
 teder_code td_result_create(const td_result_input *, td_allocator, uint64_t limit, teder_result **);
 bool td_utf8(const unsigned char *, size_t bytes);

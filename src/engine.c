@@ -76,6 +76,7 @@ teder_code td_engine_create_with(const teder_config *input,
 	engine->allocator = allocator;
 	engine->runtime = runtime;
 	atomic_init(&engine->lifecycle, TEDER_LIVE);
+	atomic_init(&engine->probe_cancel, 0);
 	for (unsigned i = 0; i < TD_SOURCE_JOBS; i++) {
 		engine->sources[i].engine = engine;
 		atomic_init(&engine->sources[i].cancel, 0);

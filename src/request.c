@@ -34,7 +34,8 @@ static teder_code submit(teder_engine *e,
 		code = TEDER_CLOSED;
 		goto done;
 	}
-	bool mutation = media && operation != TEDER_OP_TRANSPORT && operation != TEDER_OP_GAIN;
+	bool mutation = media && operation != TEDER_OP_TRANSPORT && operation != TEDER_OP_GAIN &&
+	                operation != TEDER_OP_PROBE;
 	if (media && operation == TEDER_OP_TRANSPORT &&
 	    (media->target.epoch != e->status.current.epoch ||
 	     media->target.source != e->status.current.source)) {
@@ -103,8 +104,12 @@ static teder_code submit(teder_engine *e,
 	}
 done:
 	td_unlock(e);
-	if (code == TEDER_OK)
-		td_signal(e);
+	if (code == TEDER_OK) {
+		if (operation == TEDER_OP_PROBE && !e->runtime.execute)
+			td_probe_signal(e);
+		else
+			td_signal(e);
+	}
 	return code;
 }
 
@@ -188,6 +193,8 @@ teder_code TEDER_CALL teder_request_cancel(teder_engine *e, uint64_t id)
 	code = !s ? TEDER_NOT_FOUND : s->info.state == TEDER_TERMINAL ? TEDER_TOO_LATE : TEDER_OK;
 	if (code == TEDER_OK) {
 		s->cancelled = true;
+		if (!s->committed && e->probe_request == id)
+			atomic_store(&e->probe_cancel, 1);
 		if (!s->committed)
 			for (unsigned i = 0; i < TD_SOURCE_JOBS; i++)
 				if (e->sources[i].state != TD_JOB_FREE && e->sources[i].request == id)
