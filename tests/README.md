@@ -153,7 +153,7 @@ This is context/enumeration evidence, not playback or native callback-stop evide
 
 ## Native device ownership
 
-`-R '^device\.'` selects lifecycle, failures, closing, unwind and two callback
+`-R '^device\.'` selects lifecycle, controls, clocks, loss and two callback
 import audits. The tests use real miniaudio lifecycle functions with synthetic
 backend callbacks. They verify exact PCM/guards/counters, negotiated fields,
 context BUSY loans, immutable running configuration, post-init allocation failure,
@@ -171,9 +171,20 @@ stale generation rejection and revision exhaustion. Configuration requires quies
 reads use an atomic snapshot and return AGAIN on concurrent publication. Tests
 check generation reset, final PCM and sticky version exhaustion without wrap.
 
+`device.notifications` checks all six native notification kinds, duplicate loss,
+intentional stop, silent output guards, preserved PCM and replacement-only reset.
+`device.loss-state` stops the native endpoint without a notification and checks
+the atomic-state fallback. `device.loss-startup` checks loss during init/start.
+`device.loss-closing` holds independent data and notification borrows through
+teardown; neither device storage nor its context loan may be released early.
+`device.loss-race` overlaps 10,000 notifications with data callbacks, checking
+silence and the exact last submitted source frame. These private tests do not
+establish public engine recovery or physical unplug behavior.
+
 Run `build/bin/teder_test_device native` separately. It opens the current default
 on Windows, or the first enumerated output elsewhere, submits three silent PCM
 frames, stops, closes and injects failure at every observed device-init allocation.
+Normal stop must leave the private loss flag clear.
 Missing backend/device support fails the test. Headless ALSA output and silent
 WASAPI submission are native lifecycle evidence, not audible music acceptance.
 

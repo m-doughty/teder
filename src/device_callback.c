@@ -1,7 +1,18 @@
 #include "device.h"
 
-_Static_assert(ATOMIC_LONG_LOCK_FREE == 2 && ATOMIC_LLONG_LOCK_FREE == 2,
+_Static_assert(ATOMIC_INT_LOCK_FREE == 2 && ATOMIC_LONG_LOCK_FREE == 2 &&
+                   ATOMIC_LLONG_LOCK_FREE == 2,
                "Callback reports require lock-free 64-bit atomics");
+
+void td_device_notification(const ma_device_notification *notification)
+{
+	td_device_feed *feed = notification->pDevice->pUserData;
+	if ((notification->type == ma_device_notification_type_stopped &&
+	     atomic_load(&feed->expected_running)) ||
+	    notification->type == ma_device_notification_type_rerouted ||
+	    notification->type == ma_device_notification_type_interruption_began)
+		atomic_store(&feed->lost, 1);
+}
 
 static uint64_t add(uint64_t value, uint32_t frames)
 {
@@ -25,7 +36,7 @@ void td_device_callback(ma_device *device, void *output, const void *input, ma_u
 	memcpy(&config.gain, &bits, sizeof(bits));
 	config.mute = (uint32_t)(feed->applied >> 32) & 1;
 	config.enabled = (uint32_t)(feed->applied >> 33) & 1;
-	if (feed->report.final)
+	if (feed->report.final || atomic_load(&feed->lost))
 		config.enabled = 0;
 	td_audio_result result;
 	teder_code code = td_audio_render(feed->pool,

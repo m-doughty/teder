@@ -30,6 +30,10 @@ teder_code td_device_configure(td_device *, td_audio_config);
 teder_code td_device_control(td_device *, td_audio_config, uint64_t *revision);
 teder_code td_device_start(td_device *);
 bool td_device_running(td_device *); /* lifecycle-owner observation, not a join */
+/* Sticky native loss, including an unexpected stopped native state. Owner or
+ * delegated report reader only; excludes concurrent lifecycle changes. This is
+ * observation, never proof of callback/notification quiescence. Replace to reset. */
+bool td_device_lost(td_device *);
 teder_code td_device_stop(td_device *);
 /* One bounded coherent read, including while running; AGAIN retries later.
  * A delegated producer may borrow this with lifecycle/configuration held stable.
@@ -47,7 +51,7 @@ typedef struct {
 	td_pcm_pool *pool;
 	td_audio_config config;
 	td_device_report report;
-	atomic_uint calls, final;
+	atomic_uint calls, final, expected_running, lost;
 	atomic_int error;
 	atomic_uint_fast64_t sequence, pcm_frames, missing_frames, control;
 	atomic_uint_fast64_t source, track, source_frame, output_frames, underrun_frames;
@@ -61,4 +65,5 @@ static inline uint64_t td_device_pack(td_audio_config config)
 	return bits | ((uint64_t)config.mute << 32) | ((uint64_t)config.enabled << 33);
 }
 void td_device_callback(ma_device *, void *, const void *, ma_uint32);
+void td_device_notification(const ma_device_notification *);
 #endif

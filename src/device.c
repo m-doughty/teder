@@ -49,6 +49,8 @@ teder_code td_device_open(
 	d->feed.pool = pool;
 	d->feed.config.gain = 1;
 	atomic_init(&d->feed.calls, 0);
+	atomic_init(&d->feed.expected_running, 0);
+	atomic_init(&d->feed.lost, 0);
 	atomic_init(&d->feed.sequence, 0);
 	atomic_init(&d->feed.pcm_frames, 0);
 	atomic_init(&d->feed.missing_frames, 0);
@@ -68,6 +70,7 @@ teder_code td_device_open(
 	config.playback.pDeviceID = &d->loan.id;
 	config.sampleRate = rate;
 	config.dataCallback = td_device_callback;
+	config.notificationCallback = td_device_notification;
 	config.pUserData = &d->feed;
 	config.noPreSilencedOutputBuffer = MA_TRUE;
 	config.noFixedSizedCallback = MA_TRUE;
@@ -75,6 +78,8 @@ teder_code td_device_open(
 	ma_result result = ma_device_init(loan.context, &config, &d->native);
 	d->initialized = result == MA_SUCCESS;
 	code = outcome(d, result);
+	if (code == TEDER_OK && td_device_lost(d))
+		code = TEDER_DEVICE_LOST;
 	if (code == TEDER_OK &&
 	    (d->native.playback.format != ma_format_f32 || d->native.playback.channels != 2 ||
 	     !d->native.sampleRate || d->native.sampleRate > 1048575))
@@ -113,6 +118,8 @@ teder_code td_device_configure(td_device *d, td_audio_config config)
 		return TEDER_BUSY;
 	if (d->failed)
 		return TEDER_BAD_STATE;
+	if (td_device_lost(d))
+		return TEDER_DEVICE_LOST;
 	if (config.generation && config.generation < d->feed.pool->selected)
 		return TEDER_STALE;
 	if (config.generation != d->feed.config.generation) {
@@ -146,6 +153,8 @@ teder_code td_device_control(td_device *d, td_audio_config config, uint64_t *rev
 		return TEDER_INVALID;
 	if (!d->active || d->failed)
 		return TEDER_BAD_STATE;
+	if (td_device_lost(d))
+		return TEDER_DEVICE_LOST;
 	if (config.generation != d->feed.config.generation)
 		return TEDER_STALE;
 	uint64_t before = atomic_load(&d->feed.wanted);
@@ -164,6 +173,7 @@ teder_code td_device_control(td_device *d, td_audio_config config, uint64_t *rev
  * terminal quiescence operation; never allow config reuse after that failure. */
 static teder_code failed(td_device *d, teder_code code)
 {
+	atomic_store(&d->feed.expected_running, 0);
 	ma_device_uninit(&d->native);
 	d->initialized = false;
 	d->active = false;
@@ -177,16 +187,33 @@ teder_code td_device_start(td_device *d)
 		return TEDER_INVALID;
 	if (d->failed)
 		return TEDER_BAD_STATE;
+	if (td_device_lost(d))
+		return TEDER_DEVICE_LOST;
 	if (d->active)
 		return TEDER_OK;
 	d->active = true; /* start may render its initial buffer before returning */
+	atomic_store(&d->feed.expected_running, 1);
 	teder_code code = outcome(d, ma_device_start(&d->native));
+	if (code == TEDER_OK && td_device_lost(d))
+		code = TEDER_DEVICE_LOST;
 	return code == TEDER_OK ? code : failed(d, code);
 }
 
 bool td_device_running(td_device *d)
 {
 	return d && d->active;
+}
+
+bool td_device_lost(td_device *d)
+{
+	if (!d)
+		return false;
+	/* The pinned synchronous worker suppresses its stopped notification when
+	 * backend stop fails, but still publishes the atomic stopped state. */
+	if (atomic_load(&d->feed.expected_running) &&
+	    ma_device_get_state(&d->native) == ma_device_state_stopped)
+		atomic_store(&d->feed.lost, 1);
+	return atomic_load(&d->feed.lost) != 0;
 }
 
 teder_code td_device_stop(td_device *d)
@@ -197,6 +224,7 @@ teder_code td_device_stop(td_device *d)
 		return TEDER_BAD_STATE;
 	if (!d->active)
 		return TEDER_OK;
+	atomic_store(&d->feed.expected_running, 0);
 	teder_code code = outcome(d, ma_device_stop(&d->native));
 	if (code != TEDER_OK)
 		return failed(d, code);
@@ -240,6 +268,7 @@ teder_code td_device_close(td_device **owner)
 	if (!owner || !*owner)
 		return TEDER_INVALID;
 	td_device *d = *owner;
+	atomic_store(&d->feed.expected_running, 0);
 	if (d->initialized)
 		ma_device_uninit(&d->native);
 	td_backend_return(d->backend);

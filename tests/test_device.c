@@ -29,11 +29,22 @@ typedef struct {
 	td_pcm_pool pool;
 	td_pcm_generation *generation;
 	th_thread thread;
+	th_thread notifications;
 	th_gate entered, ending;
+	th_gate notifying;
 	bool worker, gated, valid, reject, bad_format, fail_start, fail_stop;
+	bool notification_worker, expect_silence, loss_on_init, loss_on_start;
+	atomic_uint waiting_notifications;
 	unsigned initialized, released;
 	ma_device *native;
 } fixture;
+
+static void notify(ma_device *d, ma_device_notification_type type)
+{
+	ck_assert(d->onNotification != NULL);
+	ma_device_notification event = {.pDevice = d, .type = type};
+	d->onNotification(&event);
+}
 
 static ma_result
 describe(ma_context *c, ma_device_type type, const ma_device_id *id, ma_device_info *info)
@@ -63,12 +74,16 @@ static ma_result device_init(ma_device *d,
 		return MA_ERROR;
 	ck_assert(cfg->playback.pDeviceID && cfg->playback.pDeviceID->wasapi[0] == 'A');
 	ck_assert(cfg->playback.format == ma_format_f32 && cfg->playback.channels == 2);
+	ck_assert(cfg->notificationCallback == td_device_notification &&
+	          cfg->wasapi.noAutoStreamRouting);
 	f->initialized++;
 	f->native = d;
 	playback->format = ma_format_f32;
 	playback->channels = f->bad_format ? 0 : 2;
 	playback->sampleRate = 48000;
 	playback->periodSizeInFrames = 8;
+	if (f->loss_on_init)
+		notify(d, ma_device_notification_type_rerouted);
 	return MA_SUCCESS;
 }
 
@@ -84,7 +99,7 @@ static void render(void *context)
 	d->onData(d, out, NULL, 8);
 	f->valid = out[16] == 12345 && out[17] == 12345;
 	for (unsigned i = 0; i < 8; i++) {
-		float expected = i < 3 ? (float)(i + 1) * 0.125f : 0;
+		float expected = i < 3 && !f->expect_silence ? (float)(i + 1) * 0.125f : 0;
 		if (out[i * 2] != expected || out[i * 2 + 1] != -expected)
 			f->valid = false;
 	}
@@ -96,6 +111,8 @@ static ma_result device_start(ma_device *d)
 	if (!th_thread_start(&f->thread, render, f))
 		return MA_ERROR;
 	f->worker = true;
+	if (f->loss_on_start)
+		notify(d, ma_device_notification_type_rerouted);
 	return f->fail_start ? MA_ERROR : MA_SUCCESS;
 }
 
@@ -122,6 +139,11 @@ static ma_result device_uninit(ma_device *d)
 	if (f->gated)
 		th_gate_hit(&f->ending);
 	join(f);
+	if (f->notification_worker) {
+		atomic_store(&f->waiting_notifications, 1);
+		th_thread_join(&f->notifications);
+		f->notification_worker = false;
+	}
 	f->released++;
 	return MA_SUCCESS;
 }
@@ -163,6 +185,7 @@ static ma_result enumerate(ma_context *c, ma_enum_devices_callback_proc callback
 
 static void init(fixture *f, bool native)
 {
+	atomic_init(&f->waiting_notifications, 0);
 	ck_assert(th_tracker_init(&f->tracker));
 	td_allocator a = th_allocator(&f->tracker);
 	td_backend_api api = {context_init, context_uninit, enumerate, f};
@@ -441,6 +464,201 @@ START_TEST(closing)
 }
 END_TEST
 
+START_TEST(notifications)
+{
+	const ma_device_notification_type types[] = {ma_device_notification_type_started,
+	                                             ma_device_notification_type_stopped,
+	                                             ma_device_notification_type_rerouted,
+	                                             ma_device_notification_type_interruption_began,
+	                                             ma_device_notification_type_interruption_ended,
+	                                             ma_device_notification_type_unlocked};
+	ck_assert(!td_device_lost(NULL));
+	for (unsigned i = 0; i < sizeof(types) / sizeof(*types); i++) {
+		fixture f = {0};
+		init(&f, false);
+		OK(open_device(&f, (teder_blob){0}, 0));
+		notify(f.native, ma_device_notification_type_stopped); /* expected before start */
+		ck_assert(!td_device_lost(f.device));
+		OK(td_device_configure(f.device, (td_audio_config){1, 0.5f, 0, 0}));
+		OK(td_device_start(f.device));
+		join(&f);
+		uint64_t revision;
+		OK(td_device_control(f.device, (td_audio_config){1, 0.5f, 1, 0}, &revision));
+		size_t attempts = f.tracker.attempts, bytes = f.tracker.bytes;
+		bool lost = i >= 1 && i <= 3;
+		notify(f.native, types[i]);
+		notify(f.native, types[i]); /* duplicate reports are idempotent */
+		ck_assert(td_device_lost(f.device) == lost);
+		float pcm[4] = {7, 7, 11, 13};
+		f.native->onData(f.native, pcm, NULL, 1);
+		td_device_report report;
+		OK(td_device_get_report(f.device, &report));
+		ck_assert(pcm[0] == (lost ? 0 : 0.125f) && pcm[1] == -pcm[0] && pcm[2] == 11 &&
+		          pcm[3] == 13);
+		ck_assert(report.generation == 1 && report.pcm_frames == (lost ? 0 : 1) &&
+		          report.output_frames == (lost ? 0 : 1) && !report.underrun_frames &&
+		          !report.error && !report.final);
+		ck_assert(f.tracker.attempts == attempts && f.tracker.bytes == bytes && !f.released);
+		if (lost) {
+			ck_assert(td_device_start(f.device) == TEDER_DEVICE_LOST);
+			ck_assert(td_device_control(f.device, (td_audio_config){1, 1, 1, 0}, &revision) ==
+			              TEDER_DEVICE_LOST &&
+			          !revision);
+		}
+		OK(td_device_stop(f.device));
+		notify(f.native, ma_device_notification_type_stopped); /* intentional stop stays healthy */
+		notify(f.native, ma_device_notification_type_interruption_ended);
+		notify(f.native, ma_device_notification_type_started);
+		ck_assert(td_device_lost(f.device) == lost);
+		if (lost) {
+			ck_assert(td_device_configure(f.device, (td_audio_config){2, 1, 1, 0}) ==
+			          TEDER_DEVICE_LOST);
+			OK(td_device_close(&f.device));
+			OK(open_device(&f, (teder_blob){0}, 0));
+			ck_assert(!td_device_lost(f.device));
+			OK(td_device_configure(f.device, (td_audio_config){1, 0.5f, 1, 0}));
+			OK(td_device_start(f.device));
+			OK(td_device_stop(f.device));
+			OK(td_device_get_report(f.device, &report));
+			ck_assert(f.valid && report.pcm_frames == 3 && report.final &&
+			          !td_device_lost(f.device));
+		}
+		uninit(&f);
+		ck_assert(f.initialized == (lost ? 2 : 1) && f.released == f.initialized);
+	}
+}
+END_TEST
+
+START_TEST(loss_state)
+{
+	fixture f = {0};
+	init(&f, false);
+	OK(open_device(&f, (teder_blob){0}, 0));
+	OK(td_device_configure(f.device, (td_audio_config){1, 1, 0, 0}));
+	OK(td_device_start(f.device));
+	join(&f);
+	/* Emulate the pinned worker's missing notification, through real native state
+	 * transitions. Callback pointers are changed only after synthetic users join. */
+	f.native->onNotification = NULL;
+	ck_assert(ma_device_stop(f.native) == MA_SUCCESS);
+	f.native->onNotification = td_device_notification;
+	ck_assert(ma_device_get_state(f.native) == ma_device_state_stopped);
+	td_device_feed *feed = f.native->pUserData;
+	ck_assert(!atomic_load(&feed->lost) && td_device_running(f.device));
+	ck_assert(td_device_lost(f.device) && atomic_load(&feed->lost));
+	ck_assert(td_device_start(f.device) == TEDER_DEVICE_LOST);
+	OK(td_device_stop(f.device));
+	ck_assert(td_device_lost(f.device) && !td_device_running(f.device));
+	uninit(&f);
+	ck_assert(f.initialized == 1 && f.released == 1);
+}
+END_TEST
+
+START_TEST(loss_startup)
+{
+	for (unsigned starting = 0; starting < 2; starting++) {
+		fixture f = {.loss_on_init = !starting, .loss_on_start = starting};
+		init(&f, false);
+		teder_code code = open_device(&f, (teder_blob){0}, 0);
+		if (starting) {
+			OK(code);
+			OK(td_device_configure(f.device, (td_audio_config){1, 1, 0, 0}));
+			ck_assert(td_device_start(f.device) == TEDER_DEVICE_LOST);
+			ck_assert(td_device_start(f.device) == TEDER_BAD_STATE && !f.worker);
+		} else
+			ck_assert(code == TEDER_DEVICE_LOST && !f.device);
+		ck_assert(f.initialized == 1 && f.released == 1);
+		uninit(&f);
+	}
+}
+END_TEST
+
+static void delayed_notification(void *context)
+{
+	fixture *f = context;
+	ma_device *borrow = f->native;
+	th_gate_hit(&f->notifying);
+	notify(borrow, ma_device_notification_type_stopped);
+}
+
+START_TEST(loss_closing)
+{
+	fixture f = {.gated = true, .expect_silence = true};
+	init(&f, false);
+	ck_assert(th_gate_init(&f.entered) && th_gate_init(&f.ending) && th_gate_init(&f.notifying));
+	OK(open_device(&f, (teder_blob){0}, 0));
+	OK(td_device_configure(f.device, (td_audio_config){1, 0.5f, 1, 0}));
+	OK(td_device_start(f.device));
+	th_gate_await(&f.entered);
+	f.notification_worker = th_thread_start(&f.notifications, delayed_notification, &f);
+	ck_assert(f.notification_worker);
+	th_gate_await(&f.notifying);
+	notify(f.native, ma_device_notification_type_rerouted);
+	ck_assert(td_device_lost(f.device));
+	size_t bytes = f.tracker.bytes, attempts = f.tracker.attempts;
+	closer c = {.f = &f};
+	atomic_init(&c.done, 0);
+	th_thread owner;
+	ck_assert(th_thread_start(&owner, close_device, &c));
+	th_gate_await(&f.ending);
+	ck_assert(!atomic_load(&c.done) && !f.released && f.tracker.bytes == bytes &&
+	          f.tracker.attempts == attempts);
+	ck_assert(td_backend_close(&f.backend) == TEDER_BUSY);
+	th_gate_release(&f.ending);
+	th_gate_release(&f.entered);
+	while (!atomic_load(&f.waiting_notifications))
+		pause_for_device();
+	ck_assert(!atomic_load(&c.done) && !f.released); /* data returned; notifier still borrows */
+	th_gate_release(&f.notifying);
+	th_thread_join(&owner);
+	OK(c.code);
+	ck_assert(!f.device && f.released == 1 && f.valid && !f.notification_worker);
+	th_gate_uninit(&f.entered);
+	th_gate_uninit(&f.ending);
+	th_gate_uninit(&f.notifying);
+	uninit(&f);
+}
+END_TEST
+
+static void repeated_notifications(void *context)
+{
+	ma_device *device = context;
+	for (unsigned i = 0; i < 10000; i++)
+		notify(device,
+		       i % 2 ? ma_device_notification_type_rerouted
+		             : ma_device_notification_type_interruption_ended);
+}
+
+START_TEST(loss_race)
+{
+	fixture f = {0};
+	init(&f, false);
+	OK(open_device(&f, (teder_blob){0}, 0));
+	OK(td_device_configure(f.device, (td_audio_config){1, 1, 0, 0}));
+	OK(td_device_start(f.device));
+	join(&f);
+	uint64_t revision;
+	OK(td_device_control(f.device, (td_audio_config){1, 1, 1, 0}, &revision));
+	float pcm[2];
+	f.native->onData(f.native, pcm, NULL, 1);
+	ck_assert(pcm[0] == 0.25f && pcm[1] == -0.25f);
+	notify(f.native, ma_device_notification_type_rerouted);
+	th_thread notifier;
+	ck_assert(th_thread_start(&notifier, repeated_notifications, f.native));
+	for (unsigned i = 0; i < 10000; i++) {
+		f.native->onData(f.native, pcm, NULL, 1);
+		ck_assert(pcm[0] == 0 && pcm[1] == 0);
+	}
+	th_thread_join(&notifier);
+	td_device_report report;
+	OK(td_device_get_report(f.device, &report));
+	ck_assert(report.source == 1 && report.source_frame == 1 && report.output_frames == 1 &&
+	          report.pcm_frames == 1 && !report.underrun_frames && !report.final && !report.error);
+	ck_assert(td_device_lost(f.device));
+	uninit(&f);
+}
+END_TEST
+
 START_TEST(unwind)
 {
 	fixture f = {.reject = true};
@@ -497,6 +715,7 @@ START_TEST(native)
 	OK(td_device_get_report(f.device, &report));
 	ck_assert(report.error == TEDER_OK && report.pcm_frames == 3 &&
 	          td_device_callbacks(f.device) > 0);
+	ck_assert(!td_device_lost(f.device));
 
 	OK(td_device_close(&f.device));
 	teder_result_release(r);
@@ -538,6 +757,16 @@ int main(int argc, char **argv)
 		test = unwind;
 	else if (!strcmp(argv[1], "native"))
 		test = native;
+	else if (!strcmp(argv[1], "notifications"))
+		test = notifications;
+	else if (!strcmp(argv[1], "loss-state"))
+		test = loss_state;
+	else if (!strcmp(argv[1], "loss-startup"))
+		test = loss_startup;
+	else if (!strcmp(argv[1], "loss-closing"))
+		test = loss_closing;
+	else if (!strcmp(argv[1], "loss-race"))
+		test = loss_race;
 	else
 		return 2;
 	Suite *suite = suite_create("device");

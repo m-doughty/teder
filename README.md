@@ -49,6 +49,9 @@ The private callback core now renders stereo float PCM with gain, mute and
 silence filling. It borrows the existing pool and allocates nothing. Tests cover
 variable requests and concurrent production. A private device owner now connects
 this core to miniaudio, with native start/stop and callback-safe teardown.
+It latches native loss notifications and unexpected stops without allocating.
+Later callbacks send silence; the device must be replaced before reuse.
+Automatic engine loss publication and recovery are not implemented yet.
 Public autoplay connects that consumer to independent refill. Deterministic tests check every sample separately.
 
 Public device enumeration now runs asynchronously on the lifecycle worker. It

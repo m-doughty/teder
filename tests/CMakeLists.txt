@@ -89,7 +89,7 @@ teder_target(teder_test_device)
 target_compile_definitions(teder_test_device PRIVATE TEDER_STATIC)
 target_link_libraries(teder_test_device PRIVATE teder_device teder_device_callback teder_audio_callback
 	teder_backend teder_lifetime teder_source FLAC teder_test_support Check::check)
-foreach(case lifecycle failures closing unwind controls clock-counts)
+foreach(case lifecycle failures closing unwind controls clock-counts notifications loss-state loss-startup loss-closing loss-race)
 	add_test(NAME device.${case} COMMAND teder_test_device ${case})
 	set_tests_properties(device.${case} PROPERTIES TIMEOUT 40 LABELS "unit;device;lifetime")
 endforeach()
