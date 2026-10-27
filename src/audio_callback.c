@@ -10,7 +10,9 @@ teder_code td_audio_render(td_pcm_pool *pool,
                            size_t sample_capacity,
                            uint32_t frames,
                            uint64_t output_frame,
-                           td_audio_result *result)
+                           td_audio_result *result,
+                           td_analysis_feed *analysis,
+                           uint32_t output_rate)
 {
 	if (!result)
 		return TEDER_INVALID;
@@ -23,6 +25,8 @@ teder_code td_audio_render(td_pcm_pool *pool,
 	if (!pool || !(config.gain >= 0 && config.gain <= 1) || config.enabled > 1 || config.mute > 1 ||
 	    (config.enabled && !config.generation))
 		return TEDER_INVALID;
+	td_analysis_write analysis_write = td_analysis_begin(
+	    analysis, config.generation, output_rate, output_frame, config.enabled && frames);
 	if (!config.generation)
 		return TEDER_OK;
 	teder_code code = td_pcm_select(pool, config.generation);
@@ -68,6 +72,8 @@ teder_code td_audio_render(td_pcm_pool *pool,
 		code = td_pcm_consume(pool, count);
 		if (code != TEDER_OK)
 			goto failed;
+		td_analysis_append(
+		    &analysis_write, output + (size_t)result->pcm_frames * 2, count, source, track);
 		result->pcm_frames += count;
 		result->source = source;
 		result->track = track;
@@ -77,6 +83,10 @@ teder_code td_audio_render(td_pcm_pool *pool,
 			break;
 	}
 	result->missing_frames = frames - result->pcm_frames;
+	if (!result->final)
+		td_analysis_append(
+		    &analysis_write, output + (size_t)result->pcm_frames * 2, result->missing_frames, 0, 0);
+	td_analysis_finish(&analysis_write);
 	return TEDER_OK;
 failed:
 	memset(output, 0, samples * sizeof(*output));

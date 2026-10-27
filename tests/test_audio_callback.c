@@ -23,6 +23,7 @@ typedef struct {
 	atomic_uint violations;
 	td_arena *arena;
 	td_pcm_pool pool;
+	td_analysis_feed analysis;
 } fixture;
 
 static void *allocate(void *p, size_t bytes, const char *site)
@@ -52,12 +53,15 @@ static void init(fixture *f)
 	atomic_init(&f->violations, 0);
 	size_t bytes = 0;
 	td_pcm_layout layout;
+	td_analysis_layout analysis;
 	ck_assert(td_pcm_plan(&bytes, 3072, &layout));
+	ck_assert(td_analysis_plan(&bytes, 4, &analysis));
 	f->arena = td_arena_create(allocator(f), bytes);
 	ck_assert_ptr_nonnull(f->arena);
 	void *base = td_arena_alloc(f->arena, bytes, 1, _Alignof(max_align_t));
 	ck_assert_ptr_nonnull(base);
 	td_pcm_init(&f->pool, base, &layout, 3072);
+	td_analysis_init(&f->analysis, base, &analysis);
 }
 
 static void uninit(fixture *f)
@@ -105,7 +109,7 @@ static teder_code render(td_pcm_pool *pool,
                          td_audio_result *result)
 {
 	in_callback = true;
-	teder_code code = td_audio_render(pool, config, out, capacity, frames, 0, result);
+	teder_code code = td_audio_render(pool, config, out, capacity, frames, 0, result, NULL, 0);
 	in_callback = false;
 	return code;
 }
@@ -399,7 +403,7 @@ START_TEST(boundaries)
 	float pcm[16];
 	td_audio_result result;
 	in_callback = true;
-	OK(td_audio_render(&f.pool, (td_audio_config){1, 1, 1, 0}, pcm, 16, 8, 10, &result));
+	OK(td_audio_render(&f.pool, (td_audio_config){1, 1, 1, 0}, pcm, 16, 8, 10, &result, NULL, 0));
 	in_callback = false;
 	ck_assert(result.source == 3 && result.source_frame == 5 && result.pcm_frames == 5 &&
 	          result.final && result.missing_frames == 3);
@@ -415,6 +419,307 @@ START_TEST(boundaries)
 	OK(td_pcm_retire(&a));
 	OK(td_pcm_retire(&b));
 	OK(td_pcm_retire(&c));
+	uninit(&f);
+}
+END_TEST
+
+static teder_code tap(fixture *f,
+                      td_audio_config config,
+                      float *pcm,
+                      uint32_t frames,
+                      uint64_t start,
+                      td_audio_result *result)
+{
+	in_callback = true;
+	teder_code code = td_audio_render(
+	    &f->pool, config, pcm, (size_t)frames * 2, frames, start, result, &f->analysis, 48000);
+	in_callback = false;
+	return code;
+}
+
+static void record(fixture *f,
+                   uint64_t start,
+                   uint32_t frames,
+                   uint64_t source,
+                   uint64_t track,
+                   uint32_t flags,
+                   const float *pcm)
+{
+	const td_analysis_block *b;
+	OK(td_analysis_peek(&f->analysis, &b));
+	ck_assert(b->epoch == 1 && b->revision == 7 && b->rate == 48000 && b->output_start == start &&
+	          b->frames == frames && b->source == source && b->track == track && b->flags == flags);
+	ck_assert(!memcmp(b->samples, pcm, (size_t)frames * 2 * sizeof(*pcm)));
+	OK(td_analysis_consume(&f->analysis));
+}
+
+START_TEST(feed_samples)
+{
+	fixture f = {0};
+	init(&f);
+	td_analysis_revision(&f.analysis, 7);
+	td_pcm_generation *g = generation(&f, 1);
+	g->track = 42;
+	publish(&f, g, 4, 0, 0);
+	float pcm[12];
+	td_audio_result r;
+	OK(tap(&f, (td_audio_config){1, 0.5f, 1, 0}, pcm, 6, 0, &r));
+	const float expected[] = {0.5f, -0.5f, 1, -1, 1.5f, -1.5f, 2, -2, 0, 0, 0, 0};
+	ck_assert(!memcmp(pcm, expected, sizeof(expected)) && r.pcm_frames == 4 && !r.final);
+	record(&f, 0, 4, 1, 42, TD_ANALYSIS_DISCONTINUITY, expected);
+	record(&f, 4, 2, 0, 0, 0, expected + 8);
+	td_pcm_reap(&f.pool);
+	publish(&f, g, 3, 4, TD_PCM_FINAL);
+	OK(tap(&f, (td_audio_config){1, 1, 1, 1}, pcm, 5, 6, &r));
+	const float zero[10] = {0};
+	ck_assert(!memcmp(pcm, zero, sizeof(zero)) && r.pcm_frames == 3 && r.final);
+	record(&f, 6, 3, 1, 42, 0, zero); /* mute consumes real PCM; EOF padding is omitted */
+	const td_analysis_block *b;
+	OK(tap(&f, (td_audio_config){1, 1, 0, 0}, pcm, 2, 9, &r));
+	ck_assert(td_analysis_peek(&f.analysis, &b) == TEDER_AGAIN && !b);
+	td_pcm_reap(&f.pool);
+	OK(td_pcm_retire(&g));
+	uninit(&f);
+}
+END_TEST
+
+START_TEST(feed_boundaries)
+{
+	fixture f = {0};
+	init(&f);
+	td_analysis_revision(&f.analysis, 7);
+	td_pcm_generation *a = generation(&f, 1), *b = generation(&f, 1);
+	b->source = 2;
+	b->track = 88;
+	atomic_store(&a->end, TD_END_LINKED);
+	publish(&f, a, 2, 0, TD_PCM_FINAL);
+	publish(&f, b, 3, 2, TD_PCM_FINAL);
+	float pcm[16];
+	td_audio_result r;
+	OK(tap(&f, (td_audio_config){1, 1, 1, 0}, pcm, 8, 10, &r));
+	const float expected[] = {1, -1, 2, -2, 3, -3, 4, -4, 5, -5};
+	ck_assert(!memcmp(pcm, expected, sizeof(expected)) && r.final && r.pcm_frames == 5);
+	td_pcm_reap(&f.pool);
+	OK(td_pcm_retire(&a));
+	OK(td_pcm_retire(&b)); /* feed contains no dangling source references */
+	record(&f, 10, 2, 1, 0, TD_ANALYSIS_DISCONTINUITY, expected);
+	record(&f, 12, 3, 2, 88, 0, expected + 4);
+	const td_analysis_block *view;
+	ck_assert(td_analysis_peek(&f.analysis, &view) == TEDER_AGAIN);
+	uninit(&f);
+}
+END_TEST
+
+START_TEST(feed_overflow)
+{
+	fixture f = {0};
+	init(&f);
+	td_analysis_revision(&f.analysis, 7);
+	td_pcm_generation *g = generation(&f, 1);
+	publish(&f, g, 10, 0, TD_PCM_FINAL);
+	float pcm[6];
+	td_audio_result r;
+	for (unsigned i = 0; i < 5; i++) {
+		OK(tap(&f, (td_audio_config){1, 1, 1, 0}, pcm, 1, i, &r));
+		ck_assert(pcm[0] == i + 1 && pcm[1] == -(float)(i + 1));
+	}
+	const td_analysis_block *held;
+	OK(td_analysis_peek(&f.analysis, &held));
+	OK(tap(&f, (td_audio_config){1, 1, 1, 0}, pcm, 2, 5, &r));
+	ck_assert(pcm[0] == 6 && pcm[2] == 7 && held->samples[0] == 1 &&
+	          atomic_load(&f.analysis.dropped_frames) == 3);
+	for (unsigned i = 0; i < 4; i++) {
+		float expected[] = {(float)i + 1, -(float)(i + 1)};
+		record(&f, i, 1, 1, 0, i ? 0 : TD_ANALYSIS_DISCONTINUITY, expected);
+	}
+	OK(tap(&f, (td_audio_config){1, 1, 1, 0}, pcm, 3, 7, &r));
+	const float expected[] = {8, -8, 9, -9, 10, -10};
+	ck_assert(!memcmp(pcm, expected, sizeof(expected)) && r.final);
+	record(&f, 7, 3, 1, 0, TD_ANALYSIS_DISCONTINUITY, expected);
+	td_pcm_reap(&f.pool);
+	OK(td_pcm_retire(&g));
+	uninit(&f);
+}
+END_TEST
+
+START_TEST(feed_abort)
+{
+	fixture f = {0};
+	init(&f);
+	td_analysis_revision(&f.analysis, 7);
+	td_pcm_generation *g = generation(&f, 1);
+	publish(&f, g, 1, 0, 0);
+	publish(&f, g, 2, 1, 0);
+	publish(&f, g, 1, 3, TD_PCM_FINAL);
+	float pcm[8];
+	td_audio_result r;
+	ck_assert(tap(&f, (td_audio_config){1, 1, 1, 0}, pcm, 4, UINT64_MAX - 1, &r) == TEDER_LIMIT);
+	const float zero[8] = {0};
+	ck_assert(!memcmp(pcm, zero, sizeof(pcm)) && r.pcm_frames == 3);
+	const td_analysis_block *b;
+	ck_assert(td_analysis_peek(&f.analysis, &b) == TEDER_AGAIN && !b);
+	OK(tap(&f, (td_audio_config){1, 1, 1, 0}, pcm, 1, 0, &r));
+	const float expected[] = {4, -4};
+	record(&f, 0, 1, 1, 0, TD_ANALYSIS_DISCONTINUITY, expected);
+	td_pcm_reap(&f.pool);
+	OK(td_pcm_retire(&g));
+	uninit(&f);
+}
+END_TEST
+
+START_TEST(feed_bounds)
+{
+	size_t used = SIZE_MAX - 10, before = used;
+	td_analysis_layout l = {.blocks = 99, .capacity = 99};
+	ck_assert(!td_analysis_plan(&used, 1, &l) && used == before && l.blocks == 99);
+	ck_assert(!td_analysis_plan(&used, 0, &l) && !td_analysis_plan(&used, UINT32_MAX, &l));
+	ck_assert(!td_analysis_plan(NULL, 1, &l) && !td_analysis_plan(&used, 1, NULL));
+	fixture f = {0};
+	init(&f);
+	const td_analysis_block *b;
+	float pcm[(TD_ANALYSIS_FRAMES * 4 + 1) * 2] = {0};
+	td_analysis_write w = td_analysis_begin(&f.analysis, 1, 48000, 0, true);
+	td_analysis_append(&w, pcm, 2, 1, 0);
+	td_analysis_finish(&w);
+	ck_assert(td_analysis_peek(&f.analysis, &b) == TEDER_AGAIN); /* initially disabled */
+	td_analysis_revision(&f.analysis, 7);
+	w = td_analysis_begin(&f.analysis, 1, 48000, 0, true);
+	td_analysis_append(&w, pcm, TD_ANALYSIS_FRAMES * 4 + 1, 1, 0);
+	td_analysis_finish(&w);
+	ck_assert(td_analysis_peek(&f.analysis, &b) == TEDER_AGAIN &&
+	          atomic_load(&f.analysis.dropped_frames) == TD_ANALYSIS_FRAMES * 4 + 1);
+	w = td_analysis_begin(&f.analysis, 1, 48000, UINT64_MAX - 1, true);
+	td_analysis_append(&w, pcm, 2, 1, 0);
+	td_analysis_finish(&w);
+	ck_assert(atomic_load(&f.analysis.dropped_frames) == TD_ANALYSIS_FRAMES * 4 + 3);
+	atomic_store(&f.analysis.dropped_frames, UINT64_MAX - 1);
+	w = td_analysis_begin(&f.analysis, 1, 48000, UINT64_MAX - 1, true);
+	td_analysis_append(&w, pcm, 2, 1, 0);
+	td_analysis_finish(&w);
+	ck_assert(atomic_load(&f.analysis.dropped_frames) == UINT64_MAX);
+	w = td_analysis_begin(&f.analysis, 1, 48000, 0, true);
+	td_analysis_revision(&f.analysis, 0); /* a transaction retains its admitted revision */
+	td_analysis_append(&w, pcm, 257, 1, 0);
+	ck_assert(td_analysis_peek(&f.analysis, &b) == TEDER_AGAIN); /* unpublished prefix */
+	td_analysis_finish(&w);
+	record(&f, 0, 256, 1, 0, TD_ANALYSIS_DISCONTINUITY, pcm);
+	record(&f, 256, 1, 1, 0, 0, pcm + 512);
+	w = td_analysis_begin(&f.analysis, 1, 48000, 257, true);
+	td_analysis_append(&w, pcm, 1, 1, 0);
+	td_analysis_finish(&w);
+	ck_assert(td_analysis_peek(&f.analysis, &b) == TEDER_AGAIN);
+	td_analysis_revision(&f.analysis, 8);
+	w = td_analysis_begin(&f.analysis, 1, 48000, 257, true);
+	td_analysis_append(&w, pcm, 1, 1, 0);
+	td_analysis_finish(&w);
+	OK(td_analysis_peek(&f.analysis, &b));
+	ck_assert(b->revision == 8 && b->output_start == 257 && b->flags == TD_ANALYSIS_DISCONTINUITY &&
+	          b->frames == 1);
+	OK(td_analysis_consume(&f.analysis));
+	ck_assert(td_analysis_consume(&f.analysis) == TEDER_AGAIN);
+	ck_assert(td_analysis_peek(NULL, &b) == TEDER_INVALID &&
+	          td_analysis_consume(NULL) == TEDER_INVALID);
+	td_analysis_revision(&f.analysis, 9);
+	const struct {
+		uint64_t epoch, start;
+		uint32_t rate, enabled, flags;
+	} steps[] = {{1, 0, 48000, 1, 1},
+	             {1, 1, 48000, 1, 0},
+	             {1, 2, 48000, 0, 0},
+	             {1, 2, 48000, 1, 1},
+	             {1, 7, 48000, 1, 1},
+	             {1, 8, 44100, 1, 1},
+	             {2, 0, 44100, 1, 1},
+	             {2, 1, 44100, 1, 0}};
+	for (unsigned i = 0; i < sizeof(steps) / sizeof(*steps); i++) {
+		w = td_analysis_begin(
+		    &f.analysis, steps[i].epoch, steps[i].rate, steps[i].start, steps[i].enabled);
+		td_analysis_append(&w, pcm, 1, 1, 0);
+		td_analysis_finish(&w);
+		if (!steps[i].enabled) {
+			ck_assert(td_analysis_peek(&f.analysis, &b) == TEDER_AGAIN);
+			continue;
+		}
+		OK(td_analysis_peek(&f.analysis, &b));
+		ck_assert(b->epoch == steps[i].epoch && b->output_start == steps[i].start &&
+		          b->rate == steps[i].rate && b->flags == steps[i].flags && b->revision == 9);
+		OK(td_analysis_consume(&f.analysis));
+	}
+	uninit(&f);
+}
+END_TEST
+
+typedef struct {
+	fixture *f;
+	th_gate gate;
+	atomic_uint done;
+} feed_stream;
+
+static void feed_producer(void *context)
+{
+	feed_stream *s = context;
+	for (unsigned i = 0; i < 2000; i++) {
+		float pcm[14];
+		for (unsigned j = 0; j < 7; j++) {
+			pcm[j * 2] = (float)(i * 7 + j + 1);
+			pcm[j * 2 + 1] = -pcm[j * 2];
+		}
+		td_analysis_revision(&s->f->analysis, 1 + i / 256);
+		td_analysis_write w = td_analysis_begin(
+		    &s->f->analysis, 1 + i / 128, i % 256 < 128 ? 48000 : 44100, i % 128 * 7, true);
+		td_analysis_append(&w, pcm, 3, 1, 100 + i);
+		td_analysis_append(&w, pcm + 6, 4, 2, 100 + i);
+		td_analysis_finish(&w);
+		if (i == 99)
+			th_gate_hit(&s->gate);
+	}
+	atomic_store(&s->done, 1);
+}
+
+START_TEST(feed_concurrent)
+{
+	fixture f = {0};
+	init(&f);
+	feed_stream s = {.f = &f};
+	atomic_init(&s.done, 0);
+	th_thread thread;
+	ck_assert(th_gate_init(&s.gate) && th_thread_start(&thread, feed_producer, &s));
+	th_gate_await(&s.gate);
+	ck_assert(atomic_load(&f.analysis.dropped_frames) == 98 * 7 && f.tracker.live == 1);
+	th_gate_release(&s.gate);
+	uint64_t received = 0, previous = UINT64_MAX;
+	bool second = false;
+	for (;;) {
+		const td_analysis_block *b;
+		unsigned done = atomic_load(&s.done);
+		if (td_analysis_peek(&f.analysis, &b) == TEDER_AGAIN) {
+			if (done)
+				break;
+			th_yield();
+			continue;
+		}
+		uint64_t i = b->track - 100;
+		ck_assert(i < 2000 && b->epoch == 1 + i / 128 && b->revision == 1 + i / 256 &&
+		          b->rate == (i % 256 < 128 ? 48000 : 44100) && b->source == (second ? 2 : 1) &&
+		          b->frames == (second ? 4 : 3) &&
+		          b->output_start == i % 128 * 7 + (second ? 3 : 0));
+		uint32_t flags = !second && (previous == UINT64_MAX || i != previous + 1 || i % 128 == 0)
+		                     ? TD_ANALYSIS_DISCONTINUITY
+		                     : 0;
+		ck_assert(b->flags == flags && (!second || i == previous));
+		for (unsigned j = 0; j < b->frames; j++) {
+			float expected = (float)(i * 7 + j + (second ? 4 : 1));
+			ck_assert(b->samples[j * 2] == expected && b->samples[j * 2 + 1] == -expected);
+		}
+		received += b->frames;
+		previous = i;
+		second = !second;
+		OK(td_analysis_consume(&f.analysis));
+	}
+	th_thread_join(&thread);
+	th_gate_uninit(&s.gate);
+	ck_assert(!second && received + atomic_load(&f.analysis.dropped_frames) == 2000 * 7 &&
+	          f.tracker.attempts == 1);
 	uninit(&f);
 }
 END_TEST
@@ -438,6 +743,18 @@ int main(int argc, char **argv)
 		test = boundaries;
 	else if (!strcmp(argv[1], "concurrent"))
 		test = concurrent;
+	else if (!strcmp(argv[1], "feed-samples"))
+		test = feed_samples;
+	else if (!strcmp(argv[1], "feed-boundaries"))
+		test = feed_boundaries;
+	else if (!strcmp(argv[1], "feed-overflow"))
+		test = feed_overflow;
+	else if (!strcmp(argv[1], "feed-abort"))
+		test = feed_abort;
+	else if (!strcmp(argv[1], "feed-bounds"))
+		test = feed_bounds;
+	else if (!strcmp(argv[1], "feed-concurrent"))
+		test = feed_concurrent;
 	else
 		return 2;
 	Suite *suite = suite_create("audio");

@@ -23,6 +23,9 @@ typedef struct {
 teder_code td_device_plan(size_t *reservation);
 teder_code td_device_open(td_backend *, td_pcm_pool *, teder_blob key, uint32_t rate, td_device **);
 teder_code td_device_get_info(td_device *, td_device_info *);
+/* Attach/detach only with native output stopped. Feed outlives attachment and
+ * all consumer views. Revision updates use the feed's atomic owner API. */
+teder_code td_device_analysis(td_device *, td_analysis_feed *);
 /* Generation configuration requires stopped output and quiescent report readers. */
 teder_code td_device_configure(td_device *, td_audio_config);
 /* Lifecycle owner publishes one control at a time for the configured generation.
@@ -51,6 +54,7 @@ teder_code td_device_close(td_device **);
  * quiescent. The callback owns report; live readers use atomic publication. */
 typedef struct {
 	td_pcm_pool *pool;
+	td_analysis_feed *analysis;
 	td_audio_config config;
 	td_device_report report;
 	atomic_uint calls, final, expected_running, lost;

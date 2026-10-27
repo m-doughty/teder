@@ -395,3 +395,20 @@ capacity/ABI errors without changing current data; counters never wrap.
 values while a publisher replaces current data 4,095 times. `snapshot.final-release`
 races three reader releases against owner removal for 32 rounds, requiring one
 matching arena free per round. These exercise the private pool and public views.
+
+## Bounded analysis feed
+
+The `audio.feed-*` cases share the existing PCM/callback allocator fixture, with
+feed storage in that same arena. They verify exact post-gain/mute PCM, starvation
+identity, omitted pause/final padding, mixed-track records after source retirement,
+whole-interval overflow, unpublished render-error prefixes, 256-frame chunking,
+clock/drop-counter exhaustion, revision handoff and independent discontinuities.
+The concurrent case forces 98 initial dropped intervals, then checks every accepted
+sample/identity while wrapping the ring; accepted plus dropped frames equals 14,000.
+Producer and consumer views finish before the fixture arena is released.
+
+`device.analysis` runs the real native callback through synthetic miniaudio dispatch,
+checks stopped-only attachment and exact 48000-Hz post-gain data, then reads copies
+after device/source retirement. The feed callback object has its own import audit
+and deliberate forbidden-free control. The renderer may call only its three audited
+producer helpers. No timing deadline, public analysis worker or real DSP is inferred.

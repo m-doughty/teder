@@ -27,6 +27,7 @@ typedef struct {
 	td_device *device;
 	td_arena *arena;
 	td_pcm_pool pool;
+	td_analysis_feed analysis;
 	td_pcm_generation *generation;
 	th_thread thread;
 	th_thread notifications;
@@ -192,11 +193,14 @@ static void init(fixture *f, bool native)
 	OK(td_backend_open(1, 0, 8 * 1024 * 1024, a, native ? NULL : &api, &f->backend));
 	size_t bytes = 0;
 	td_pcm_layout layout;
+	td_analysis_layout analysis;
 	ck_assert(td_pcm_plan(&bytes, 128, &layout));
+	ck_assert(td_analysis_plan(&bytes, 2, &analysis));
 	f->arena = td_arena_create(a, bytes);
 	ck_assert_ptr_nonnull(f->arena);
 	void *base = td_arena_alloc(f->arena, bytes, 1, _Alignof(max_align_t));
 	td_pcm_init(&f->pool, base, &layout, 128);
+	td_analysis_init(&f->analysis, base, &analysis);
 	td_arena *source = td_arena_create(a, sizeof(td_pcm_generation));
 	ck_assert_ptr_nonnull(source);
 	f->generation = td_arena_alloc(source, 1, sizeof(*f->generation), _Alignof(td_pcm_generation));
@@ -739,6 +743,37 @@ START_TEST(native)
 }
 END_TEST
 
+START_TEST(analysis)
+{
+	fixture f = {0};
+	init(&f, false);
+	OK(open_device(&f, (teder_blob){0}, 0));
+	ck_assert(td_device_analysis(NULL, &f.analysis) == TEDER_INVALID);
+	OK(td_device_analysis(f.device, &f.analysis));
+	td_analysis_revision(&f.analysis, 7);
+	OK(td_device_configure(f.device, (td_audio_config){1, 0.5f, 1, 0}));
+	OK(td_device_start(f.device));
+	ck_assert(td_device_analysis(f.device, NULL) == TEDER_BUSY);
+	OK(td_device_stop(f.device));
+	ck_assert(f.valid);
+	OK(td_device_analysis(f.device, NULL));
+	OK(td_device_close(&f.device));
+	td_pcm_reap(&f.pool);
+	OK(td_pcm_retire(&f.generation));
+	const td_analysis_block *b;
+	OK(td_analysis_peek(&f.analysis, &b));
+	ck_assert(b->epoch == 1 && b->revision == 7 && b->rate == 48000 && b->source == 1 &&
+	          !b->track && b->output_start == 0 && b->frames == 3 &&
+	          b->flags == TD_ANALYSIS_DISCONTINUITY);
+	for (unsigned i = 0; i < 3; i++)
+		ck_assert(b->samples[2 * i] == (i + 1) * 0.125f &&
+		          b->samples[2 * i + 1] == -(float)(i + 1) * 0.125f);
+	OK(td_analysis_consume(&f.analysis));
+	ck_assert(td_analysis_peek(&f.analysis, &b) == TEDER_AGAIN && f.released == 1);
+	uninit(&f);
+}
+END_TEST
+
 int main(int argc, char **argv)
 {
 	if (argc != 2)
@@ -756,6 +791,8 @@ int main(int argc, char **argv)
 		test = closing;
 	else if (!strcmp(argv[1], "unwind"))
 		test = unwind;
+	else if (!strcmp(argv[1], "analysis"))
+		test = analysis;
 	else if (!strcmp(argv[1], "native"))
 		test = native;
 	else if (!strcmp(argv[1], "notifications"))

@@ -45,7 +45,9 @@ void td_device_callback(ma_device *device, void *output, const void *input, ma_u
 	                                  (size_t)frames * 2,
 	                                  frames,
 	                                  feed->report.output_frames,
-	                                  &result);
+	                                  &result,
+	                                  feed->report.error == TEDER_OK ? feed->analysis : NULL,
+	                                  device->sampleRate);
 	if (code == TEDER_OK && feed->report.error == TEDER_OK && config.enabled &&
 	    !feed->report.final) {
 		/* Intentional pause/EOF silence is outside the playback clock. A short

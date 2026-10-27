@@ -166,7 +166,7 @@ static void drain(teder_engine *e, teder_target target)
 		float pcm[514];
 		td_audio_result result;
 		td_audio_config config = {.generation = target.epoch, .gain = 1, .enabled = 1};
-		OK(td_audio_render(&e->pcm, config, pcm, 514, count, frame, &result));
+		OK(td_audio_render(&e->pcm, config, pcm, 514, count, frame, &result, NULL, 0));
 		ck_assert(result.pcm_frames == count && result.missing_frames == 0);
 		for (unsigned i = 0; i < count; i++) {
 			float expected = ((int32_t)((frame + i) % 2048) - 1024) / 32768.0f;

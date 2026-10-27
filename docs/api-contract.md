@@ -542,6 +542,30 @@ The four snapshot access/release functions link now. Engine acquire/configuratio
 and the audio feed are not yet connected, so public playback produces no snapshots.
 This foundation copies supplied values; it does not calculate spectrum or levels.
 
+### Audio analysis feed (implemented foundation)
+
+The private tap copies post-software-gain stereo PCM into a bounded ring in its
+owner's arena. Records contain at most 256 frames, one source/track identity,
+output-frame start, epoch, rate and analysis revision. Adjacent records preserve
+mixed-track boundaries; inserted starvation silence uses source/track zero.
+Muted music retains its source identity. Pause and final-buffer padding add no data.
+
+One callback stages copies, then publishes the complete interval only on render
+success. Insufficient ring space drops the whole interval and saturates a dropped
+frame counter; it never delays playback or publishes an inaccurate partial span.
+An aborted render publishes nothing. The next successful record marks discontinuity
+after drops, pause, revision/rate/epoch changes or noncontiguous output time.
+The consumer borrows each record until it returns that slot. All payload and
+identity data are copied; no source/decoder pointer or PCM block is retained.
+
+Disabling uses revision zero; an in-flight callback may finish its old revision.
+Re-enable/reconfigure uses a new revision. The consumer must filter old revisions;
+disable alone does not discard the queue or prove quiescence. Native attachment
+changes require stopped output. Both feed roles and all borrowed views must finish
+before their owner arena is released. Engine attachment/configuration, public drop
+status and the consumer worker remain planned; public playback does not enable
+this tap yet. No spectrum or level calculation runs on the callback.
+
 ### Analysis and rendering (planned)
 
 Analysis taps post-software-gain, pre-device-mixer stereo PCM. Enable/configure

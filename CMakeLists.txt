@@ -50,6 +50,10 @@ add_library(teder_memory OBJECT src/memory.c)
 teder_target(teder_memory)
 add_library(teder_pcm_callback OBJECT src/pcm_queue.c)
 teder_target(teder_pcm_callback)
+add_library(teder_analysis_feed OBJECT src/analysis_feed.c)
+teder_target(teder_analysis_feed)
+add_library(teder_analysis_callback OBJECT src/analysis_feed_callback.c)
+teder_target(teder_analysis_callback)
 add_library(teder_audio_callback OBJECT src/audio_callback.c)
 teder_target(teder_audio_callback)
 add_library(teder_backend OBJECT src/backend.c src/backend_heap.c)
@@ -77,6 +81,7 @@ endif()
 add_library(teder src/build.c $<TARGET_OBJECTS:teder_memory>
 	$<TARGET_OBJECTS:teder_pcm> $<TARGET_OBJECTS:teder_pcm_callback>
 	$<TARGET_OBJECTS:teder_audio_callback>
+	$<TARGET_OBJECTS:teder_analysis_feed> $<TARGET_OBJECTS:teder_analysis_callback>
 	$<TARGET_OBJECTS:teder_backend>
 	$<TARGET_OBJECTS:teder_device> $<TARGET_OBJECTS:teder_device_callback>
 	$<TARGET_OBJECTS:teder_lifetime>

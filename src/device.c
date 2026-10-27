@@ -109,6 +109,18 @@ teder_code td_device_get_info(td_device *d, td_device_info *out)
 	return TEDER_OK;
 }
 
+teder_code td_device_analysis(td_device *d, td_analysis_feed *analysis)
+{
+	if (!d)
+		return TEDER_INVALID;
+	if (d->active)
+		return TEDER_BUSY;
+	if (d->failed)
+		return TEDER_BAD_STATE;
+	d->feed.analysis = analysis;
+	return TEDER_OK;
+}
+
 teder_code td_device_configure(td_device *d, td_audio_config config)
 {
 	if (!d || !(config.gain >= 0 && config.gain <= 1) || config.enabled > 1 || config.mute > 1 ||

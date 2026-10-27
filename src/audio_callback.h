@@ -1,6 +1,7 @@
 #ifndef TEDER_AUDIO_CALLBACK_H
 #define TEDER_AUDIO_CALLBACK_H
 #include "pcm.h"
+#include "analysis_feed.h"
 
 /* Caller supplies a coherent snapshot, never a racing copy of mutable control
  * state. This private core owns no configuration publication mechanism. */
@@ -20,7 +21,9 @@ typedef struct {
 /* Sole PCM consumer; stereo interleaved float output, capacity in samples.
  * Pool, result and output must not overlap and must outlive this call. The
  * existing pool/generation protocol owns every sample borrow and retirement.
- * Nothing is retained after return. No allocation, locks, I/O or worker wakes.
+ * Optional analysis copies are published only after successful rendering. The
+ * analysis owner outlives both roles; NULL disables the tap. No allocation, locks,
+ * I/O or worker wakes. Pause/EOF padding is excluded; starvation silence is included.
  *
  * Invalid output/capacity/result leaves output untouched and consumes nothing. Given
  * a valid output span, even invalid configuration leaves it fully silent.
@@ -39,5 +42,7 @@ teder_code td_audio_render(td_pcm_pool *,
                            size_t sample_capacity,
                            uint32_t frames,
                            uint64_t output_frame,
-                           td_audio_result *);
+                           td_audio_result *,
+                           td_analysis_feed *analysis,
+                           uint32_t output_rate);
 #endif
