@@ -1,4 +1,4 @@
-#include "internal.h"
+#include "analysis_pool.h"
 #include <assert.h>
 #include <stdlib.h>
 #ifdef _WIN32
@@ -177,6 +177,7 @@ static void control(teder_engine *e)
 	td_pcm_clear(&e->pcm);
 	td_sources_close(e);
 	join(e->probe_thread);
+	td_snapshot_clear(e->snapshots); /* no publisher survives close; loans remain valid */
 	td_lock(e);
 	for (uint32_t i = 0; i < e->config.request_capacity; i++)
 		if (e->requests[i].info.state == TEDER_QUEUED || e->requests[i].info.state == TEDER_RUNNING)

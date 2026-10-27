@@ -161,7 +161,7 @@ add_executable(teder_test_output test_output.c)
 teder_target(teder_test_output)
 target_compile_definitions(teder_test_output PRIVATE TEDER_STATIC "FIXTURE_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/fixtures\"" "OUTPUT_DIR=\"${CMAKE_CURRENT_BINARY_DIR}\"")
 target_link_libraries(teder_test_output PRIVATE teder_lifetime teder_backend teder_device teder_device_callback teder_audio_callback teder_source FLAC teder_test_support Check::check)
-foreach(case snapshot cancellation failures identity closing selection rates select-failures select-cancel playback play-changes play-failures transport-pcm transport-states transport-boundaries stop-rewind seek-states stop-supersession stop-boundaries stop-failures seek-failure clock-progress clock-changes clock-readers next-states gapless-pairs gapless-repeat gapless-cutoff gapless-failures gapless-rates gapless-formats gapless-edges gapless-limits loss-states loss-controls loss-preparing loss-closing loss-commit loss-transition loss-repeated shutdown-states shutdown-borrowers shutdown-startup rollback-composed)
+foreach(case snapshot cancellation failures identity closing selection rates select-failures select-cancel playback play-changes play-failures transport-pcm transport-states transport-boundaries stop-rewind seek-states stop-supersession stop-boundaries stop-failures seek-failure clock-progress clock-changes clock-readers next-states gapless-pairs gapless-repeat gapless-cutoff gapless-failures gapless-rates gapless-formats gapless-edges gapless-limits loss-states loss-controls loss-preparing loss-closing loss-commit loss-transition loss-repeated shutdown-states shutdown-borrowers shutdown-startup rollback-composed analysis-owners)
 	add_test(NAME output.${case} COMMAND teder_test_output ${case})
 	set_tests_properties(output.${case} PROPERTIES TIMEOUT 40 LABELS "unit;output;lifetime")
 endforeach()
@@ -202,7 +202,7 @@ add_executable(teder_test_analysis_pool test_analysis_pool.c)
 teder_target(teder_test_analysis_pool)
 target_compile_definitions(teder_test_analysis_pool PRIVATE TEDER_STATIC)
 target_link_libraries(teder_test_analysis_pool PRIVATE teder_lifetime teder_backend teder_device teder_device_callback teder_audio_callback teder_source FLAC teder_test_support Check::check)
-foreach(case bounds retention validation final-release concurrent)
+foreach(case bounds retention validation final-release concurrent engine-bounds engine-retention)
 	add_test(NAME snapshot.${case} COMMAND teder_test_analysis_pool ${case})
 	set_tests_properties(snapshot.${case} PROPERTIES TIMEOUT 30 LABELS "unit;analysis;lifetime")
 endforeach()
@@ -212,3 +212,8 @@ add_test(NAME feed.callback-symbols COMMAND "${CMAKE_COMMAND}" "-DNM=${teder_cal
 add_test(NAME feed.callback-control COMMAND "${CMAKE_COMMAND}" "-DNM=${teder_callback_nm}"
 	"-DOBJECT=$<TARGET_OBJECTS:teder_callback_control>" -P "${CMAKE_CURRENT_SOURCE_DIR}/support/callback_control.cmake")
 set_tests_properties(feed.callback-symbols feed.callback-control PROPERTIES TIMEOUT 20 LABELS "analysis;callback-audit")
+
+add_test(NAME output.worker-check-control COMMAND "${CMAKE_COMMAND}" "-DPROGRAM=$<TARGET_FILE:teder_test_output>"
+	-DCASE=worker "-DLOG=${CMAKE_CURRENT_BINARY_DIR}/control-worker.log"
+	-P "${CMAKE_CURRENT_SOURCE_DIR}/support/control.cmake")
+set_tests_properties(output.worker-check-control PROPERTIES TIMEOUT 15 LABELS "output;negative-control")

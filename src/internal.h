@@ -182,6 +182,8 @@ struct teder_engine {
 	td_request_slot *requests;
 	teder_event *events;
 	td_pcm_pool pcm;
+	td_analysis_feed analysis;          /* engine arena; one native producer, disabled initially */
+	struct td_snapshot_pool *snapshots; /* independent owner pin, retained until destroy */
 	td_allocator allocator;
 	td_runtime runtime;
 	td_mutex gate;

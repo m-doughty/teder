@@ -460,7 +460,7 @@ START_TEST(failures)
 	uint64_t id = open_path(e, A, 1);
 	ck_assert(terminal(e, id).outcome == TEDER_LIMIT);
 	ack(e, id);
-	ck_assert(c.tracker.attempts == 1 && !atomic_load(&c.opened[1]));
+	ck_assert(c.tracker.attempts == 2 && !atomic_load(&c.opened[1]));
 	finish(&c, &e);
 	const unsigned stages[] = {
 	    TD_INIT_PREPARE_WAKE, TD_INIT_PREPARE_THREAD, TD_INIT_THREAD, TD_INIT_PUBLISH};

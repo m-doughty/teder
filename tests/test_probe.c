@@ -221,7 +221,7 @@ START_TEST(admission)
 	ck_assert(teder_request_ack(e, ids[0]) == TEDER_BUSY);
 	RETRY(code, teder_request_cancel(e, ids[1]));
 	OK(code);
-	ck_assert(f.tracker.attempts == 1 && f.tracker.live == 1 && !atomic_load(&f.opened));
+	ck_assert(f.tracker.attempts == 2 && f.tracker.live == 2 && !atomic_load(&f.opened));
 	th_gate_release(&f.gate);
 	for (unsigned i = 0; i < 3; i++) {
 		ck_assert(terminal(e, ids[i]).outcome == (i == 1 ? TEDER_CANCELLED : TEDER_OK));
@@ -312,10 +312,10 @@ START_TEST(limits)
 			teder_result_release(r);
 		}
 		ack(e, id);
-		ck_assert(owned(e) == base && f.tracker.live == 1);
+		ck_assert(owned(e) == base && f.tracker.live == 2);
 		ck_assert(f.tracker.peak <= e->config.engine_bytes_limit);
 		if (!mode)
-			ck_assert(f.tracker.attempts == 1 && !atomic_load(&f.opened));
+			ck_assert(f.tracker.attempts == 2 && !atomic_load(&f.opened));
 		OK(th_close(e));
 		OK(teder_destroy(&e));
 		dispose(&f);
@@ -331,14 +331,14 @@ START_TEST(failures)
 		init(&f, 0);
 		teder_engine *e;
 		OK(create(&f, &e));
-		size_t base = owned(e);
-		f.tracker.fail_at = fail ? f.tracker.attempts + fail : 0;
+		size_t base = owned(e), attempts = f.tracker.attempts;
+		f.tracker.fail_at = fail ? attempts + fail : 0;
 		uint64_t id = probe(e, 1);
 		ck_assert(terminal(e, id).outcome == (fail ? TEDER_NO_MEMORY : TEDER_OK));
 		if (!fail)
-			count = f.tracker.attempts - 1;
+			count = f.tracker.attempts - attempts;
 		ack(e, id);
-		ck_assert(owned(e) == base && f.tracker.live == 1);
+		ck_assert(owned(e) == base && f.tracker.live == 2);
 		OK(th_close(e));
 		OK(teder_destroy(&e));
 		dispose(&f);

@@ -2,6 +2,7 @@
 #include "support/engine.h"
 #include <check.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <math.h>
 #include "source.h"
 #include "support/track.h"
@@ -15,6 +16,17 @@ enum { LONG_FRAMES = 32769 };
 		.struct_size = sizeof(type), .abi_version = TEDER_ABI_VERSION \
 	}
 #define OK(call) ck_assert((call) == TEDER_OK)
+/* Check logs successful assertions under a lazy winpthreads mutex. Keep worker
+ * success paths free of that unrelated handle; failed checks terminate the child. */
+#define WORKER_CHECK(expr) \
+	do { \
+		if (!(expr)) { \
+			fprintf(stderr, "%s:%d: worker check failed: %s\n", __FILE__, __LINE__, #expr); \
+			fflush(stderr); \
+			_Exit(42); \
+		} \
+	} while (0)
+
 #define RETRY(code, call) \
 	do { \
 		(code) = (call); \
@@ -58,9 +70,9 @@ static void hit(fixture *f, unsigned point)
 static void owner(fixture *f)
 {
 #ifdef _WIN32
-	ck_assert(GetCurrentThreadId() == f->owner && f->owner != f->caller);
+	WORKER_CHECK(GetCurrentThreadId() == f->owner && f->owner != f->caller);
 #else
-	ck_assert(pthread_equal(pthread_self(), f->owner) && !pthread_equal(f->owner, f->caller));
+	WORKER_CHECK(pthread_equal(pthread_self(), f->owner) && !pthread_equal(f->owner, f->caller));
 #endif
 }
 
@@ -90,9 +102,9 @@ static ma_result device_init(ma_device *d,
 	owner(f);
 	if (f->device_error)
 		return MA_ERROR;
-	ck_assert(config->playback.pDeviceID);
+	WORKER_CHECK(config->playback.pDeviceID);
 	ma_wchar_win32 id = config->playback.pDeviceID->wasapi[0];
-	ck_assert(id == 'A' || id == 'B');
+	WORKER_CHECK(id == 'A' || id == 'B');
 	playback->format = ma_format_f32;
 	playback->channels = 2;
 	playback->sampleRate = f->rate ? f->rate : id == 'A' ? 44100 : 22050;
@@ -136,16 +148,17 @@ static void render_output(void *context)
 			th_yield();
 			continue;
 		}
-		ck_assert(frames <= 257);
+		WORKER_CHECK(frames <= 257);
 		pcm[2 * frames] = 12345;
 		uint64_t before = feed->report.pcm_frames;
 		f->native->onData(f->native, pcm, NULL, frames);
 		unsigned count = (unsigned)(feed->report.pcm_frames - before);
-		ck_assert(count <= frames && captured + count <= LONG_FRAMES && pcm[2 * frames] == 12345);
+		WORKER_CHECK(count <= frames && captured + count <= LONG_FRAMES &&
+		             pcm[2 * frames] == 12345);
 		memcpy(f->capture + captured * 2, pcm, count * 2 * sizeof(float));
 		captured += count;
 		for (unsigned i = count * 2; i < frames * 2; i++)
-			ck_assert(pcm[i] == 0);
+			WORKER_CHECK(pcm[i] == 0);
 		atomic_store(&f->captured, captured);
 		atomic_fetch_add(&f->stepped, 1);
 		th_yield(); /* no producer wake; this fake is deliberately faster than hardware */
@@ -181,7 +194,7 @@ static ma_result context_init(const ma_backend *backends,
                               ma_context *c)
 {
 	(void)backends;
-	ck_assert(count == 4 || count == 1);
+	WORKER_CHECK(count == 4 || count == 1);
 	fixture *f = config->pUserData;
 #ifdef _WIN32
 	f->owner = GetCurrentThreadId();
@@ -2672,6 +2685,8 @@ START_TEST(loss_closing)
 	atomic_store(&f.hold, 1);
 	outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
 	th_gate_await(&f.render_gate); /* native dispatch retains device/userdata */
+	td_analysis_feed *analysis = ((td_device_feed *)f.native->pUserData)->analysis;
+	ck_assert(analysis == &e->analysis && analysis->capacity == 64);
 	park_owner(&f, e);
 	teder_status before = status(e);
 	size_t budget = owned(e);
@@ -2686,6 +2701,7 @@ START_TEST(loss_closing)
 	while (!atomic_load(&f.stop))
 		th_yield(); /* uninit is now joining the held native user */
 	ck_assert(teder_destroy(&e) == TEDER_BUSY && owned(e) == budget && !f.releases);
+	ck_assert(&e->analysis == analysis && !atomic_load(&analysis->revision));
 	th_gate_release(&f.render_gate);
 	close_engine(&e);
 	ck_assert(f.releases == 1 && !f.stops);
@@ -2788,7 +2804,11 @@ START_TEST(loss_repeated)
 	}
 	park_owner(&f, e);
 #ifdef _WIN32
-	ck_assert(GetProcessHandleCount(GetCurrentProcess(), &after) && handles == after);
+	ck_assert(GetProcessHandleCount(GetCurrentProcess(), &after));
+	ck_assert_msg(handles == after,
+	              "native handles: before=%lu after=%lu",
+	              (unsigned long)handles,
+	              (unsigned long)after);
 #endif
 	e->status.current.epoch = UINT64_MAX;
 	lose(&f);
@@ -3015,6 +3035,65 @@ START_TEST(shutdown_borrowers)
 }
 END_TEST
 
+START_TEST(analysis_owners)
+{
+	fixture f;
+	init(&f);
+	f.manual = true;
+	teder_config config = INIT(teder_config);
+	teder_engine *e = create(&f, config, false);
+	size_t base = owned(e);
+	outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
+	load_track(e);
+	td_analysis_feed *feed = &e->analysis;
+	ck_assert(((td_device_feed *)f.native->pUserData)->analysis == feed);
+	outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
+	step(&f, 1);
+	const td_analysis_block *first = NULL;
+	ck_assert(td_analysis_peek(feed, &first) == TEDER_AGAIN && !first);
+
+	/* Private activation only: host is the sole consumer until worker integration. */
+	td_analysis_revision(feed, 7);
+	step(&f, 3);
+	OK(td_analysis_peek(feed, &first));
+	ck_assert(first->epoch == 3 && first->revision == 7 && first->output_start == 1 &&
+	          first->source == 1 && first->track == 77 && first->rate == 44100 &&
+	          first->frames == 3 && first->flags == TD_ANALYSIS_DISCONTINUITY);
+	td_analysis_block saved = *first;
+
+	/* Replacement joins the old native writer without resetting queued data. */
+	outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
+	ck_assert(f.devices == 2 && f.releases == 1 &&
+	          ((td_device_feed *)f.native->pUserData)->analysis == feed);
+	outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
+	step(&f, 2);
+	OK(th_close(e));
+	ck_assert(f.releases == 2 && !f.worker && f.closed == 1 && owned(e) == base);
+	ck_assert(f.tracker.live == 2 && f.tracker.bytes == base);
+	ck_assert(!memcmp(first, &saved, sizeof(saved))); /* borrow survives native retirement */
+	for (unsigned i = 0; i < 3; i++) {
+		float expected = ((int)i - 7) * 1000 / 32768.0f;
+		ck_assert(first->samples[2 * i] == expected && first->samples[2 * i + 1] == -expected);
+	}
+	OK(td_analysis_consume(feed));
+	const td_analysis_block *second;
+	OK(td_analysis_peek(feed, &second));
+	ck_assert(second->epoch == 4 && second->revision == 7 && second->output_start == 0 &&
+	          second->source == 1 && second->track == 77 && second->rate == 44100 &&
+	          second->frames == 2 && second->flags == TD_ANALYSIS_DISCONTINUITY);
+	for (unsigned i = 0; i < 2; i++) {
+		float expected = ((int)i - 4) * 1000 / 32768.0f;
+		ck_assert(second->samples[2 * i] == expected && second->samples[2 * i + 1] == -expected);
+	}
+	OK(td_analysis_consume(feed));
+	ck_assert(td_analysis_peek(feed, &second) == TEDER_AGAIN && !second);
+	ck_assert(!atomic_load(&feed->dropped_frames));
+	/* Every consumer view has ended before destroying the containing arena. */
+	OK(teder_destroy(&e));
+	dispose(&f);
+}
+END_TEST
+
 START_TEST(shutdown_startup)
 {
 	fixture warm;
@@ -3028,8 +3107,8 @@ START_TEST(shutdown_startup)
 	ck_assert(GetProcessHandleCount(GetCurrentProcess(), &before));
 #endif
 	/* Bits name preparation/refill/probe/control entries in actual startup order. */
-	const unsigned expected[] = {0, 0, 0, 7, 15, 0, 0, 0, 0, 1, 0, 3};
-	for (unsigned stage = 0; stage <= TD_INIT_PROBE_THREAD; stage++) {
+	const unsigned expected[] = {0, 0, 0, 7, 15, 0, 0, 0, 0, 1, 0, 3, 0};
+	for (unsigned stage = 0; stage <= TD_INIT_SNAPSHOT_GATE; stage++) {
 		fixture f;
 		init(&f);
 		f.fail_stage = stage;
@@ -3040,7 +3119,7 @@ START_TEST(shutdown_startup)
 		                      .media_checkpoint = checkpoint};
 		ck_assert(td_engine_create_with(&config, th_allocator(&f.tracker), runtime, &e) ==
 		          (stage ? TEDER_INTERNAL : TEDER_NO_MEMORY));
-		ck_assert(!e && f.tracker.attempts == 1);
+		ck_assert(!e && f.tracker.attempts == (stage ? 2 : 1));
 		for (unsigned i = 0; i < 4; i++)
 			ck_assert(atomic_load(&f.worker_entries[i]) == ((expected[stage] >> i) & 1) &&
 			          atomic_load(&f.worker_exits[i]) == ((expected[stage] >> i) & 1));
@@ -3121,10 +3200,23 @@ START_TEST(rollback_composed)
 }
 END_TEST
 
+static void worker_check_failure(void *unused)
+{
+	(void)unused;
+	WORKER_CHECK(false);
+}
+
 int main(int argc, char **argv)
 {
 	if (argc != 2)
 		return 2;
+	if (!strcmp(argv[1], "control-worker")) {
+		th_thread thread;
+		if (!th_thread_start(&thread, worker_check_failure, NULL))
+			return 2;
+		th_thread_join(&thread);
+		return 0;
+	}
 	const TTest *test = NULL;
 	if (!strcmp(argv[1], "snapshot"))
 		test = snapshot;
@@ -3210,6 +3302,8 @@ int main(int argc, char **argv)
 		test = shutdown_states;
 	else if (!strcmp(argv[1], "shutdown-borrowers"))
 		test = shutdown_borrowers;
+	else if (!strcmp(argv[1], "analysis-owners"))
+		test = analysis_owners;
 	else if (!strcmp(argv[1], "shutdown-startup"))
 		test = shutdown_startup;
 	else if (!strcmp(argv[1], "rollback-composed"))

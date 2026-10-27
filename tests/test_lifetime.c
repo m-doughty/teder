@@ -49,7 +49,7 @@ START_TEST(engine)
 	teder_config c = INIT(teder_config), resolved = INIT(teder_config);
 	teder_engine *e = NULL;
 	OK(td_engine_create(&c, th_allocator(&t), &e));
-	ck_assert(t.attempts == 1 && t.live == 1 && t.bytes == e->owned_bytes);
+	ck_assert(t.attempts == 2 && t.live == 2 && t.bytes == e->owned_bytes);
 	OK(teder_get_config(e, &resolved));
 	ck_assert(resolved.request_capacity == 32 && resolved.event_capacity == 64);
 	ck_assert(resolved.max_input_bytes == 4096 && resolved.pcm_frames == 65536);
@@ -241,7 +241,7 @@ START_TEST(failures)
 	td_result_input in = {.kind = TEDER_RESULT_PROBE, .probe = &p};
 	t.fail_at = t.attempts + 1;
 	ck_assert(td_result_create(&in, th_allocator(&t), 4096, &r) == TEDER_NO_MEMORY && r == NULL);
-	ck_assert(t.live == 1 && t.bytes == baseline);
+	ck_assert(t.live == 2 && t.bytes == baseline);
 	printf("result fail-at=%zu site=%s expected=NO_MEMORY live=%zu bytes=%zu baseline=%zu\n",
 	       t.fail_at,
 	       t.failed_site,
@@ -324,7 +324,7 @@ START_TEST(failures)
 	ck_assert(teder_result_kind(r, &value) == TEDER_ABI_MISMATCH && value == 77);
 	r->header.version--;
 	teder_result_release(r);
-	ck_assert(t.bytes == baseline && t.live == 1);
+	ck_assert(t.bytes == baseline && t.live == 2);
 	OK(th_close(e));
 	OK(teder_destroy(&e));
 	ck_assert(th_tracker_clean(&t));

@@ -83,13 +83,16 @@ int main(int argc, char **argv)
 	teder_engine *engine = NULL;
 	if (teder_create(&config, &engine) != TEDER_OK || !engine)
 		return 3;
-	if (teder_get_config(engine, &config) != TEDER_OK || config.request_capacity != 32)
+	if (teder_get_config(engine, &config) != TEDER_OK || config.request_capacity != 32 ||
+	    config.snapshot_slots != 4 || config.snapshot_loans != 16 || config.max_bands != 256 ||
+	    config.max_spans != 16)
 		return 4;
 	teder_status status = {0};
 	status.struct_size = sizeof(status);
 	status.abi_version = TEDER_ABI_VERSION;
 	if (status_read(engine, &status) != TEDER_OK || status.lifecycle != TEDER_LIVE ||
-	    status.transport != TEDER_EMPTY || status.gain != 1.0f)
+	    status.transport != TEDER_EMPTY || status.gain != 1.0f || status.analysis_sequence != 0 ||
+	    status.analysis_dropped_frames != 0 || status.analysis_dropped_publications != 0)
 		return 5;
 	if (argc != 2)
 		return 13;

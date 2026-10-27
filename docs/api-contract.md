@@ -101,16 +101,16 @@ The current defaults are:
 | `engine_bytes_limit` | 67108864 bytes (64 MiB) |
 | `result_bytes_limit` | 16777216 bytes (16 MiB) |
 
-The request/input/event/PCM storage shares one engine arena. PCM capacity is
-split into blocks of at most 1024 stereo float frames; a final shorter block
+Request, input, event, PCM and analysis-feed storage shares one engine arena.
+PCM capacity is split into blocks of at most 1024 stereo float frames; a final shorter block
 preserves the exact configured frame count. Block records and both handoff queues
-also count against the engine byte limit. This private handoff is exercised by
-native tests; a device callback is not implemented yet.
+also count against the engine byte limit. Native output consumes this handoff.
 Private FLAC sources now stream into this handoff; their format, conversion and
 reservation rules and implemented asynchronous open/seek behavior are specified
-in [sources.md](sources.md). Playback and device integration are not implemented yet.
-Snapshot fields are resolved limits. The independent pool is implemented privately;
-engine attachment/acquisition and audio analysis remain planned.
+in [sources.md](sources.md). Snapshot limits size an independent pool at creation,
+even while analysis is disabled. Both arenas, including their overhead, must fit
+the engine limit before either allocation. Public acquisition and analysis remain
+planned; engine creation and close/destroy already own the pool lifetime.
 Public enumeration and probing produce detached device lists and metadata.
 `result_tag` requires distinct key
 and value output pointers. Identical pointers return INVALID without changes.
@@ -538,8 +538,13 @@ returns LIMIT without replacing the current snapshot. Invalidation removes
 current data while retaining prior loans and counters. The last loan after owner
 removal destroys the gate and arena exactly once. No pool operation is audio-safe.
 
+The engine creates and budgets this pool before starting workers. Any startup
+failure releases it. Close invalidates current data after native users retire;
+destroy drops the engine pin. The pool remains charged until destroy even with
+held loans. Outstanding loans then retain only its arena, with no engine pointer.
+
 The four snapshot access/release functions link now. Engine acquire/configuration
-and the audio feed are not yet connected, so public playback produces no snapshots.
+and the consumer worker are not implemented yet, so public playback produces no snapshots.
 This foundation copies supplied values; it does not calculate spectrum or levels.
 
 ### Audio analysis feed (implemented foundation)
@@ -562,9 +567,14 @@ Disabling uses revision zero; an in-flight callback may finish its old revision.
 Re-enable/reconfigure uses a new revision. The consumer must filter old revisions;
 disable alone does not discard the queue or prove quiescence. Native attachment
 changes require stopped output. Both feed roles and all borrowed views must finish
-before their owner arena is released. Engine attachment/configuration, public drop
-status and the consumer worker remain planned; public playback does not enable
-this tap yet. No spectrum or level calculation runs on the callback.
+before their owner arena is released. The engine reserves 64 usable records plus
+one empty ring cell, holding at most 16384 stereo frames. Track boundaries can
+use extra records. Device selection joins the old producer before attaching the
+same stable feed to the new stopped device. Close joins native users; destroy
+releases the containing arena. Queued records are never reset during replacement.
+Configuration, public drop status and the consumer worker remain planned; public
+playback leaves this tap disabled. No spectrum or level calculation runs on
+the callback.
 
 ### Analysis and rendering (planned)
 

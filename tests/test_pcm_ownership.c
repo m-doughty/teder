@@ -176,7 +176,7 @@ START_TEST(bounds)
 	ck_assert(td_engine_create(&config, th_allocator(&t), &e) == TEDER_LIMIT && !e && !t.attempts);
 	config.pcm_frames = 2051;
 	OK(td_engine_create(&config, th_allocator(&t), &e));
-	ck_assert(t.attempts == 1 && e->pcm.count == 3 && e->pcm.blocks[2].capacity == 3);
+	ck_assert(t.attempts == 2 && e->pcm.count == 3 && e->pcm.blocks[2].capacity == 3);
 	OK(th_close(e));
 	ck_assert(e->pcm.closed && e->pcm.free_count == 3);
 	OK(teder_destroy(&e));

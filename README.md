@@ -22,8 +22,10 @@ Implemented exports:
   and `teder_snapshot_release`; the independent pool is tested internally.
   Engine snapshot acquisition and audio analysis are not implemented yet.
 
-The private post-gain audio feed and native attachment are tested. Engine feed
-allocation, analysis configuration and worker integration are not implemented yet.
+The engine budgets a disabled post-gain feed in its arena and an independent
+snapshot pool. Native output borrows the stable feed until device retirement.
+The pool pin lasts until destroy; held loans retain only that pool afterward.
+Analysis configuration, public acquisition and the consumer worker are not implemented yet.
 
 Build queries still report zero capabilities/backend mask. FLAC open and seek
 prepare sources asynchronously and stream bounded PCM. AUTOPLAY starts the selected

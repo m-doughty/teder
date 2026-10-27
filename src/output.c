@@ -258,6 +258,12 @@ void td_output_select(teder_engine *e, uint32_t slot)
 	code = atomic_load(&e->lifecycle) == TEDER_LIVE
 	           ? td_device_open(e->backend, &e->pcm, key, 0, &e->device)
 	           : TEDER_CANCELLED;
+	/* The old native producer was joined by invalidate before opening this one. */
+	if (code == TEDER_OK) {
+		code = td_device_analysis(e->device, &e->analysis);
+		if (code != TEDER_OK && td_device_close(&e->device) != TEDER_OK)
+			abort();
+	}
 	td_device_info info;
 	if (code == TEDER_OK && td_device_get_info(e->device, &info) != TEDER_OK)
 		abort();

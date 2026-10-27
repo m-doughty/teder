@@ -1,5 +1,6 @@
 #include "analysis_pool.h"
 #include "support/harness.h"
+#include "support/engine.h"
 #include <check.h>
 #include <math.h>
 #include <stdio.h>
@@ -420,6 +421,111 @@ START_TEST(concurrent)
 }
 END_TEST
 
+START_TEST(engine_bounds)
+{
+	th_tracker t;
+	ck_assert(th_tracker_init(&t));
+	teder_config c = config();
+	c.request_capacity = 2;
+	c.event_capacity = 3;
+	c.max_input_bytes = 8;
+	c.pcm_frames = 4;
+	teder_engine *e = NULL;
+	OK(td_engine_create(&c, th_allocator(&t), &e));
+	size_t bytes = e->owned_bytes, pool_bytes;
+	OK(td_snapshot_pool_plan(&e->config, &pool_bytes));
+	ck_assert(t.attempts == 2 && t.live == 2 && t.bytes == bytes);
+	ck_assert(e->snapshots->bytes == pool_bytes && e->snapshots->owned);
+	ck_assert(e->analysis.capacity == 64 && !atomic_load(&e->analysis.revision));
+	const td_analysis_block *block = NULL;
+	ck_assert(td_analysis_peek(&e->analysis, &block) == TEDER_AGAIN && !block);
+	OK(th_close(e));
+	ck_assert(t.live == 2 && t.bytes == bytes && e->owned_bytes == bytes);
+	OK(teder_destroy(&e));
+	ck_assert(th_tracker_clean(&t));
+
+	/* Both arenas must fit before either allocation, including retained slots. */
+	size_t attempts = t.attempts;
+	c.engine_bytes_limit = bytes - 1;
+	ck_assert(td_engine_create(&c, th_allocator(&t), &e) == TEDER_LIMIT && !e);
+	ck_assert(t.attempts == attempts && th_tracker_clean(&t));
+	c.engine_bytes_limit = bytes;
+	OK(td_engine_create(&c, th_allocator(&t), &e));
+	ck_assert(e->owned_bytes == bytes && t.bytes == bytes);
+	OK(th_close(e));
+	OK(teder_destroy(&e));
+
+	for (unsigned fail = 1; fail <= 2; fail++) {
+		attempts = t.attempts;
+		t.fail_at = attempts + fail;
+		ck_assert(td_engine_create(&c, th_allocator(&t), &e) == TEDER_NO_MEMORY && !e);
+		ck_assert(t.attempts == attempts + fail && th_tracker_clean(&t));
+	}
+	t.fail_at = 0;
+	unsigned rejected = 0;
+	td_runtime runtime = {.context = &rejected, .permit = reject_gate};
+	attempts = t.attempts;
+	ck_assert(td_engine_create_with(&c, th_allocator(&t), runtime, &e) == TEDER_INTERNAL && !e);
+	ck_assert(rejected == 1 && t.attempts == attempts + 2 && th_tracker_clean(&t));
+
+	attempts = t.attempts;
+	c.snapshot_slots = UINT32_MAX;
+	c.max_bands = UINT32_MAX;
+	c.max_spans = UINT32_MAX;
+	c.engine_bytes_limit = UINT64_MAX;
+	ck_assert(td_engine_create(&c, th_allocator(&t), &e) == TEDER_LIMIT && !e);
+	ck_assert(t.attempts == attempts && th_tracker_clean(&t));
+	th_tracker_uninit(&t);
+}
+END_TEST
+
+START_TEST(engine_retention)
+{
+	th_tracker t;
+	ck_assert(th_tracker_init(&t));
+	for (unsigned round = 0; round < 16; round++) {
+		teder_config c = config();
+		teder_engine *e = NULL;
+		OK(td_engine_create(&c, th_allocator(&t), &e));
+		td_snapshot_pool *pool = e->snapshots;
+		size_t pool_bytes = pool->bytes, engine_bytes = e->owned_bytes;
+		publish(pool, 1); /* supplied test values; no DSP or public producer exists yet */
+		teder_snapshot *held = acquire(pool), *same = acquire(pool);
+		ck_assert(held == same && pool->loans == 2);
+		OK(th_close(e));
+		ck_assert(e->snapshots == pool && pool->owned && !pool->current);
+		ck_assert(t.live == 2 && t.bytes == engine_bytes && e->owned_bytes == engine_bytes);
+		verify(held, 1, 1, 0);
+		teder_snapshot *out = held;
+		ck_assert(td_snapshot_acquire(pool, &out) == TEDER_AGAIN && !out);
+		if (round & 2) {
+			teder_snapshot_release(held);
+			held = NULL; /* race destroy against the final reader too */
+		}
+		reader r = {.snapshot = same};
+		th_thread thread;
+		ck_assert(th_gate_init(&r.gate) && th_thread_start(&thread, release_thread, &r));
+		th_gate_await(&r.gate);
+		/* Alternate release-before-destroy and overlapping release/destroy. */
+		th_gate_release(&r.gate);
+		if (round % 2)
+			th_thread_join(&thread);
+		OK(teder_destroy(&e));
+		if (!(round % 2))
+			th_thread_join(&thread);
+		th_gate_uninit(&r.gate);
+		ck_assert(!e);
+		if (held) {
+			ck_assert(t.live == 1 && t.bytes == pool_bytes && !pool->owned);
+			verify(held, 1, 1, 0);
+			teder_snapshot_release(held);
+		}
+		ck_assert(t.attempts == 2 * (round + 1) && th_tracker_clean(&t));
+	}
+	th_tracker_uninit(&t);
+}
+END_TEST
+
 int main(int argc, char **argv)
 {
 	if (argc != 2)
@@ -433,6 +539,10 @@ int main(int argc, char **argv)
 		test = validation;
 	else if (!strcmp(argv[1], "final-release"))
 		test = final_release;
+	else if (!strcmp(argv[1], "engine-bounds"))
+		test = engine_bounds;
+	else if (!strcmp(argv[1], "engine-retention"))
+		test = engine_retention;
 	else if (!strcmp(argv[1], "concurrent"))
 		test = concurrent;
 	else

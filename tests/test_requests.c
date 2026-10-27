@@ -254,7 +254,7 @@ START_TEST(results)
 	uint64_t id;
 	OK(submit(e, NULL, 0, &id));
 	teder_request_info out = terminal(e, id);
-	ck_assert(out.outcome == TEDER_OK && out.result_kind == TEDER_RESULT_PROBE && t.live == 2);
+	ck_assert(out.outcome == TEDER_OK && out.result_kind == TEDER_RESULT_PROBE && t.live == 3);
 	teder_result *r = NULL;
 	teder_code code;
 	RETRY(code, teder_request_take_result(e, id, &r));
@@ -268,7 +268,8 @@ START_TEST(results)
 	OK(submit(e, NULL, 0, &id));
 	ck_assert(terminal(e, id).outcome == TEDER_OK);
 	ack(e, id);
-	ck_assert(t.live == 2 && e->owned_bytes == baseline); /* detached r plus engine */
+	ck_assert(t.live == 3 &&
+	          e->owned_bytes == baseline); /* detached result plus engine and snapshot arenas */
 	t.fail_at = t.attempts + 1;
 	OK(submit(e, NULL, 0, &id));
 	ck_assert(terminal(e, id).outcome == TEDER_NO_MEMORY && e->owned_bytes == baseline);
@@ -286,10 +287,10 @@ START_TEST(results)
 	ctx.before = &gate;
 	OK(submit(e, NULL, 0, &id));
 	th_gate_await(&gate);
-	ck_assert(t.live == 3);
+	ck_assert(t.live == 4);
 	OK(teder_request_cancel(e, id));
 	th_gate_release(&gate);
-	ck_assert(terminal(e, id).outcome == TEDER_CANCELLED && t.live == 2 &&
+	ck_assert(terminal(e, id).outcome == TEDER_CANCELLED && t.live == 3 &&
 	          e->owned_bytes == baseline);
 	ack(e, id);
 	OK(th_close(e));
@@ -380,7 +381,7 @@ START_TEST(initialization)
 		ck_assert(td_engine_create_with(&c, th_allocator(&t), runtime, &e) == TEDER_INTERNAL && !e);
 		unsigned expected = stage == TD_INIT_PUBLISH ? 1 : 0;
 		ck_assert(atomic_load(&ctx.starts) == expected && atomic_load(&ctx.stops) == expected);
-		ck_assert(t.attempts == 1 && th_tracker_clean(&t));
+		ck_assert(t.attempts == 2 && th_tracker_clean(&t));
 		printf("init stage=%u started=%u joined=%u live=%zu bytes=%zu\n",
 		       stage,
 		       expected,

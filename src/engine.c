@@ -1,4 +1,6 @@
-#include "internal.h"
+#include "analysis_pool.h"
+
+enum { TD_ENGINE_ANALYSIS_RECORDS = 64 };
 
 teder_code td_engine_create_with(const teder_config *input,
                                  td_allocator allocator,
@@ -7,8 +9,9 @@ teder_code td_engine_create_with(const teder_config *input,
 {
 	teder_config config;
 	teder_code code;
-	size_t capacity = 0, total, handle, requests, payload, events;
+	size_t capacity = 0, total, owned, pool_bytes, handle, requests, payload, events;
 	td_pcm_layout pcm;
+	td_analysis_layout analysis;
 	if (!out)
 		return TEDER_INVALID;
 	*out = NULL;
@@ -32,6 +35,9 @@ teder_code td_engine_create_with(const teder_config *input,
 	DEFAULT(engine_bytes_limit, UINT64_C(64) * 1024 * 1024);
 	DEFAULT(result_bytes_limit, UINT64_C(16) * 1024 * 1024);
 #undef DEFAULT
+	code = td_snapshot_pool_plan(&config, &pool_bytes);
+	if (code != TEDER_OK)
+		return code;
 	if (!td_layout_add(&capacity, 1, sizeof(teder_engine), _Alignof(teder_engine), &handle) ||
 	    !td_layout_add(&capacity,
 	                   config.request_capacity,
@@ -44,8 +50,10 @@ teder_code td_engine_create_with(const teder_config *input,
 	                   sizeof(teder_event),
 	                   _Alignof(teder_event),
 	                   &events) ||
-	    !td_pcm_plan(&capacity, config.pcm_frames, &pcm) || !td_arena_size(capacity, &total) ||
-	    total > config.engine_bytes_limit)
+	    !td_pcm_plan(&capacity, config.pcm_frames, &pcm) ||
+	    !td_analysis_plan(&capacity, TD_ENGINE_ANALYSIS_RECORDS, &analysis) ||
+	    !td_arena_size(capacity, &total) || !td_size_add(total, pool_bytes, &owned) ||
+	    owned > config.engine_bytes_limit)
 		return TEDER_LIMIT;
 	td_arena *arena = td_arena_create(allocator, capacity);
 	if (!arena)
@@ -61,10 +69,11 @@ teder_code td_engine_create_with(const teder_config *input,
 	engine->header = (td_handle){TD_ENGINE, TEDER_ABI_VERSION};
 	engine->arena = arena;
 	engine->config = config;
-	engine->owned_bytes = total;
+	engine->owned_bytes = owned;
 	engine->requests = (td_request_slot *)(storage + requests);
 	engine->events = (teder_event *)(storage + events);
 	td_pcm_init(&engine->pcm, storage, &pcm, config.pcm_frames);
+	td_analysis_init(&engine->analysis, storage, &analysis);
 	for (uint32_t i = 0; i < config.request_capacity; i++)
 		engine->requests[i].input = storage + payload + (size_t)i * config.max_input_bytes;
 	engine->status.struct_size = sizeof(engine->status);
@@ -81,8 +90,14 @@ teder_code td_engine_create_with(const teder_config *input,
 		engine->sources[i].engine = engine;
 		atomic_init(&engine->sources[i].cancel, 0);
 	}
+	code = td_snapshot_pool_create(&config, pool_bytes, allocator, runtime, &engine->snapshots);
+	if (code != TEDER_OK) {
+		td_arena_destroy(arena);
+		return code;
+	}
 	code = td_control_start(engine);
 	if (code != TEDER_OK) {
+		td_snapshot_pool_release(&engine->snapshots);
 		td_arena_destroy(arena);
 		return code;
 	}
@@ -152,6 +167,7 @@ teder_code TEDER_CALL teder_destroy(teder_engine **owner)
 	for (uint32_t i = 0; i < engine->config.request_capacity; i++)
 		teder_result_release(engine->requests[i].result);
 	td_control_dispose(engine);
+	td_snapshot_pool_release(&engine->snapshots);
 	td_arena_destroy(engine->arena);
 	*owner = NULL;
 	return TEDER_OK;
