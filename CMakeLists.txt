@@ -67,6 +67,9 @@ teder_target(teder_device_callback)
 target_link_libraries(teder_device_callback PRIVATE teder_miniaudio)
 add_library(teder_pcm OBJECT src/pcm_pool.c src/retire.c)
 teder_target(teder_pcm)
+add_library(teder_spectrum OBJECT src/spectrum.c)
+teder_target(teder_spectrum)
+target_include_directories(teder_spectrum PRIVATE "${teder_kissfft_source_SOURCE_DIR}")
 add_library(teder_lifetime OBJECT src/engine.c src/result.c src/control.c src/request.c src/decode_worker.c src/refill.c src/output.c src/transport.c src/stop.c src/successor.c src/transition.c src/metadata.c src/probe.c src/analysis_pool.c src/analysis_worker.c)
 add_library(teder_source OBJECT src/source_flac.c src/source_file.c src/convert.c)
 teder_target(teder_source)
@@ -84,7 +87,7 @@ add_library(teder src/build.c $<TARGET_OBJECTS:teder_memory>
 	$<TARGET_OBJECTS:teder_analysis_feed> $<TARGET_OBJECTS:teder_analysis_callback>
 	$<TARGET_OBJECTS:teder_backend>
 	$<TARGET_OBJECTS:teder_device> $<TARGET_OBJECTS:teder_device_callback>
-	$<TARGET_OBJECTS:teder_lifetime>
+	$<TARGET_OBJECTS:teder_lifetime> $<TARGET_OBJECTS:teder_spectrum>
 	$<TARGET_OBJECTS:teder_source>
 	$<TARGET_OBJECTS:teder_miniaudio> $<TARGET_OBJECTS:teder_kissfft>)
 add_library(teder::teder ALIAS teder)
@@ -124,7 +127,7 @@ if(TEDER_WITH_NOTCURSES)
 endif()
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(FILES README.md DESTINATION ${CMAKE_INSTALL_DOCDIR})
-install(FILES docs/api-contract.md docs/build.md docs/dependencies.md docs/sources.md
+install(FILES docs/api-contract.md docs/build.md docs/dependencies.md docs/sources.md docs/spectrum.md
 	DESTINATION ${CMAKE_INSTALL_DOCDIR}/docs)
 set(teder_config_dir "${CMAKE_INSTALL_LIBDIR}/cmake/teder")
 configure_package_config_file(cmake/tederConfig.cmake.in

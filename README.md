@@ -4,6 +4,8 @@ A C17 playback and analysis library, with a separate notcurses
 renderer. Version 0.1.0 plays local FLAC, with play/pause/stop,
 seeking, gapless playback across source-format changes, submitted clocks and
 software gain/mute and peak/RMS meters. Spectrum and rendering remain in progress.
+The private [spectrum calculation](docs/spectrum.md) now has numerical and
+allocation tests; public spectrum enablement awaits worker integration.
 
 Implemented exports:
 

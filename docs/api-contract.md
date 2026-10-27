@@ -618,8 +618,10 @@ and existing loans unchanged. The host chooses when retained data becomes stale.
 
 ### Spectrum and rendering (planned)
 
-FFT bands, overlapping windows, logarithmic aggregation, dB normalization,
-smoothing and decay remain future work. Full analysis capability stays clear.
+The private [spectrum core](spectrum.md) specifies and tests Hann normalization,
+stereo power and logarithmic bands. Public spectrum configuration, overlapping
+history, smoothing and decay await worker integration. Full analysis capability
+stays clear; the meters-only contract above is unchanged.
 
 The renderer owns no analysis history; decay belongs to analysis time, not UI
 paint frequency. Draw borrows the snapshot and plane only until return, clips
