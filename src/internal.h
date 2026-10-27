@@ -19,7 +19,7 @@ typedef pthread_mutex_t td_mutex;
 typedef pthread_t td_thread;
 #endif
 
-enum { TD_ENGINE = 0x5444454e, TD_RESULT = 0x54445245 };
+enum { TD_ENGINE = 0x5444454e, TD_RESULT = 0x54445245, TD_SNAPSHOT = 0x5444534e };
 
 typedef struct {
 	uint32_t kind, version;
@@ -101,7 +101,8 @@ enum {
 	TD_INIT_REFILL_IDLE,
 	TD_INIT_REFILL_THREAD,
 	TD_INIT_PROBE_WAKE,
-	TD_INIT_PROBE_THREAD
+	TD_INIT_PROBE_THREAD,
+	TD_INIT_SNAPSHOT_GATE
 };
 
 enum { TD_STARTED = 1, TD_STOPPED };

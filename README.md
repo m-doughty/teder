@@ -18,6 +18,9 @@ Implemented exports:
 - `teder_result_kind`, `teder_result_probe`, `teder_result_tag`,
   `teder_result_artwork`, `teder_result_device_count`, `teder_result_device`,
   and `teder_result_release`.
+- `teder_snapshot_get_info`, `teder_snapshot_bands`, `teder_snapshot_spans`,
+  and `teder_snapshot_release`; the independent pool is tested internally.
+  Engine snapshot acquisition and audio analysis are not implemented yet.
 
 Build queries still report zero capabilities/backend mask. FLAC open and seek
 prepare sources asynchronously and stream bounded PCM. AUTOPLAY starts the selected

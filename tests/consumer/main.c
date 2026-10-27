@@ -68,6 +68,15 @@ int main(int argc, char **argv)
 	if (teder_clear_next(NULL, &invalid_target, 0, &invalid_request) != TEDER_INVALID ||
 	    invalid_request != 0)
 		return 24;
+	teder_snapshot_info snapshot = {0};
+	const float *bands = NULL;
+	const teder_span *spans = NULL;
+	uint32_t count = 99;
+	if (teder_snapshot_get_info(NULL, &snapshot) != TEDER_INVALID ||
+	    teder_snapshot_bands(NULL, &bands, &count) != TEDER_INVALID ||
+	    teder_snapshot_spans(NULL, &spans, &count) != TEDER_INVALID || count != 99)
+		return 29;
+	teder_snapshot_release(NULL);
 	teder_config config = {0};
 	config.struct_size = sizeof(config);
 	config.abi_version = TEDER_ABI_VERSION;

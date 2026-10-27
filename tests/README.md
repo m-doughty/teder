@@ -382,3 +382,16 @@ Run `ctest --test-dir <build> --output-on-failure -R '^output\.(shutdown-|rollba
 for the new cases. CTest terminates an entire hung test process; it never frees
 resources out from under a blocked thread. OS/driver allocations and every
 possible native scheduling interleaving are outside fault-injection coverage.
+
+## Independent snapshot pool
+
+`snapshot.bounds` verifies checked layout, exact-budget admission, allocator and
+native-gate-stage rollback, and one arena allocation. `snapshot.retention` checks
+copied values/spans, repeated loans to one address, loan/slot exhaustion, current
+invalidation and independent ownership after the original pin is removed.
+`snapshot.validation` rejects malformed intervals/spans, nonfinite values and
+capacity/ABI errors without changing current data; counters never wrap.
+`snapshot.concurrent` holds the pool gate to force AGAIN, then retains exact
+values while a publisher replaces current data 4,095 times. `snapshot.final-release`
+races three reader releases against owner removal for 32 rounds, requiring one
+matching arena free per round. These exercise the private pool and public views.

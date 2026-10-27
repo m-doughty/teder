@@ -109,7 +109,8 @@ native tests; a device callback is not implemented yet.
 Private FLAC sources now stream into this handoff; their format, conversion and
 reservation rules and implemented asynchronous open/seek behavior are specified
 in [sources.md](sources.md). Playback and device integration are not implemented yet.
-Snapshot fields are resolved limits; the independent snapshot pool is not implemented yet.
+Snapshot fields are resolved limits. The independent pool is implemented privately;
+engine attachment/acquisition and audio analysis remain planned.
 Public enumeration and probing produce detached device lists and metadata.
 `result_tag` requires distinct key
 and value output pointers. Identical pointers return INVALID without changes.
@@ -520,6 +521,26 @@ end-to-end latency estimate. AUDIBLE_END_ESTIMATED remains clear.
 | CoreAudio | Native timestamps stay inside the backend callback; teder receives frame counts only. |
 | ALSA | Buffer availability supports writes; teder has no delay query. |
 | PulseAudio | Internal buffering does not provide a latency value through the device API. |
+
+### Snapshot storage (implemented foundation)
+
+Snapshot slots, copied bands and complete source spans share one independent
+bounded arena. Each successful acquire owes one release, even when two loans
+have the same address. Immutable views last through their owning loan; copying
+a pointer does not create another loan. Distinct loans may be released on
+different threads. Release can wait briefly for the pool gate and never accesses
+an engine. The original allocator and library code must outlive all loans.
+
+The private publisher validates intervals, contiguous complete spans, finite
+values and configured capacities before changing publication. Pinning all slots
+drops publication and increments a saturating counter. Sequence exhaustion
+returns LIMIT without replacing the current snapshot. Invalidation removes
+current data while retaining prior loans and counters. The last loan after owner
+removal destroys the gate and arena exactly once. No pool operation is audio-safe.
+
+The four snapshot access/release functions link now. Engine acquire/configuration
+and the audio feed are not yet connected, so public playback produces no snapshots.
+This foundation copies supplied values; it does not calculate spectrum or levels.
 
 ### Analysis and rendering (planned)
 
