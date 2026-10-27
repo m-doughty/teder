@@ -161,10 +161,12 @@ add_executable(teder_test_output test_output.c)
 teder_target(teder_test_output)
 target_compile_definitions(teder_test_output PRIVATE TEDER_STATIC "FIXTURE_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/fixtures\"" "OUTPUT_DIR=\"${CMAKE_CURRENT_BINARY_DIR}\"")
 target_link_libraries(teder_test_output PRIVATE teder_lifetime teder_backend teder_device teder_device_callback teder_audio_callback teder_source FLAC teder_test_support Check::check)
-foreach(case snapshot cancellation failures identity closing selection rates select-failures select-cancel playback play-changes play-failures transport-pcm transport-states transport-boundaries stop-rewind seek-states stop-supersession stop-boundaries stop-failures seek-failure clock-progress clock-changes clock-readers next-states gapless-pairs gapless-repeat gapless-cutoff gapless-failures gapless-rates gapless-formats gapless-edges gapless-limits loss-states loss-controls loss-preparing loss-closing loss-commit loss-transition loss-repeated)
+foreach(case snapshot cancellation failures identity closing selection rates select-failures select-cancel playback play-changes play-failures transport-pcm transport-states transport-boundaries stop-rewind seek-states stop-supersession stop-boundaries stop-failures seek-failure clock-progress clock-changes clock-readers next-states gapless-pairs gapless-repeat gapless-cutoff gapless-failures gapless-rates gapless-formats gapless-edges gapless-limits loss-states loss-controls loss-preparing loss-closing loss-commit loss-transition loss-repeated shutdown-states shutdown-borrowers shutdown-startup rollback-composed)
 	add_test(NAME output.${case} COMMAND teder_test_output ${case})
 	set_tests_properties(output.${case} PROPERTIES TIMEOUT 40 LABELS "unit;output;lifetime")
 endforeach()
+
+set_tests_properties(output.rollback-composed PROPERTIES TIMEOUT 120)
 
 add_executable(teder_test_refill test_refill.c)
 teder_target(teder_test_refill)

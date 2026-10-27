@@ -347,3 +347,38 @@ and later publication, with joined workers and unchanged warmed Windows handle c
 and preparing a successor. Its constrained budget leaves just one source preparation
 plus 32 KiB of result space beyond existing owners and probe scratch/codec capacity.
 This verifies worker independence and memory headroom, not OS scheduling deadlines.
+
+## Composed playback shutdown checkpoint
+
+`output.shutdown-states` closes EMPTY without/with output, READY, PLAYING,
+PAUSED, DRAINING, ENDED, FAILED and PAUSED after device loss. Three unacknowledged
+terminal requests saturate capacity while event capacity is one. Exact request
+IDs, outcomes, result kinds and remaining engine bytes survive repeated close.
+Each case retains both an independent device list and metadata result across
+destruction, verifies their fields, then releases the last two tracked arenas.
+
+`output.shutdown-borrowers` combines an adopted successor, a seek held after
+file open, a probe held before read, held native dispatch, two untaken results
+and a queued gain command. All five slots are occupied. Two release orders prove
+that native/source retirement can finish while probe close remains pending, or
+that probe retirement can finish while source preparation remains blocked.
+Destroy returns BUSY at each held boundary; no timeout reclaims borrowed storage.
+Each schedule joins all four engine workers, closes exactly three source files
+and three probe files, and releases the native device/context exactly once.
+
+`output.shutdown-startup` rejects the engine allocation and all eleven startup
+stages, including post-thread publication. It checks exact worker entry/exit
+masks, zero tracked allocations and unchanged warmed Windows handle counts.
+`output.rollback-composed` fails every allocation observed during probe,
+successor replacement, output replacement, seek and STOP rewind. Each operation
+starts with a paused source, ready successor, detached results and an untaken
+probe result. Probe/next/seek failures preserve the old state and reservation;
+all paths close with only their expected untaken result and engine arena left.
+
+These extend the existing cancellation, preparation, refill, native-init/loss,
+PCM-reference and dependency-allocation tests. Native dispatch is synthetic;
+regular FLAC files, codec allocation, public requests and engine teardown are real.
+Run `ctest --test-dir <build> --output-on-failure -R '^output\.(shutdown-|rollback-composed)'`
+for the new cases. CTest terminates an entire hung test process; it never frees
+resources out from under a blocked thread. OS/driver allocations and every
+possible native scheduling interleaving are outside fault-injection coverage.

@@ -25,6 +25,7 @@ enum { LONG_FRAMES = 32769 };
 typedef struct {
 	th_tracker tracker;
 	th_gate gate, render_gate, owner_gate;
+	th_gate prepare_gate, probe_gate;
 	th_thread thread;
 	ma_device *native;
 	atomic_uint stop, hold, captured, step, stepped;
@@ -33,6 +34,9 @@ typedef struct {
 	float capture[LONG_FRAMES * 2];
 	atomic_uint point;
 	atomic_uint park_owner;
+	atomic_uint hold_prepare, hold_probe, worker_entries[4], worker_exits[4];
+	atomic_uint source_opened, source_closed, probe_opened, probe_closed;
+	unsigned fail_stage;
 	unsigned opened, closed, enumerated;
 	bool reject, enum_error, device_error;
 	unsigned devices, releases, starts, stops, rate;
@@ -249,6 +253,27 @@ static void checkpoint(void *p, uint64_t request, unsigned point)
 {
 	(void)request;
 	fixture *f = p;
+	const unsigned starts[] = {TD_PREPARE_STARTED, TD_REFILL_STARTED, TD_PROBE_STARTED};
+	const unsigned stops[] = {TD_PREPARE_STOPPED, TD_REFILL_STOPPED, TD_PROBE_STOPPED};
+	for (unsigned i = 0; i < 3; i++) {
+		if (point == starts[i])
+			atomic_fetch_add(&f->worker_entries[i], 1);
+		if (point == stops[i])
+			atomic_fetch_add(&f->worker_exits[i], 1);
+	}
+	if (point == TD_SOURCE_OPENED) {
+		atomic_fetch_add(&f->source_opened, 1);
+		if (atomic_exchange(&f->hold_prepare, 0))
+			th_gate_hit(&f->prepare_gate);
+	}
+	if (point == TD_SOURCE_CLOSED)
+		atomic_fetch_add(&f->source_closed, 1);
+	if (point == TD_PROBE_OPENED)
+		atomic_fetch_add(&f->probe_opened, 1);
+	if (point == TD_PROBE_CLOSED)
+		atomic_fetch_add(&f->probe_closed, 1);
+	if (point == TD_PROBE_READ && atomic_exchange(&f->hold_probe, 0))
+		th_gate_hit(&f->probe_gate);
 	if (point == TD_DECODE_IDLE && atomic_exchange(&f->park_owner, 0))
 		th_gate_hit(&f->owner_gate);
 	if (point == TD_OUTPUT_BEFORE_COMMIT)
@@ -281,6 +306,20 @@ static void checkpoint(void *p, uint64_t request, unsigned point)
 		hit(p, 17);
 }
 
+static void control_checkpoint(void *p, uint32_t point)
+{
+	fixture *f = p;
+	if (point == TD_STARTED)
+		atomic_fetch_add(&f->worker_entries[3], 1);
+	if (point == TD_STOPPED)
+		atomic_fetch_add(&f->worker_exits[3], 1);
+}
+
+static bool permit_start(void *p, uint32_t stage)
+{
+	return ((fixture *)p)->fail_stage != stage;
+}
+
 static void init(fixture *f)
 {
 	memset(f, 0, sizeof(*f));
@@ -291,8 +330,19 @@ static void init(fixture *f)
 	atomic_init(&f->captured, 0);
 	atomic_init(&f->step, 0);
 	atomic_init(&f->stepped, 0);
+	atomic_init(&f->hold_prepare, 0);
+	atomic_init(&f->hold_probe, 0);
+	atomic_init(&f->source_opened, 0);
+	atomic_init(&f->source_closed, 0);
+	atomic_init(&f->probe_opened, 0);
+	atomic_init(&f->probe_closed, 0);
+	for (unsigned i = 0; i < 4; i++) {
+		atomic_init(&f->worker_entries[i], 0);
+		atomic_init(&f->worker_exits[i], 0);
+	}
 	ck_assert(th_gate_init(&f->render_gate));
 	ck_assert(th_gate_init(&f->owner_gate));
+	ck_assert(th_gate_init(&f->prepare_gate) && th_gate_init(&f->probe_gate));
 	ck_assert(th_tracker_init(&f->tracker) && th_gate_init(&f->gate));
 #ifdef _WIN32
 	f->caller = GetCurrentThreadId();
@@ -303,17 +353,25 @@ static void init(fixture *f)
 
 static void dispose(fixture *f)
 {
+	for (unsigned i = 0; i < 4; i++)
+		ck_assert(atomic_load(&f->worker_entries[i]) == atomic_load(&f->worker_exits[i]));
+	ck_assert(atomic_load(&f->source_opened) == atomic_load(&f->source_closed) &&
+	          atomic_load(&f->probe_opened) == atomic_load(&f->probe_closed));
 	ck_assert(f->opened == f->closed && f->devices == f->releases && !f->worker &&
 	          !f->native_heap && th_tracker_clean(&f->tracker));
 	th_gate_uninit(&f->gate);
 	th_gate_uninit(&f->render_gate);
 	th_gate_uninit(&f->owner_gate);
+	th_gate_uninit(&f->prepare_gate);
+	th_gate_uninit(&f->probe_gate);
 	th_tracker_uninit(&f->tracker);
 }
 
 static teder_engine *create(fixture *f, teder_config config, bool native)
 {
 	td_runtime runtime = {.context = f,
+	                      .permit = permit_start,
+	                      .checkpoint = control_checkpoint,
 	                      .media_checkpoint = checkpoint,
 	                      .backend = {context_init, context_uninit, enumerate, f}};
 	teder_engine *e;
@@ -2744,6 +2802,325 @@ START_TEST(loss_repeated)
 }
 END_TEST
 
+static uint64_t probe_track(teder_engine *e)
+{
+	uint64_t id;
+	teder_code code;
+	RETRY(code, teder_probe(e, TRACK, sizeof(TRACK) - 1, 0, &id));
+	OK(code);
+	return id;
+}
+
+static void verify_retained(teder_result **results)
+{
+	uint32_t count;
+	OK(teder_result_device_count(results[0], &count));
+	ck_assert(count == 2);
+	for (unsigned i = 0; i < 2; i++) {
+		teder_device_info d = entry(results[0], i);
+		ck_assert(d.backend == TEDER_BACKEND_WASAPI && d.is_default == !i &&
+		          d.name.bytes == (i ? 4 : 5) &&
+		          !memcmp(d.name.data, i ? "Beta" : "Alpha", d.name.bytes) && d.key.bytes == 20 &&
+		          d.key.data[16] == 'A' + i);
+	}
+	teder_probe_info info = INIT(teder_probe_info);
+	OK(teder_result_probe(results[1], &info));
+	ck_assert(info.codec == TEDER_CODEC_FLAC && info.sample_rate == 44100 && info.channels == 2 &&
+	          info.bits_per_sample == 16 && info.duration_frames == 16 && info.duration_known &&
+	          info.seekable && info.tag_count == 1 && !info.artwork_count);
+	teder_text key, value;
+	OK(teder_result_tag(results[1], 0, &key, &value));
+	ck_assert(key.bytes == 5 && !memcmp(key.data, "TITLE", 5) && value.bytes == 7 &&
+	          !memcmp(value.data, "track-a", 7));
+}
+
+static void retain_pair(teder_engine *e, teder_result **results)
+{
+	uint64_t id = submit(e);
+	OK(terminal(e, id).outcome);
+	results[0] = take(e, id);
+	id = probe_track(e);
+	OK(terminal(e, id).outcome);
+	results[1] = take(e, id);
+	verify_retained(results);
+}
+
+static void destroy_with_results(fixture *f, teder_engine **e, teder_result **results)
+{
+	for (unsigned i = 0; i < 4; i++)
+		ck_assert(atomic_load(&f->worker_entries[i]) == 1 && atomic_load(&f->worker_exits[i]) == 1);
+	ck_assert(!f->worker && f->devices == f->releases && f->opened == f->closed);
+	OK(teder_destroy(e));
+	ck_assert(!*e && f->tracker.live == 2 &&
+	          f->tracker.bytes == results[0]->bytes + results[1]->bytes);
+	verify_retained(results);
+	for (unsigned i = 0; i < 2; i++)
+		teder_result_release(results[i]);
+	dispose(f);
+}
+
+START_TEST(shutdown_states)
+{
+	const unsigned states[] = {TEDER_EMPTY,
+	                           TEDER_EMPTY,
+	                           TEDER_READY,
+	                           TEDER_PLAYING,
+	                           TEDER_PAUSED,
+	                           TEDER_DRAINING,
+	                           TEDER_ENDED,
+	                           TEDER_FAILED,
+	                           TEDER_PAUSED};
+	for (unsigned mode = 0; mode < sizeof(states) / sizeof(*states); mode++) {
+		fixture f;
+		init(&f);
+		f.manual = true;
+		teder_config config = INIT(teder_config);
+		config.request_capacity = 3;
+		config.event_capacity = 1;
+		config.pcm_frames = mode == 3 ? 4 : 4096;
+		teder_engine *e = create(&f, config, false);
+		size_t base = owned(e);
+		teder_result *results[2];
+		retain_pair(e, results);
+		if (mode)
+			outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
+		if (mode >= 2)
+			load_track(e);
+		if (mode >= 3 && mode != 7) {
+			outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
+			step(&f, mode == 6 ? 16 : 1);
+			clock_at(e, mode == 6 ? 16 : 1);
+		}
+		if (mode == 4) {
+			atomic_store(&f.point, 13);
+			boundary(&f, e, transport(e, TEDER_PAUSE));
+		}
+		if (mode == 7) {
+			park_owner(&f, e);
+			f.tracker.fail_at = f.tracker.attempts + 1;
+			uint64_t id = transport(e, TEDER_STOP);
+			th_gate_release(&f.owner_gate);
+			outcome(e, id, TEDER_NO_MEMORY);
+			ma_mutex_lock(&f.tracker.lock);
+			f.tracker.fail_at = 0;
+			ma_mutex_unlock(&f.tracker.lock);
+		}
+		if (mode == 8) {
+			park_owner(&f, e);
+			teder_target before = status(e).current;
+			lose(&f);
+			th_gate_release(&f.owner_gate);
+			lost_status(e, before, 1);
+		}
+		ck_assert(status(e).transport == states[mode]);
+		uint64_t ids[] = {probe_track(e), submit(e), gain_to(e, 1, 0)};
+		for (unsigned i = 0; i < 3; i++)
+			OK(terminal(e, ids[i]).outcome); /* terminal results deliberately remain untaken */
+		uint64_t rejected = 99;
+		teder_code code;
+		RETRY(code, teder_probe(e, TRACK, sizeof(TRACK) - 1, 0, &rejected));
+		ck_assert(code == TEDER_LIMIT && !rejected);
+		OK(teder_request_close(e));
+		OK(teder_request_close(e));
+		OK(th_close(e));
+		ck_assert(status(e).lifecycle == TEDER_CLOSED_STATE &&
+		          owned(e) == base + results[0]->bytes + results[1]->bytes);
+		for (unsigned i = 0; i < 3; i++) {
+			teder_request_info r = terminal(e, ids[i]);
+			ck_assert(r.request == ids[i] && r.outcome == TEDER_OK &&
+			          r.result_kind == (i == 0   ? TEDER_RESULT_PROBE
+			                            : i == 1 ? TEDER_RESULT_DEVICES
+			                                     : TEDER_RESULT_NONE));
+		}
+		ck_assert(atomic_load(&f.source_opened) == (mode >= 2 ? 1 : 0) &&
+		          atomic_load(&f.source_closed) == (mode >= 2 ? 1 : 0) &&
+		          atomic_load(&f.probe_opened) == 2 && atomic_load(&f.probe_closed) == 2);
+		destroy_with_results(&f, &e, results);
+	}
+}
+END_TEST
+
+START_TEST(shutdown_borrowers)
+{
+	for (unsigned probe_first = 0; probe_first < 2; probe_first++) {
+		fixture f;
+		init(&f);
+		f.manual = true;
+		teder_config config = INIT(teder_config);
+		config.request_capacity = 5;
+		config.pcm_frames = 4096;
+		teder_engine *e = create(&f, config, false);
+		teder_result *results[2];
+		retain_pair(e, results);
+		outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
+		load_track(e);
+		gap_prepare(e, TRACK);
+		atomic_store(&f.hold, 1);
+		outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
+		th_gate_await(&f.render_gate);
+		ck_assert(status(e).next_state == TEDER_NEXT_COMMITTED);
+		uint64_t ids[5] = {probe_track(e), submit(e), 0, 0, 0};
+		OK(terminal(e, ids[0]).outcome);
+		OK(terminal(e, ids[1]).outcome);
+		atomic_store(&f.hold_prepare, 1);
+		ids[2] = seek_frame(e, 7);
+		th_gate_await(&f.prepare_gate);
+		atomic_store(&f.hold_probe, 1);
+		ids[3] = probe_track(e);
+		th_gate_await(&f.probe_gate);
+		park_owner(&f, e);
+		ids[4] = gain_to(e, 0.25f, 1);
+		size_t remaining = owned(e) - e->backend_reservation - e->device_reservation;
+		for (unsigned i = 0; i < TD_SOURCE_JOBS; i++)
+			remaining -= e->sources[i].reservation;
+		uint64_t rejected = 99;
+		ck_assert(teder_probe(e, TRACK, sizeof(TRACK) - 1, 0, &rejected) == TEDER_LIMIT &&
+		          !rejected);
+		OK(teder_request_close(e));
+		th_gate_release(&f.owner_gate);
+		for (unsigned i = 0; i < 64; i++) {
+			ck_assert(status(e).lifecycle == TEDER_CLOSING && teder_destroy(&e) == TEDER_BUSY);
+			verify_retained(results);
+		}
+		ck_assert(!atomic_load(&f.worker_exits[0]) && !atomic_load(&f.worker_exits[2]));
+		if (probe_first) {
+			th_gate_release(&f.probe_gate);
+			while (!atomic_load(&f.worker_exits[2]))
+				th_yield();
+			ck_assert(terminal(e, ids[3]).outcome == TEDER_CANCELLED && !f.releases);
+		}
+		th_gate_release(&f.prepare_gate);
+		while (!atomic_load(&f.stop))
+			th_yield(); /* native stop now joins the still-held callback dispatcher */
+		ck_assert(atomic_load(&f.worker_exits[0]) == 1 && atomic_load(&f.worker_exits[1]) == 1 &&
+		          !f.releases && teder_destroy(&e) == TEDER_BUSY);
+		th_gate_release(&f.render_gate);
+		if (!probe_first) {
+			while (owned(e) != remaining)
+				th_yield(); /* source retirement releases its reservation after actual frees */
+			ck_assert(f.releases == 1 && f.closed == 1 && !f.worker &&
+			          atomic_load(&f.source_closed) == 3 && !atomic_load(&f.worker_exits[2]) &&
+			          teder_destroy(&e) == TEDER_BUSY);
+			th_gate_release(&f.probe_gate);
+		}
+		OK(th_close(e));
+		for (unsigned i = 0; i < 5; i++) {
+			teder_request_info r = terminal(e, ids[i]);
+			ck_assert(r.request == ids[i] && r.outcome == (i < 2 ? TEDER_OK : TEDER_CANCELLED));
+		}
+		ck_assert(atomic_load(&f.source_opened) == 3 && atomic_load(&f.source_closed) == 3 &&
+		          atomic_load(&f.probe_opened) == 3 && atomic_load(&f.probe_closed) == 3);
+		destroy_with_results(&f, &e, results);
+	}
+}
+END_TEST
+
+START_TEST(shutdown_startup)
+{
+	fixture warm;
+	init(&warm);
+	teder_config config = INIT(teder_config);
+	teder_engine *e = create(&warm, config, false);
+	close_engine(&e);
+	dispose(&warm);
+#ifdef _WIN32
+	DWORD before, after;
+	ck_assert(GetProcessHandleCount(GetCurrentProcess(), &before));
+#endif
+	/* Bits name preparation/refill/probe/control entries in actual startup order. */
+	const unsigned expected[] = {0, 0, 0, 7, 15, 0, 0, 0, 0, 1, 0, 3};
+	for (unsigned stage = 0; stage <= TD_INIT_PROBE_THREAD; stage++) {
+		fixture f;
+		init(&f);
+		f.fail_stage = stage;
+		f.tracker.fail_at = stage ? 0 : 1;
+		td_runtime runtime = {.context = &f,
+		                      .permit = permit_start,
+		                      .checkpoint = control_checkpoint,
+		                      .media_checkpoint = checkpoint};
+		ck_assert(td_engine_create_with(&config, th_allocator(&f.tracker), runtime, &e) ==
+		          (stage ? TEDER_INTERNAL : TEDER_NO_MEMORY));
+		ck_assert(!e && f.tracker.attempts == 1);
+		for (unsigned i = 0; i < 4; i++)
+			ck_assert(atomic_load(&f.worker_entries[i]) == ((expected[stage] >> i) & 1) &&
+			          atomic_load(&f.worker_exits[i]) == ((expected[stage] >> i) & 1));
+		dispose(&f);
+	}
+#ifdef _WIN32
+	ck_assert(GetProcessHandleCount(GetCurrentProcess(), &after) && before == after);
+#endif
+}
+END_TEST
+
+START_TEST(rollback_composed)
+{
+	for (unsigned operation = 0; operation < 5; operation++) {
+		size_t count = 0;
+		for (size_t fail = 0; fail <= count; fail++) {
+			fixture f;
+			init(&f);
+			f.manual = true;
+			teder_config config = INIT(teder_config);
+			config.pcm_frames = 4096;
+			teder_engine *e = create(&f, config, false);
+			size_t base = owned(e);
+			teder_result *results[2];
+			retain_pair(e, results);
+			outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
+			load_track(e);
+			outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
+			step(&f, 1);
+			clock_at(e, 1);
+			atomic_store(&f.point, 13);
+			boundary(&f, e, transport(e, TEDER_PAUSE));
+			gap_prepare(e, TRACK);
+			uint64_t retained = probe_track(e);
+			OK(terminal(e, retained).outcome); /* an untaken result also spans rollback */
+			park_owner(&f, e);
+			size_t baseline = owned(e), attempts = f.tracker.attempts;
+			f.tracker.fail_at = fail ? attempts + fail : 0;
+			uint64_t id;
+			if (operation == 0)
+				id = probe_track(e);
+			else if (operation == 1) {
+				teder_status s = status(e);
+				teder_code code;
+				RETRY(code,
+				      teder_prepare_next(
+				          e, &s.current, s.next_source, TRACK, sizeof(TRACK) - 1, 88, &id));
+				OK(code);
+			} else if (operation == 2)
+				id = select_device(e, entry(results[0], 1).key);
+			else if (operation == 3)
+				id = seek_frame(e, 9);
+			else
+				id = transport(e, TEDER_STOP);
+			th_gate_release(&f.owner_gate);
+			outcome(e, id, fail ? TEDER_NO_MEMORY : TEDER_OK);
+			ma_mutex_lock(&f.tracker.lock);
+			if (!fail)
+				count = f.tracker.attempts - attempts;
+			else
+				ck_assert(f.tracker.failed_site != NULL);
+			f.tracker.fail_at = 0;
+			ma_mutex_unlock(&f.tracker.lock);
+			if (fail && (operation == 0 || operation == 1 || operation == 3)) {
+				teder_status s = status(e);
+				ck_assert(owned(e) == baseline && s.transport == TEDER_PAUSED &&
+				          s.source_frame == 1 && s.next_state == TEDER_NEXT_READY &&
+				          s.next_source == 2);
+			}
+			OK(th_close(e));
+			ck_assert(owned(e) == base + results[1]->bytes &&
+			          terminal(e, retained).outcome == TEDER_OK);
+			destroy_with_results(&f, &e, results);
+		}
+		ck_assert(count > 0);
+		printf("composed operation=%u allocation failures 1..%zu unwind\n", operation, count);
+	}
+}
+END_TEST
+
 int main(int argc, char **argv)
 {
 	if (argc != 2)
@@ -2829,6 +3206,14 @@ int main(int argc, char **argv)
 		test = loss_transition;
 	else if (!strcmp(argv[1], "loss-repeated"))
 		test = loss_repeated;
+	else if (!strcmp(argv[1], "shutdown-states"))
+		test = shutdown_states;
+	else if (!strcmp(argv[1], "shutdown-borrowers"))
+		test = shutdown_borrowers;
+	else if (!strcmp(argv[1], "shutdown-startup"))
+		test = shutdown_startup;
+	else if (!strcmp(argv[1], "rollback-composed"))
+		test = rollback_composed;
 	else if (!strcmp(argv[1], "native-select"))
 		test = native_select;
 	else if (!strcmp(argv[1], "native"))
