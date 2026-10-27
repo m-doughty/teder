@@ -115,7 +115,8 @@ static void control(teder_engine *e)
 		uint32_t slot = e->config.request_capacity;
 		for (uint32_t i = 0; i < e->config.request_capacity; i++)
 			if (e->requests[i].info.state == TEDER_QUEUED &&
-			    (e->runtime.execute || e->requests[i].info.operation != TEDER_OP_PROBE) &&
+			    (e->runtime.execute || (e->requests[i].info.operation != TEDER_OP_PROBE &&
+			                            e->requests[i].info.operation != TEDER_OP_ANALYSIS)) &&
 			    (slot == e->config.request_capacity ||
 			     e->requests[i].info.request < e->requests[slot].info.request))
 				slot = i;
@@ -168,6 +169,7 @@ static void control(teder_engine *e)
 	 * A blocked native read keeps close pending; no timeout permits detachment. */
 	td_prepare_signal(e);
 	td_probe_signal(e);
+	td_analysis_signal(e);
 	join(e->prepare_thread);
 	td_refill_stop(e);
 	join(e->refill_thread);
@@ -177,6 +179,7 @@ static void control(teder_engine *e)
 	td_pcm_clear(&e->pcm);
 	td_sources_close(e);
 	join(e->probe_thread);
+	join(e->analysis_thread);
 	td_snapshot_clear(e->snapshots); /* no publisher survives close; loans remain valid */
 	td_lock(e);
 	for (uint32_t i = 0; i < e->config.request_capacity; i++)
@@ -205,6 +208,12 @@ static unsigned __stdcall refill_entry(void *p)
 	return 0;
 }
 
+static unsigned __stdcall analysis_entry(void *p)
+{
+	td_analysis_run(p);
+	return 0;
+}
+
 static unsigned __stdcall probe_entry(void *p)
 {
 	td_probe_run(p);
@@ -226,6 +235,12 @@ static void *prepare_entry(void *p)
 static void *refill_entry(void *p)
 {
 	td_refill_run(p);
+	return NULL;
+}
+
+static void *analysis_entry(void *p)
+{
+	td_analysis_run(p);
 	return NULL;
 }
 
@@ -260,17 +275,19 @@ teder_code td_control_start(teder_engine *e)
 		goto refill_wake_failed;
 	if (!permit(e, TD_INIT_PROBE_WAKE) || ma_event_init(&e->probe_wake) != MA_SUCCESS)
 		goto refill_idle_failed;
+	if (!permit(e, TD_INIT_ANALYSIS_WAKE) || ma_event_init(&e->analysis_wake) != MA_SUCCESS)
+		goto probe_wake_failed;
 	atomic_init(&e->refill_enabled, 0);
 	atomic_init(&e->refill_stop, 0);
 	if (!permit(e, TD_INIT_PREPARE_THREAD))
-		goto probe_wake_failed;
+		goto analysis_wake_failed;
 #ifdef _WIN32
 	e->prepare_thread = (HANDLE)_beginthreadex(NULL, 0, prepare_entry, e, 0, NULL);
 	if (!e->prepare_thread)
-		goto probe_wake_failed;
+		goto analysis_wake_failed;
 #else
 	if (pthread_create(&e->prepare_thread, NULL, prepare_entry, e))
-		goto probe_wake_failed;
+		goto analysis_wake_failed;
 #endif
 	if (!permit(e, TD_INIT_REFILL_THREAD))
 		goto refill_thread_failed;
@@ -292,6 +309,16 @@ teder_code td_control_start(teder_engine *e)
 	if (pthread_create(&e->probe_thread, NULL, probe_entry, e))
 		goto probe_thread_failed;
 #endif
+	if (!permit(e, TD_INIT_ANALYSIS_THREAD))
+		goto analysis_thread_failed;
+#ifdef _WIN32
+	e->analysis_thread = (HANDLE)_beginthreadex(NULL, 0, analysis_entry, e, 0, NULL);
+	if (!e->analysis_thread)
+		goto analysis_thread_failed;
+#else
+	if (pthread_create(&e->analysis_thread, NULL, analysis_entry, e))
+		goto analysis_thread_failed;
+#endif
 	if (!permit(e, TD_INIT_THREAD))
 		goto thread_failed;
 #ifdef _WIN32
@@ -306,8 +333,12 @@ teder_code td_control_start(teder_engine *e)
 		return TEDER_OK;
 	teder_request_close(e);
 	td_control_join(e);
-	goto probe_wake_failed;
+	goto analysis_wake_failed;
 thread_failed:
+	atomic_store(&e->lifecycle, TEDER_CLOSING);
+	td_analysis_signal(e);
+	join(e->analysis_thread);
+analysis_thread_failed:
 	atomic_store(&e->lifecycle, TEDER_CLOSING);
 	td_probe_signal(e);
 	join(e->probe_thread);
@@ -319,6 +350,8 @@ refill_thread_failed:
 	atomic_store(&e->lifecycle, TEDER_CLOSING);
 	td_prepare_signal(e);
 	join(e->prepare_thread);
+analysis_wake_failed:
+	ma_event_uninit(&e->analysis_wake);
 probe_wake_failed:
 	ma_event_uninit(&e->probe_wake);
 refill_idle_failed:
@@ -344,6 +377,7 @@ void td_control_join(teder_engine *e)
 
 void td_control_dispose(teder_engine *e)
 {
+	ma_event_uninit(&e->analysis_wake);
 	ma_event_uninit(&e->probe_wake);
 	ma_event_uninit(&e->refill_idle);
 	ma_event_uninit(&e->refill_wake);

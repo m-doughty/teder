@@ -102,7 +102,9 @@ enum {
 	TD_INIT_REFILL_THREAD,
 	TD_INIT_PROBE_WAKE,
 	TD_INIT_PROBE_THREAD,
-	TD_INIT_SNAPSHOT_GATE
+	TD_INIT_SNAPSHOT_GATE,
+	TD_INIT_ANALYSIS_WAKE,
+	TD_INIT_ANALYSIS_THREAD
 };
 
 enum { TD_STARTED = 1, TD_STOPPED };
@@ -134,7 +136,13 @@ enum {
 	TD_PROBE_READ,
 	TD_PROBE_CLOSED,
 	TD_PROBE_BEFORE_COMMIT,
-	TD_PROBE_AFTER_COMMIT
+	TD_PROBE_AFTER_COMMIT,
+	TD_ANALYSIS_STARTED,
+	TD_ANALYSIS_STOPPED,
+	TD_ANALYSIS_BEFORE_COMMIT,
+	TD_ANALYSIS_AFTER_COMMIT,
+	TD_ANALYSIS_BLOCK,
+	TD_ANALYSIS_BEFORE_PUBLISH
 };
 
 typedef struct {
@@ -190,14 +198,15 @@ struct teder_engine {
 	ma_event wake;
 	ma_event prepare_wake;
 	ma_event refill_wake, refill_idle;
-	ma_event probe_wake;
+	ma_event probe_wake, analysis_wake;
+	uint64_t analysis_version, analysis_discarded; /* gate protected */
 	atomic_uint refill_enabled, refill_stop;
 	atomic_uint probe_cancel;
 	uint64_t probe_request; /* gate protected; worker borrows its RUNNING slot */
 	td_thread thread;
 	td_thread prepare_thread;
 	td_thread refill_thread;
-	td_thread probe_thread;
+	td_thread probe_thread, analysis_thread;
 	td_source_job sources[TD_SOURCE_JOBS];
 	uint64_t last_source;
 	bool prefill;        /* exclusive producer: PLAY may commit a ready successor */
@@ -239,6 +248,11 @@ void td_prepare_run(teder_engine *);
  * the last pump/reap before control touches source or producer-owned state. */
 void td_refill_run(teder_engine *);
 void td_worker_interval(void);
+void td_worker_sleep(unsigned milliseconds);
+void td_analysis_run(teder_engine *);
+void td_analysis_signal(teder_engine *);
+void td_analysis_invalidate(teder_engine *);  /* gate held */
+uint64_t td_analysis_dropped(teder_engine *); /* gate held */
 void td_refill_pause(teder_engine *);
 void td_refill_stop(teder_engine *); /* pause, request exit, then caller joins */
 void td_refill_resume(teder_engine *);

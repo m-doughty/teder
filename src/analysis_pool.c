@@ -228,6 +228,15 @@ teder_code td_snapshot_acquire(td_snapshot_pool *p, teder_snapshot **out)
 	return code;
 }
 
+void td_snapshot_drop(td_snapshot_pool *p)
+{
+	lock(p, false);
+	assert(p->owned);
+	if (p->dropped != UINT64_MAX)
+		p->dropped++;
+	unlock(p);
+}
+
 void td_snapshot_clear(td_snapshot_pool *p)
 {
 	lock(p, false);

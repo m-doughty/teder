@@ -3,7 +3,7 @@
 A C17 playback and analysis library, with a separate notcurses
 renderer. Version 0.1.0 plays local FLAC, with play/pause/stop,
 seeking, gapless playback across source-format changes, submitted clocks and
-software gain/mute. Analysis and rendering remain in progress.
+software gain/mute and peak/RMS meters. Spectrum and rendering remain in progress.
 
 Implemented exports:
 
@@ -18,14 +18,15 @@ Implemented exports:
 - `teder_result_kind`, `teder_result_probe`, `teder_result_tag`,
   `teder_result_artwork`, `teder_result_device_count`, `teder_result_device`,
   and `teder_result_release`.
-- `teder_snapshot_get_info`, `teder_snapshot_bands`, `teder_snapshot_spans`,
-  and `teder_snapshot_release`; the independent pool is tested internally.
-  Engine snapshot acquisition and audio analysis are not implemented yet.
+- `teder_configure_analysis`, `teder_snapshot_acquire`, `teder_snapshot_get_info`,
+  `teder_snapshot_bands`, `teder_snapshot_spans`, and `teder_snapshot_release`.
+  Meters-only snapshots contain linear peak/RMS and complete source spans.
 
 The engine budgets a disabled post-gain feed in its arena and an independent
 snapshot pool. Native output borrows the stable feed until device retirement.
 The pool pin lasts until destroy; held loans retain only that pool afterward.
-Analysis configuration, public acquisition and the consumer worker are not implemented yet.
+A dedicated worker handles transactional configuration and bounded publication.
+See [analysis configuration](docs/api-contract.md#analysis-configuration-implemented-meters).
 
 Build queries still report zero capabilities/backend mask. FLAC open and seek
 prepare sources asynchronously and stream bounded PCM. AUTOPLAY starts the selected
@@ -87,7 +88,7 @@ budget. The source owns one arena for its wrapper, path, frame scratch and conve
 Tests cover decoding, staged seeking, conversion, cancellation and resource retirement.
 See the [source contract](docs/sources.md) for public usage and memory reservations.
 
-Creation starts control/lifecycle, preparation, refill and probe workers at LIVE/EMPTY
+Creation starts control/lifecycle, preparation, refill, probe and analysis workers at LIVE/EMPTY
 with gain 1, no source and no output device. Refill can continue during blocked
 native enumeration. Source replacement waits for its producer borrow to end. Accepted requests retain their completion slots until
 acknowledgement. Telemetry has a separate, lossy event ring. Close stops admission

@@ -109,8 +109,8 @@ Private FLAC sources now stream into this handoff; their format, conversion and
 reservation rules and implemented asynchronous open/seek behavior are specified
 in [sources.md](sources.md). Snapshot limits size an independent pool at creation,
 even while analysis is disabled. Both arenas, including their overhead, must fit
-the engine limit before either allocation. Public acquisition and analysis remain
-planned; engine creation and close/destroy already own the pool lifetime.
+the engine limit before either allocation. Enabled meter configuration adds one
+worker-owned arena containing its accumulator and bounded source spans.
 Public enumeration and probing produce detached device lists and metadata.
 `result_tag` requires distinct key
 and value output pointers. Identical pointers return INVALID without changes.
@@ -543,9 +543,9 @@ failure releases it. Close invalidates current data after native users retire;
 destroy drops the engine pin. The pool remains charged until destroy even with
 held loans. Outstanding loans then retain only its arena, with no engine pointer.
 
-The four snapshot access/release functions link now. Engine acquire/configuration
-and the consumer worker are not implemented yet, so public playback produces no snapshots.
-This foundation copies supplied values; it does not calculate spectrum or levels.
+Public acquire and all four access/release functions link. Acquire takes no
+allocation and never waits for a gate: contention returns AGAIN. Publication and
+invalidation share the engine gate, so obsolete work cannot restore current data.
 
 ### Audio analysis feed (implemented foundation)
 
@@ -572,32 +572,54 @@ one empty ring cell, holding at most 16384 stereo frames. Track boundaries can
 use extra records. Device selection joins the old producer before attaching the
 same stable feed to the new stopped device. Close joins native users; destroy
 releases the containing arena. Queued records are never reset during replacement.
-Configuration, public drop status and the consumer worker remain planned; public
-playback leaves this tap disabled. No spectrum or level calculation runs on
-the callback.
+The analysis worker consumes enabled configurations; it sleeps while disabled
+and polls at 5 ms intervals when enabled without queued data. The callback never
+wakes it. No spectrum or level calculation runs on the callback.
 
-### Analysis and rendering (planned)
+### Analysis configuration (implemented meters)
 
-Analysis taps post-software-gain, pre-device-mixer stereo PCM. Enable/configure
-is asynchronous and transactional; failure preserves the previous configuration.
-Successful reconfiguration invalidates the current publication and increments
-its revision. Bands/window/hop/ranges must fit engine limits and the supported
-DSP configuration; no hidden clamping. The DSP specification defines finite defaults,
-window, power aggregation, dB normalization and timing-dependent smoothing.
-Peak/RMS are linear amplitude; bands are dB relative to that documented reference.
-Only one analysis reconfiguration may be pending (otherwise BUSY); current and
-staged configuration regions both count against the engine's memory budget.
+`teder_configure_analysis` copies a prefixed configuration into a retained request.
+Only one may be pending (otherwise BUSY). Enable, reconfigure and disable commit
+transactionally on the analysis worker; cancellation or failure preserves the old
+configuration, partial window and publication. Old and candidate arenas both count
+against the engine budget until cleanup. Each success advances a nonwrapping
+revision and clears current data. Revision exhaustion returns LIMIT unchanged.
 
-Snapshot acquisition is allocation-free and bounded by `snapshot_loans`.
-Snapshots belong to a separate stable pool; pinning every writable slot drops
-new publication, never overwrites a reader. Disabled/no-current analysis returns
-AGAIN. Each frame contains one epoch and a contiguous output interval, with
-ordered, complete source spans (source/track zero denotes inserted silence).
-If the bounded span budget cannot describe it accurately, drop that publication.
-No FFT window crosses a seek/restart epoch. Dropped samples/publications have
-counters; previously acquired snapshots remain immutable through reconfigure,
-disable, close and destroy. Paused/no-new-data does not manufacture fresh frames;
-the host decides when to display no-data instead of its retained snapshot.
+Set `enabled=1`, `bands=0` for meters; `enabled=0` disables. `window_frames=0`
+selects 2048; explicit sizes 1–65536 are supported. `hop_frames=0` uses that window
+size. Only equal window/hop sizes are supported now. All frequency, floor,
+smoothing and decay fields must be zero. Nonfinite floats, invalid enable/reserved
+values return INVALID. Oversized window/band limits return LIMIT; spectrum,
+overlap and nonzero DSP options return UNSUPPORTED, including on disable.
+
+Complete, nonoverlapping rectangular windows produce independent stereo peak
+(maximum absolute sample) and RMS (square root of mean squared samples), in
+linear amplitude. Accumulation uses double precision. Bands have count zero and
+NULL data. No partial final window is published. Each snapshot covers one epoch,
+revision, sample rate and contiguous output interval, with complete ordered source
+spans. Adjacent equal identities merge; source/track zero denotes inserted silence.
+Mute preserves source identity. Pause/final padding creates no new analysis data.
+
+Acquire is bounded by `snapshot_loans`. Disabled/no-current data returns AGAIN;
+closing returns CLOSED; exhausted loan capacity returns LIMIT. A held snapshot
+stays immutable through publication, pause, seek, disable, close and destroy.
+Epoch/revision mismatches are discarded. Discontinuities reset partial windows;
+a window never combines samples across a gap, pause, rate change or new epoch.
+
+Status exposes cumulative sequence, dropped-frame and dropped-publication counters.
+Callback overflow counts the complete rejected interval immediately. Incomplete
+windows abandoned at a same-epoch/revision discontinuity count their frames.
+Nonfinite samples or excessive spans discard the entire window, counting its
+frames and one publication. All-pinned slots count one dropped publication only.
+Intentional epoch/configuration invalidation is not counted as pressure loss.
+Counters saturate; successful publication sequence exhaustion closes with LIMIT.
+Snapshots copy counters at publication; failed publication leaves current data
+and existing loans unchanged. The host chooses when retained data becomes stale.
+
+### Spectrum and rendering (planned)
+
+FFT bands, overlapping windows, logarithmic aggregation, dB normalization,
+smoothing and decay remain future work. Full analysis capability stays clear.
 
 The renderer owns no analysis history; decay belongs to analysis time, not UI
 paint frequency. Draw borrows the snapshot and plane only until return, clips
@@ -625,7 +647,8 @@ The wake event and bookkeeping gate stay alive until exclusive final destroy,
 so permitted reads and repeated close never race their teardown. The control/decode
 worker owns lifecycle and joins preparation and refill before consumer/pool/source
 reclamation. Producer handoff requires the refill worker's idle acknowledgement;
-a request to pause is insufficient. Future analysis workers join that shutdown order.
+a request to pause is insufficient. Probe and analysis workers also join before
+current snapshot data is cleared and CLOSED is published.
 
 There is no blocking wait/join API for the UI. An uninterruptible read leaves
 close pending; a timeout never licenses detaching a worker or freeing storage.

@@ -26,7 +26,8 @@ static teder_code submit(teder_engine *e,
 		return TEDER_LIMIT;
 	if (atomic_load(&e->lifecycle) != TEDER_LIVE)
 		return TEDER_CLOSED;
-	if (!e->runtime.execute && !media && operation != TEDER_OP_DEVICES)
+	if (!e->runtime.execute && !media && operation != TEDER_OP_DEVICES &&
+	    operation != TEDER_OP_ANALYSIS)
 		return TEDER_UNSUPPORTED;
 	if (!td_try_lock(e))
 		return TEDER_BUSY;
@@ -34,6 +35,14 @@ static teder_code submit(teder_engine *e,
 		code = TEDER_CLOSED;
 		goto done;
 	}
+	if (operation == TEDER_OP_ANALYSIS)
+		for (uint32_t i = 0; i < e->config.request_capacity; i++)
+			if (e->requests[i].info.operation == TEDER_OP_ANALYSIS &&
+			    (e->requests[i].info.state == TEDER_QUEUED ||
+			     e->requests[i].info.state == TEDER_RUNNING)) {
+				code = TEDER_BUSY;
+				goto done;
+			}
 	bool mutation = media && operation != TEDER_OP_TRANSPORT && operation != TEDER_OP_GAIN &&
 	                operation != TEDER_OP_PROBE;
 	if (media && operation == TEDER_OP_TRANSPORT &&
@@ -107,6 +116,8 @@ done:
 	if (code == TEDER_OK) {
 		if (operation == TEDER_OP_PROBE && !e->runtime.execute)
 			td_probe_signal(e);
+		else if (operation == TEDER_OP_ANALYSIS && !e->runtime.execute)
+			td_analysis_signal(e);
 		else
 			td_signal(e);
 	}

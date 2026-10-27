@@ -66,8 +66,10 @@ void td_stop(teder_engine *e, uint32_t slot)
 		code = td_output_quiesce(e);
 	td_lock(e);
 	/* Failed native stop already uninitialized and invalidated the stream. */
-	if (loaded && code == TEDER_OK)
+	if (loaded && code == TEDER_OK) {
 		e->status.current.epoch++;
+		td_analysis_invalidate(e);
+	}
 	if (loaded && code == TEDER_OK) {
 		e->status.transport = TEDER_READY;
 		e->status.source_frame = e->status.output_frame = 0;

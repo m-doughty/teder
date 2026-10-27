@@ -136,6 +136,7 @@ teder_code TEDER_CALL teder_get_status(teder_engine *engine, teder_status *out)
 		return TEDER_AGAIN;
 	memcpy(out, &engine->status, sizeof(*out));
 	out->lifecycle = atomic_load(&engine->lifecycle);
+	out->analysis_dropped_frames = td_analysis_dropped(engine);
 	td_unlock(engine);
 	return code;
 }

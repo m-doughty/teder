@@ -98,6 +98,27 @@ int main(int argc, char **argv)
 		return 13;
 	uint64_t id;
 	teder_code code;
+	teder_analysis_config analysis = {
+	    .struct_size = sizeof(analysis), .abi_version = TEDER_ABI_VERSION, .enabled = 1};
+	for (unsigned enabled = 1;; enabled = 0) {
+		analysis.enabled = enabled;
+		do {
+			code = teder_configure_analysis(engine, &analysis, &id);
+		} while (code == TEDER_BUSY);
+		teder_request_info configured = {.struct_size = sizeof(configured),
+		                                 .abi_version = TEDER_ABI_VERSION};
+		if (code != TEDER_OK || completed(engine, id, &configured) != TEDER_OK ||
+		    configured.operation != TEDER_OP_ANALYSIS)
+			return 30;
+		do {
+			code = teder_request_ack(engine, id);
+		} while (code == TEDER_BUSY);
+		teder_snapshot *loan = NULL;
+		if (code != TEDER_OK || teder_snapshot_acquire(engine, &loan) != TEDER_AGAIN || loan)
+			return 31;
+		if (!enabled)
+			break;
+	}
 	do {
 		code = teder_open(engine, argv[1], (uint32_t)strlen(argv[1]), 42, 0, &id);
 		if (code == TEDER_BUSY)

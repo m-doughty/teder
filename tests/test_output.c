@@ -46,7 +46,7 @@ typedef struct {
 	float capture[LONG_FRAMES * 2];
 	atomic_uint point;
 	atomic_uint park_owner;
-	atomic_uint hold_prepare, hold_probe, worker_entries[4], worker_exits[4];
+	atomic_uint hold_prepare, hold_probe, worker_entries[5], worker_exits[5];
 	atomic_uint source_opened, source_closed, probe_opened, probe_closed;
 	unsigned fail_stage;
 	unsigned opened, closed, enumerated;
@@ -274,6 +274,10 @@ static void checkpoint(void *p, uint64_t request, unsigned point)
 		if (point == stops[i])
 			atomic_fetch_add(&f->worker_exits[i], 1);
 	}
+	if (point == TD_ANALYSIS_STARTED)
+		atomic_fetch_add(&f->worker_entries[4], 1);
+	if (point == TD_ANALYSIS_STOPPED)
+		atomic_fetch_add(&f->worker_exits[4], 1);
 	if (point == TD_SOURCE_OPENED) {
 		atomic_fetch_add(&f->source_opened, 1);
 		if (atomic_exchange(&f->hold_prepare, 0))
@@ -349,7 +353,7 @@ static void init(fixture *f)
 	atomic_init(&f->source_closed, 0);
 	atomic_init(&f->probe_opened, 0);
 	atomic_init(&f->probe_closed, 0);
-	for (unsigned i = 0; i < 4; i++) {
+	for (unsigned i = 0; i < 5; i++) {
 		atomic_init(&f->worker_entries[i], 0);
 		atomic_init(&f->worker_exits[i], 0);
 	}
@@ -366,7 +370,7 @@ static void init(fixture *f)
 
 static void dispose(fixture *f)
 {
-	for (unsigned i = 0; i < 4; i++)
+	for (unsigned i = 0; i < 5; i++)
 		ck_assert(atomic_load(&f->worker_entries[i]) == atomic_load(&f->worker_exits[i]));
 	ck_assert(atomic_load(&f->source_opened) == atomic_load(&f->source_closed) &&
 	          atomic_load(&f->probe_opened) == atomic_load(&f->probe_closed));
@@ -2867,7 +2871,7 @@ static void retain_pair(teder_engine *e, teder_result **results)
 
 static void destroy_with_results(fixture *f, teder_engine **e, teder_result **results)
 {
-	for (unsigned i = 0; i < 4; i++)
+	for (unsigned i = 0; i < 5; i++)
 		ck_assert(atomic_load(&f->worker_entries[i]) == 1 && atomic_load(&f->worker_exits[i]) == 1);
 	ck_assert(!f->worker && f->devices == f->releases && f->opened == f->closed);
 	OK(teder_destroy(e));
@@ -3035,6 +3039,64 @@ START_TEST(shutdown_borrowers)
 }
 END_TEST
 
+static teder_snapshot *analysis_current(teder_engine *e)
+{
+	while (atomic_load_explicit(&e->analysis.read, memory_order_acquire) !=
+	       atomic_load_explicit(&e->analysis.write, memory_order_acquire))
+		th_yield();
+	teder_snapshot *s;
+	teder_code code;
+	do {
+		code = teder_snapshot_acquire(e, &s);
+	} while (code == TEDER_AGAIN);
+	OK(code);
+	return s;
+}
+
+START_TEST(analysis_playback)
+{
+	fixture f;
+	init(&f);
+	f.manual = true;
+	teder_config config = INIT(teder_config);
+	teder_engine *e = create(&f, config, false);
+	outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
+	load_track(e);
+	outcome(e, gain_to(e, .5f, 0), TEDER_OK);
+	teder_analysis_config c = INIT(teder_analysis_config);
+	c.enabled = c.window_frames = 1;
+	uint64_t id;
+	teder_code code;
+	RETRY(code, teder_configure_analysis(e, &c, &id));
+	OK(code);
+	outcome(e, id, TEDER_OK);
+	outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
+	step(&f, 1);
+	teder_snapshot *a = analysis_current(e);
+	teder_snapshot_info saved = INIT(teder_snapshot_info), got = INIT(teder_snapshot_info);
+	OK(teder_snapshot_get_info(a, &saved));
+	ck_assert(saved.epoch == 3 && saved.output_start == 0 && saved.frames == 1 &&
+	          saved.peak[0] == 4000 / 32768.0f && saved.rms[1] == saved.peak[0]);
+	atomic_store(&f.point, 13);
+	boundary(&f, e, transport(e, TEDER_PAUSE));
+	step(&f, 5);
+	teder_snapshot *b = analysis_current(e);
+	OK(teder_snapshot_get_info(b, &got));
+	ck_assert(got.sequence == saved.sequence); /* pause acknowledgement consumes no PCM */
+	teder_snapshot_release(b);
+	outcome(e, seek_frame(e, 7), TEDER_OK);
+	b = NULL;
+	ck_assert(teder_snapshot_acquire(e, &b) == TEDER_AGAIN && !b);
+	outcome(e, transport(e, TEDER_STOP), TEDER_OK);
+	ck_assert(teder_snapshot_acquire(e, &b) == TEDER_AGAIN && !b);
+	close_engine(&e);
+	OK(teder_snapshot_get_info(a, &got));
+	ck_assert(!memcmp(&saved, &got, sizeof(got)));
+	teder_snapshot_release(a);
+	dispose(&f);
+}
+END_TEST
+
 START_TEST(analysis_owners)
 {
 	fixture f;
@@ -3106,9 +3168,9 @@ START_TEST(shutdown_startup)
 	DWORD before, after;
 	ck_assert(GetProcessHandleCount(GetCurrentProcess(), &before));
 #endif
-	/* Bits name preparation/refill/probe/control entries in actual startup order. */
-	const unsigned expected[] = {0, 0, 0, 7, 15, 0, 0, 0, 0, 1, 0, 3, 0};
-	for (unsigned stage = 0; stage <= TD_INIT_SNAPSHOT_GATE; stage++) {
+	/* Bits name preparation/refill/probe/control/analysis worker entries. */
+	const unsigned expected[] = {0, 0, 0, 23, 31, 0, 0, 0, 0, 1, 0, 3, 0, 0, 7};
+	for (unsigned stage = 0; stage <= TD_INIT_ANALYSIS_THREAD; stage++) {
 		fixture f;
 		init(&f);
 		f.fail_stage = stage;
@@ -3120,7 +3182,7 @@ START_TEST(shutdown_startup)
 		ck_assert(td_engine_create_with(&config, th_allocator(&f.tracker), runtime, &e) ==
 		          (stage ? TEDER_INTERNAL : TEDER_NO_MEMORY));
 		ck_assert(!e && f.tracker.attempts == (stage ? 2 : 1));
-		for (unsigned i = 0; i < 4; i++)
+		for (unsigned i = 0; i < 5; i++)
 			ck_assert(atomic_load(&f.worker_entries[i]) == ((expected[stage] >> i) & 1) &&
 			          atomic_load(&f.worker_exits[i]) == ((expected[stage] >> i) & 1));
 		dispose(&f);
@@ -3302,6 +3364,8 @@ int main(int argc, char **argv)
 		test = shutdown_states;
 	else if (!strcmp(argv[1], "shutdown-borrowers"))
 		test = shutdown_borrowers;
+	else if (!strcmp(argv[1], "analysis-playback"))
+		test = analysis_playback;
 	else if (!strcmp(argv[1], "analysis-owners"))
 		test = analysis_owners;
 	else if (!strcmp(argv[1], "shutdown-startup"))

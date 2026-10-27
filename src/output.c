@@ -95,6 +95,7 @@ static void invalidate(teder_engine *e, teder_code code)
 		td_limit_close(e);
 	else
 		e->status.current.epoch++;
+	td_analysis_invalidate(e);
 	uint64_t epoch = e->status.current.epoch;
 	e->status.output_state = TEDER_OUTPUT_LOST;
 	e->status.output_rate = e->status.output_channels = e->status.output_period_frames = 0;

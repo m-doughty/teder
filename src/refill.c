@@ -11,7 +11,7 @@
 
 /* Poll while control delegates a potentially active consumer's refill work.
  * This is not a latency guarantee. No callback signals a waiter. */
-static void interval(unsigned milliseconds)
+void td_worker_sleep(unsigned milliseconds)
 {
 #ifdef _WIN32
 	Sleep(milliseconds);
@@ -25,7 +25,7 @@ static void interval(unsigned milliseconds)
 
 void td_worker_interval(void)
 {
-	interval(1);
+	td_worker_sleep(1);
 }
 
 void td_refill_run(teder_engine *e)
@@ -48,7 +48,8 @@ void td_refill_run(teder_engine *e)
 			               e->status.transport != TEDER_DRAINING;
 			td_unlock(e);
 			if (monitor) {
-				interval(10); /* paused/ready/EOF: observe loss without decoding or reporting */
+				td_worker_sleep(
+				    10); /* paused/ready/EOF: observe loss without decoding or reporting */
 				continue;
 			}
 			td_media_checkpoint(e, 0, TD_REFILL_PUMP);

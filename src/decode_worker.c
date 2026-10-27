@@ -247,6 +247,7 @@ static void prepared(teder_engine *e, td_source_job *j)
 		j->state = TD_JOB_ACTIVE;
 		td_source *s = j->source;
 		e->status.current = (teder_target){s->generation.generation, s->generation.source};
+		td_analysis_invalidate(e);
 		if (!seek)
 			e->last_source = s->generation.source;
 		e->status.track = s->generation.track;

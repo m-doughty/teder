@@ -36,6 +36,7 @@ teder_code td_snapshot_publish(td_snapshot_pool *,
                                const float *bands,
                                const teder_span *spans);
 teder_code td_snapshot_acquire(td_snapshot_pool *, teder_snapshot **out);
+void td_snapshot_drop(td_snapshot_pool *);  /* worker rejects an unrepresentable window */
 void td_snapshot_clear(td_snapshot_pool *); /* invalidate current, retain loans/counters */
 /* Quiesce publisher/acquirer first; outstanding readers may release concurrently. */
 void td_snapshot_pool_release(td_snapshot_pool **owner);
