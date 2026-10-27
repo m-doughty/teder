@@ -8,8 +8,19 @@
 typedef struct {
 	th_tracker tracker;
 	unsigned live, closed, entries, malformed;
-	bool fail_init, fail_enum, long_id;
+	bool fail_init, fail_enum, long_id, default_lookup;
 } fixture;
+
+static ma_result
+alsa_info(ma_context *c, ma_device_type type, const ma_device_id *id, ma_device_info *info)
+{
+	(void)c;
+	ck_assert(type == ma_device_type_playback);
+	/* Pinned ALSA copies only the name; the generic wrapper copies an explicit ID. */
+	ck_assert(!id || strcmp(id->alsa, "default") == 0);
+	memcpy(info->name, "Default output", 15);
+	return MA_SUCCESS;
+}
 
 static ma_result fake_init(const ma_backend *backends,
                            ma_uint32 count,
@@ -31,6 +42,13 @@ static ma_result fake_init(const ma_backend *backends,
 		return MA_ERROR;
 	}
 	c->pDeviceInfos = q;
+	if (f->default_lookup) {
+		c->callbacks.onContextGetDeviceInfo = alsa_info;
+		if (ma_mutex_init(&c->deviceInfoLock) != MA_SUCCESS) {
+			ma_free(q, &c->allocationCallbacks);
+			return MA_ERROR;
+		}
+	}
 	f->live++;
 	return MA_SUCCESS;
 }
@@ -41,6 +59,8 @@ static ma_result fake_uninit(ma_context *c)
 	ck_assert(f->live == 1);
 	f->live--;
 	f->closed++;
+	if (f->default_lookup)
+		ma_mutex_uninit(&c->deviceInfoLock);
 	ma_free(c->pDeviceInfos, &c->allocationCallbacks);
 	return MA_SUCCESS;
 }
@@ -149,6 +169,23 @@ START_TEST(snapshot)
 		ck_assert(th_tracker_clean(&f.tracker));
 		th_tracker_uninit(&f.tracker);
 	}
+}
+END_TEST
+
+START_TEST(default_id)
+{
+	fixture f = {.default_lookup = true};
+	ck_assert(th_tracker_init(&f.tracker));
+	td_backend *b;
+	OK(open_backend(&f, 42, TEDER_BACKEND_ALSA, &b));
+	td_backend_loan loan;
+	OK(td_backend_borrow(b, (teder_blob){0}, &loan));
+	ck_assert_str_eq(loan.id.alsa, "default");
+	ck_assert(td_backend_close(&b) == TEDER_BUSY);
+	td_backend_return(b);
+	OK(td_backend_close(&b));
+	ck_assert(th_tracker_clean(&f.tracker) && f.live == 0 && f.closed == 1);
+	th_tracker_uninit(&f.tracker);
 }
 END_TEST
 
@@ -388,6 +425,8 @@ int main(int argc, char **argv)
 		test = snapshot;
 	else if (!strcmp(argv[1], "validation"))
 		test = validation;
+	else if (!strcmp(argv[1], "default-id"))
+		test = default_id;
 	else if (!strcmp(argv[1], "failures"))
 		test = failures;
 	else if (!strcmp(argv[1], "heap"))

@@ -127,3 +127,7 @@ After final PCM submission, press Enter once the sound finishes. ENDED describes
 submission, not an audible clock; the example leaves output running until then.
 Build examples default on for a top-level build; disable with `-DTEDER_BUILD_EXAMPLES=OFF`.
 Contributor test instructions are in `tests/README.md` in the source tree.
+
+The optional `teder_visualizer` adds live spectrum/levels, pause, seek, mute and
+one prepared successor. See [standalone demonstrations](docs/demos.md) for keys,
+three-platform launch instructions, bounded checks and cleanup ownership.

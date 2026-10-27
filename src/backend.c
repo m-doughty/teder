@@ -241,8 +241,12 @@ teder_code td_backend_borrow(td_backend *b, teder_blob key, td_backend_loan *out
 	ma_device_id id;
 	if (!key.data && !key.bytes) {
 		ma_device_info info;
+		/* ALSA's NULL query leaves info.id empty. Name its configured default PCM
+		 * explicitly so the native wrapper copies the ID used for the later open. */
+		ma_device_id alsa_default = {.alsa = "default"};
+		const ma_device_id *requested = b->backend == TEDER_BACKEND_ALSA ? &alsa_default : NULL;
 		ma_result result =
-		    ma_context_get_device_info(&b->native, ma_device_type_playback, NULL, &info);
+		    ma_context_get_device_info(&b->native, ma_device_type_playback, requested, &info);
 		code = td_backend_error(b);
 		if (code != TEDER_OK || result != MA_SUCCESS)
 			return code != TEDER_OK ? code : TEDER_DEVICE_LOST;
