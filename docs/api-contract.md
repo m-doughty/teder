@@ -374,6 +374,32 @@ position only for consumed PCM. Latency quality remains UNKNOWN; see below.
 A selected context's native allocator failure during enumeration closes its
 device/context, advances epoch and pauses the source. Explicit selection recovers.
 
+### Device loss (implemented)
+
+Unexpected native stop, reroute or interruption invalidates the selected output.
+Detection continues while READY, PAUSED or ENDED. Worker scheduling and in-flight
+native/file operations can delay publication; there is no detection deadline.
+The callback sends silence after observing loss and never initiates recovery.
+
+The lifecycle worker retires native users, preserves their final submitted source
+position and advances the epoch. Output becomes LOST; transport becomes PAUSED,
+or EMPTY without a source. Output/underrun counters and output format reset to zero;
+position and latency quality become UNKNOWN. Prepared successors are cleared.
+A DEVICE event reports DEVICE_LOST with the new epoch and retained source/track.
+The event queue remains lossy; inspect status even when no event is available.
+
+Old preparation is cancelled cooperatively and finishes STALE after returning its
+borrowed input and temporary resources. Explicit cancellation before commitment
+still takes precedence. Pending callback controls fail DEVICE_LOST if loss is
+observed before successful acknowledgement. Loss during STOP preserves the final
+position rather than reporting a completed rewind. Epoch exhaustion closes the
+engine with LIMIT instead of wrapping.
+
+Recover by selecting a device explicitly, waiting for successful completion,
+reading the new target and submitting PLAY. Selection reopens the retained source
+at its saved frame and leaves it PAUSED. There is no automatic restart or default
+device following. A failed selection leaves LOST and permits explicit retry.
+
 ### Transport controls (implemented subset)
 
 `teder_transport(engine, &target, TEDER_PLAY, &request)` starts READY output or

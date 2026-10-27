@@ -222,6 +222,10 @@ teder_code td_device_stop(td_device *d)
 		return TEDER_INVALID;
 	if (d->failed)
 		return TEDER_BAD_STATE;
+	/* Lost backends may never acknowledge stop. Uninit joins their users and
+	 * retains the final report in this arena until the owner releases it. */
+	if (td_device_lost(d))
+		return failed(d, TEDER_DEVICE_LOST);
 	if (!d->active)
 		return TEDER_OK;
 	atomic_store(&d->feed.expected_running, 0);

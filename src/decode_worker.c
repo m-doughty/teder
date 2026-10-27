@@ -200,6 +200,7 @@ static void prepared(teder_engine *e, td_source_job *j)
 {
 	uint32_t slot = j->slot;
 	td_media_checkpoint(e, j->request, TD_MEDIA_BEFORE_COMMIT);
+	td_output_recover(e);
 	if (e->requests[slot].info.operation == TEDER_OP_PREPARE)
 		td_output_report(e);
 	td_lock(e);
@@ -222,10 +223,12 @@ static void prepared(teder_engine *e, td_source_job *j)
 	bool retarget = selected || stopped;
 	bool seek = r->info.operation == TEDER_OP_SEEK || retarget;
 	bool autoplay = r->info.operation == TEDER_OP_OPEN && r->media.flags & TEDER_OPEN_AUTOPLAY;
-	if (code == TEDER_OK &&
-	    (j->source->generation.generation != e->status.current.epoch + (retarget ? 0 : 1) ||
-	     (seek && (r->media.target.epoch != e->status.current.epoch ||
-	               r->media.target.source != e->status.current.source))))
+	/* Loss cancels native preparation cooperatively, but its epoch determines
+	 * the stale outcome even if cancellation prevented source construction. */
+	if (r->media.target.epoch != e->status.current.epoch ||
+	    (code == TEDER_OK &&
+	     (j->source->generation.generation != e->status.current.epoch + (retarget ? 0 : 1) ||
+	      (seek && r->media.target.source != e->status.current.source))))
 		code = TEDER_STALE;
 	if (code == TEDER_OK && autoplay && e->status.output_state != TEDER_OUTPUT_READY)
 		code = TEDER_BAD_STATE;

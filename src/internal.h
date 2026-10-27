@@ -256,6 +256,7 @@ bool td_transition_pump(teder_engine *, td_source_job *);
 bool td_transition_report(teder_engine *, const td_device_report *, teder_event *); /* gate held */
 teder_code td_successor_publish(void *, td_pcm_pool *, uint32_t, const td_pcm_meta *);
 teder_code td_output_quiesce(teder_engine *); /* control, producer already paused */
+bool td_output_recover(teder_engine *);       /* control, refill paused; joins lost native users */
 teder_code td_output_start(teder_engine *);
 bool td_output_report(teder_engine *);                   /* current producer; no native control */
 void td_sources_suspend(teder_engine *, uint64_t epoch); /* native consumer quiescent */

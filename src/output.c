@@ -72,7 +72,7 @@ static void device_close(teder_engine *e)
 	td_refill_pause(e);
 	/* Save the final callback endpoint before native userdata is released.
 	 * Failed stop also joins native users, via uninit in the device owner. */
-	if (td_device_running(e->device))
+	if (td_device_running(e->device) || td_device_lost(e->device))
 		td_device_stop(e->device);
 	td_output_report(e);
 	if (td_device_close(&e->device) != TEDER_OK)
@@ -108,6 +108,9 @@ static void invalidate(teder_engine *e, teder_code code)
 	e->status.transport = e->status.current.source ? TEDER_PAUSED : TEDER_EMPTY;
 	if (!exhausted)
 		e->status.last_error = code;
+	for (unsigned i = 0; i < TD_SOURCE_JOBS; i++)
+		if (e->sources[i].state == TD_JOB_STAGING || e->sources[i].state == TD_JOB_PREPARED)
+			atomic_store(&e->sources[i].cancel, 1);
 	td_unlock(e);
 	if (!exhausted)
 		td_sources_suspend(e, epoch);
@@ -121,6 +124,14 @@ static void invalidate(teder_engine *e, teder_code code)
 		                     .code = code};
 		td_emit(e, &event);
 	}
+}
+
+bool td_output_recover(teder_engine *e)
+{
+	if (!td_device_lost(e->device))
+		return false;
+	invalidate(e, TEDER_DEVICE_LOST);
+	return true;
 }
 
 void td_output_close(teder_engine *e)
@@ -289,6 +300,8 @@ complete:
 /* Source commitment runs with refill paused, outside the bookkeeping gate. */
 teder_code td_output_quiesce(teder_engine *e)
 {
+	if (td_output_recover(e))
+		return TEDER_DEVICE_LOST;
 	if (!td_device_running(e->device))
 		return TEDER_OK;
 	teder_code code = td_device_stop(e->device);

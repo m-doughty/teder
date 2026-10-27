@@ -51,7 +51,8 @@ variable requests and concurrent production. A private device owner now connects
 this core to miniaudio, with native start/stop and callback-safe teardown.
 It latches native loss notifications and unexpected stops without allocating.
 Later callbacks send silence; the device must be replaced before reuse.
-Automatic engine loss publication and recovery are not implemented yet.
+The engine reports LOST and pauses the retained source after native teardown.
+Recovery requires explicit device selection followed by PLAY.
 Public autoplay connects that consumer to independent refill. Deterministic tests check every sample separately.
 
 Public device enumeration now runs asynchronously on the lifecycle worker. It

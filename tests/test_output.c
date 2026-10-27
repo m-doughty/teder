@@ -24,7 +24,7 @@ enum { LONG_FRAMES = 32769 };
 
 typedef struct {
 	th_tracker tracker;
-	th_gate gate, render_gate;
+	th_gate gate, render_gate, owner_gate;
 	th_thread thread;
 	ma_device *native;
 	atomic_uint stop, hold, captured, step, stepped;
@@ -32,6 +32,7 @@ typedef struct {
 	bool worker, fail_start, fail_stop;
 	float capture[LONG_FRAMES * 2];
 	atomic_uint point;
+	atomic_uint park_owner;
 	unsigned opened, closed, enumerated;
 	bool reject, enum_error, device_error;
 	unsigned devices, releases, starts, stops, rate;
@@ -247,6 +248,9 @@ static ma_result enumerate(ma_context *c, ma_enum_devices_callback_proc callback
 static void checkpoint(void *p, uint64_t request, unsigned point)
 {
 	(void)request;
+	fixture *f = p;
+	if (point == TD_DECODE_IDLE && atomic_exchange(&f->park_owner, 0))
+		th_gate_hit(&f->owner_gate);
 	if (point == TD_OUTPUT_BEFORE_COMMIT)
 		hit(p, 3);
 	if (point == TD_OUTPUT_AFTER_COMMIT)
@@ -267,6 +271,8 @@ static void checkpoint(void *p, uint64_t request, unsigned point)
 		hit(p, 13);
 	if (point == TD_MEDIA_BEFORE_COMMIT)
 		hit(p, 14);
+	if (point == TD_MEDIA_AFTER_COMMIT)
+		hit(p, 18);
 	if (point == TD_REFILL_PUMP)
 		hit(p, 15);
 	if (point == TD_NEXT_BEFORE_PUBLISH)
@@ -279,12 +285,14 @@ static void init(fixture *f)
 {
 	memset(f, 0, sizeof(*f));
 	atomic_init(&f->point, 0);
+	atomic_init(&f->park_owner, 0);
 	atomic_init(&f->stop, 0);
 	atomic_init(&f->hold, 0);
 	atomic_init(&f->captured, 0);
 	atomic_init(&f->step, 0);
 	atomic_init(&f->stepped, 0);
 	ck_assert(th_gate_init(&f->render_gate));
+	ck_assert(th_gate_init(&f->owner_gate));
 	ck_assert(th_tracker_init(&f->tracker) && th_gate_init(&f->gate));
 #ifdef _WIN32
 	f->caller = GetCurrentThreadId();
@@ -299,6 +307,7 @@ static void dispose(fixture *f)
 	          !f->native_heap && th_tracker_clean(&f->tracker));
 	th_gate_uninit(&f->gate);
 	th_gate_uninit(&f->render_gate);
+	th_gate_uninit(&f->owner_gate);
 	th_tracker_uninit(&f->tracker);
 }
 
@@ -1639,7 +1648,7 @@ START_TEST(stop_failures)
 		outcome(e, id, mode ? TEDER_LIMIT : TEDER_DEVICE_LOST);
 		ck_assert(status(e).current.epoch == (mode == 2 ? UINT64_MAX : before.epoch + 1));
 		if (mode != 2)
-			ck_assert(status(e).transport == TEDER_FAILED);
+			ck_assert(status(e).transport == (mode ? TEDER_FAILED : TEDER_PAUSED));
 		close_engine(&e);
 		dispose(&f);
 	}
@@ -2395,6 +2404,346 @@ START_TEST(gapless_limits)
 }
 END_TEST
 
+/* Park control with refill acknowledged, independently of a held preparation. */
+static void park_owner(fixture *f, teder_engine *e)
+{
+	atomic_store(&f->park_owner, 1);
+	td_signal(e);
+	th_gate_await(&f->owner_gate);
+}
+
+/* Caller holds control, so the notification's native/userdata borrow is stable. */
+static void lose(fixture *f)
+{
+	ma_device_notification n = {.pDevice = f->native, .type = ma_device_notification_type_rerouted};
+	f->native->onNotification(&n);
+	f->native->onNotification(&n);
+	n.type = ma_device_notification_type_started;
+	f->native->onNotification(&n); /* resumption cannot undo the invalidation */
+}
+
+static teder_status lost_status(teder_engine *e, teder_target before, uint64_t frame)
+{
+	teder_status s;
+	do {
+		s = status(e);
+		th_yield();
+	} while (s.output_state != TEDER_OUTPUT_LOST);
+	ck_assert(s.current.epoch == before.epoch + 1 && s.current.source == before.source &&
+	          s.source_frame == frame && !s.output_frame && !s.underrun_frames && !s.output_rate &&
+	          !s.output_channels && !s.output_period_frames && !s.backend && !s.latency_frames &&
+	          s.latency_quality == TEDER_QUALITY_UNKNOWN &&
+	          s.position_quality == TEDER_QUALITY_UNKNOWN && !s.next_source && !s.next_track &&
+	          s.next_state == TEDER_NEXT_NONE && !(s.clock_flags & ~TEDER_DURATION_KNOWN) &&
+	          s.transport == (before.source ? TEDER_PAUSED : TEDER_EMPTY) &&
+	          s.last_error == TEDER_DEVICE_LOST);
+	return s;
+}
+
+static void loss_event(teder_engine *e, teder_status s)
+{
+	teder_event event = INIT(teder_event);
+	for (;;) {
+		teder_code code = teder_event_poll(e, &event);
+		ck_assert(code == TEDER_OK || code == TEDER_AGAIN);
+		if (code == TEDER_OK && event.kind == TEDER_EVENT_DEVICE &&
+		    event.code == TEDER_DEVICE_LOST && event.epoch == s.current.epoch)
+			break;
+		th_yield();
+	}
+	ck_assert(event.epoch == s.current.epoch && event.from_source == s.current.source &&
+	          event.from_track == s.track && !event.to_source && !event.to_track &&
+	          !event.output_frame);
+	while (teder_event_poll(e, &event) == TEDER_OK)
+		ck_assert(event.kind != TEDER_EVENT_DEVICE || event.code != TEDER_DEVICE_LOST);
+}
+
+START_TEST(loss_states)
+{
+	for (unsigned mode = 0; mode < 5; mode++) {
+		fixture f;
+		init(&f);
+		f.manual = true;
+		teder_config config = INIT(teder_config);
+		teder_engine *e = create(&f, config, false);
+		outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
+		if (mode)
+			load_track(e);
+		if (mode >= 2) {
+			outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
+			step(&f, mode == 4 ? 16 : 4);
+			clock_at(e, mode == 4 ? 16 : 4);
+		}
+		if (mode == 3) {
+			atomic_store(&f.point, 13);
+			boundary(&f, e, transport(e, TEDER_PAUSE));
+		}
+		park_owner(&f, e);
+		teder_status before = status(e);
+		ck_assert(before.transport == (mode == 0   ? TEDER_EMPTY
+		                               : mode == 1 ? TEDER_READY
+		                               : mode == 2 ? TEDER_DRAINING
+		                               : mode == 3 ? TEDER_PAUSED
+		                                           : TEDER_ENDED));
+		size_t budget = owned(e) - e->device_reservation;
+		size_t attempts = f.tracker.attempts;
+		unsigned starts = f.starts;
+		lose(&f);
+		th_gate_release(&f.owner_gate); /* no request or callback wake: monitor must notice */
+		teder_status after = lost_status(e, before.current, before.source_frame);
+		loss_event(e, after);
+		ck_assert(owned(e) == budget && f.releases == 1 && !f.worker && !f.stops &&
+		          f.starts == starts && f.tracker.attempts == attempts);
+		uint64_t id = 99;
+		teder_code code;
+		RETRY(code, teder_transport(e, &before.current, TEDER_PLAY, &id));
+		ck_assert(code == TEDER_STALE && !id);
+		outcome(e, transport(e, TEDER_PLAY), TEDER_BAD_STATE);
+		outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
+		after = status(e);
+		ck_assert(after.output_state == TEDER_OUTPUT_READY &&
+		          after.transport == (mode ? TEDER_PAUSED : TEDER_EMPTY) &&
+		          after.current.source == before.current.source &&
+		          after.source_frame == before.source_frame && f.starts == starts);
+		if (mode && mode != 4) {
+			outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
+			step(&f, 1);
+			ck_assert(clock_at(e, 1).source_frame == before.source_frame + 1);
+			ck_assert(f.capture[0] == ((int)before.source_frame - 8) * 1000 / 32768.0f &&
+			          f.capture[1] == -f.capture[0]);
+		}
+		close_engine(&e);
+		dispose(&f);
+	}
+}
+END_TEST
+
+START_TEST(loss_controls)
+{
+	for (unsigned mode = 0; mode < 4; mode++) {
+		fixture f;
+		init(&f);
+		f.manual = true;
+		teder_config config = INIT(teder_config);
+		teder_engine *e = create(&f, config, false);
+		outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
+		load_track(e);
+		outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
+		step(&f, 3);
+		teder_status before = clock_at(e, 3);
+		atomic_store(&f.point, mode == 2 ? 12 : 13);
+		uint64_t id = mode == 1 || mode == 2 ? transport(e, mode == 1 ? TEDER_PAUSE : TEDER_STOP)
+		                                     : gain_to(e, 0.25f, 0);
+		th_gate_await(&f.gate);
+		lose(&f);
+		if (mode == 3)
+			OK(teder_request_close(e));
+		th_gate_release(&f.gate);
+		outcome(e, id, TEDER_DEVICE_LOST); /* no additional callback can acknowledge it */
+		teder_status after = lost_status(e, before.current, 3);
+		ck_assert(after.gain == 1 && !after.mute && !f.stops && f.releases == 1);
+		loss_event(e, after);
+		close_engine(&e);
+		dispose(&f);
+	}
+}
+END_TEST
+
+START_TEST(loss_preparing)
+{
+	for (unsigned mode = 0; mode < 4; mode++) {
+		fixture f;
+		init(&f);
+		f.manual = true;
+		teder_config config = INIT(teder_config);
+		teder_engine *e = create(&f, config, false);
+		outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
+		load_track(e);
+		outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
+		step(&f, 3);
+		clock_at(e, 3);
+		atomic_store(&f.point, 9); /* preparation owns native file and request input */
+		uint64_t id;
+		teder_code code;
+		teder_status before = status(e);
+		if (mode == 0)
+			id = seek_frame(e, 9);
+		else if (mode == 1) {
+			RETRY(code,
+			      teder_prepare_next(e, &before.current, 0, TRACK, sizeof(TRACK) - 1, 88, &id));
+			OK(code);
+		} else if (mode == 2)
+			id = select_device(e, (teder_blob){0});
+		else
+			id = autoplay(e, TRACK);
+		th_gate_await(&f.gate);
+		park_owner(&f, e);
+		before = status(e);
+		lose(&f);
+		th_gate_release(&f.owner_gate);
+		teder_status after = lost_status(e, before.current, 3);
+		loss_event(e, after);
+		ck_assert(after.media_request == id);
+		teder_request_info r = INIT(teder_request_info);
+		OK(teder_request_get(e, id, &r));
+		ck_assert(r.state == TEDER_RUNNING);
+		ck_assert(teder_request_ack(e, id) == TEDER_BUSY);
+		th_gate_release(&f.gate);
+		outcome(e, id, TEDER_STALE);
+		ck_assert(!status(e).media_request && status(e).current.source == before.current.source);
+		outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
+		ck_assert(status(e).source_frame == 3 && status(e).transport == TEDER_PAUSED);
+		outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
+		step(&f, 1);
+		ck_assert(clock_at(e, 1).source_frame == 4);
+		close_engine(&e);
+		dispose(&f);
+	}
+}
+END_TEST
+
+START_TEST(loss_closing)
+{
+	fixture f;
+	init(&f);
+	f.manual = true;
+	teder_config config = INIT(teder_config);
+	teder_engine *e = create(&f, config, false);
+	outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
+	load_track(e);
+	atomic_store(&f.hold, 1);
+	outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
+	th_gate_await(&f.render_gate); /* native dispatch retains device/userdata */
+	park_owner(&f, e);
+	teder_status before = status(e);
+	size_t budget = owned(e);
+	lose(&f);
+	atomic_store(&f.point, 8);
+	th_gate_release(&f.owner_gate);
+	th_gate_await(&f.gate);
+	ck_assert(status(e).current.epoch == before.current.epoch && owned(e) == budget &&
+	          !f.releases && !f.stops);
+	OK(teder_request_close(e));
+	th_gate_release(&f.gate);
+	while (!atomic_load(&f.stop))
+		th_yield(); /* uninit is now joining the held native user */
+	ck_assert(teder_destroy(&e) == TEDER_BUSY && owned(e) == budget && !f.releases);
+	th_gate_release(&f.render_gate);
+	close_engine(&e);
+	ck_assert(f.releases == 1 && !f.stops);
+	dispose(&f);
+}
+END_TEST
+
+START_TEST(loss_commit)
+{
+	for (unsigned committed = 0; committed < 2; committed++) {
+		fixture f;
+		init(&f);
+		f.manual = true;
+		teder_config config = INIT(teder_config);
+		teder_engine *e = create(&f, config, false);
+		outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
+		load_track(e);
+		outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
+		step(&f, 3);
+		clock_at(e, 3);
+		atomic_store(&f.point, committed ? 18 : 14);
+		uint64_t id = seek_frame(e, 9);
+		th_gate_await(&f.gate);
+		teder_status before = status(e);
+		lose(&f);
+		th_gate_release(&f.gate);
+		outcome(e, id, committed ? TEDER_DEVICE_LOST : TEDER_STALE);
+		loss_event(e, lost_status(e, before.current, committed ? 9 : 3));
+		close_engine(&e);
+		dispose(&f);
+	}
+}
+END_TEST
+
+START_TEST(loss_transition)
+{
+	for (unsigned crossed = 0; crossed < 2; crossed++) {
+		fixture f;
+		init(&f);
+		f.manual = true;
+		teder_config config = INIT(teder_config);
+		teder_engine *e = create(&f, config, false);
+		outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
+		load_track(e);
+		gap_prepare(e, TRACK);
+		outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
+		ck_assert(status(e).next_state == TEDER_NEXT_COMMITTED);
+		park_owner(&f, e);
+		teder_status before = status(e);
+		step(&f, crossed ? 17 : 4); /* final report has not reached control */
+		lose(&f);
+		th_gate_release(&f.owner_gate);
+		if (crossed)
+			before.current.source = 2;
+		teder_status after = lost_status(e, before.current, crossed ? 1 : 4);
+		if (crossed)
+			gap_event(e, 1, 2, 16); /* emitted before the new-epoch loss event */
+		loss_event(e, after);
+		outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
+		ck_assert(status(e).current.source == before.current.source);
+		outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
+		step(&f, 1);
+		ck_assert(clock_at(e, 1).source_frame == (crossed ? 2 : 5));
+		close_engine(&e);
+		dispose(&f);
+	}
+}
+END_TEST
+
+START_TEST(loss_repeated)
+{
+	fixture f;
+	init(&f);
+	f.manual = true;
+	teder_config config = INIT(teder_config);
+	teder_engine *e = create(&f, config, false);
+	outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
+	load_track(e);
+#ifdef _WIN32
+	DWORD handles, after;
+	ck_assert(GetProcessHandleCount(GetCurrentProcess(), &handles));
+#endif
+	for (unsigned i = 0; i < 8; i++) {
+		outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
+		step(&f, 1);
+		clock_at(e, 1);
+		park_owner(&f, e);
+		teder_target before = status(e).current;
+		lose(&f);
+		f.device_error = true;
+		th_gate_release(&f.owner_gate);
+		loss_event(e, lost_status(e, before, i + 1));
+		outcome(e, select_device(e, (teder_blob){0}), TEDER_DEVICE_LOST);
+		park_owner(&f, e);
+		ck_assert(!e->device && !e->device_reservation && f.devices == f.releases);
+		f.device_error = false;
+		th_gate_release(&f.owner_gate);
+		outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
+		ck_assert(status(e).source_frame == i + 1 && status(e).transport == TEDER_PAUSED);
+	}
+	park_owner(&f, e);
+#ifdef _WIN32
+	ck_assert(GetProcessHandleCount(GetCurrentProcess(), &after) && handles == after);
+#endif
+	e->status.current.epoch = UINT64_MAX;
+	lose(&f);
+	th_gate_release(&f.owner_gate);
+	while (status(e).lifecycle == TEDER_LIVE)
+		th_yield();
+	OK(th_close(e));
+	ck_assert(status(e).current.epoch == UINT64_MAX && status(e).last_error == TEDER_LIMIT);
+	OK(teder_destroy(&e));
+	dispose(&f);
+}
+END_TEST
+
 int main(int argc, char **argv)
 {
 	if (argc != 2)
@@ -2466,6 +2815,20 @@ int main(int argc, char **argv)
 		test = gapless_edges;
 	else if (!strcmp(argv[1], "gapless-limits"))
 		test = gapless_limits;
+	else if (!strcmp(argv[1], "loss-states"))
+		test = loss_states;
+	else if (!strcmp(argv[1], "loss-controls"))
+		test = loss_controls;
+	else if (!strcmp(argv[1], "loss-preparing"))
+		test = loss_preparing;
+	else if (!strcmp(argv[1], "loss-closing"))
+		test = loss_closing;
+	else if (!strcmp(argv[1], "loss-commit"))
+		test = loss_commit;
+	else if (!strcmp(argv[1], "loss-transition"))
+		test = loss_transition;
+	else if (!strcmp(argv[1], "loss-repeated"))
+		test = loss_repeated;
 	else if (!strcmp(argv[1], "native-select"))
 		test = native_select;
 	else if (!strcmp(argv[1], "native"))

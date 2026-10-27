@@ -31,6 +31,8 @@ teder_code TEDER_CALL teder_set_gain(teder_engine *e, float gain, uint32_t mute,
 static teder_code applied(teder_engine *e, uint64_t revision)
 {
 	for (;;) {
+		if (td_output_recover(e))
+			return TEDER_DEVICE_LOST;
 		td_device_report report;
 		teder_code code = td_device_get_report(e->device, &report);
 		if (code != TEDER_OK && code != TEDER_AGAIN)
@@ -123,6 +125,8 @@ void td_transport(teder_engine *e, uint32_t slot)
 			td_unlock(e);
 		}
 	}
+	if (code == TEDER_DEVICE_LOST)
+		td_output_recover(e);
 	if (code == TEDER_OK) {
 		td_output_report(e);
 		td_lock(e);

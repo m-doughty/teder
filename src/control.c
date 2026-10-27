@@ -97,7 +97,8 @@ static void control(teder_engine *e)
 	checkpoint(e, TD_STARTED);
 	while (atomic_load(&e->lifecycle) == TEDER_LIVE) {
 		td_refill_pause(e);
-		bool progress = td_decode_step(e);
+		bool progress = td_output_recover(e);
+		progress = td_decode_step(e) || progress;
 		progress = td_output_report(e) || progress;
 		td_lock(e);
 		bool failed = e->status.transport == TEDER_FAILED;

@@ -68,7 +68,7 @@ void td_stop(teder_engine *e, uint32_t slot)
 	/* Failed native stop already uninitialized and invalidated the stream. */
 	if (loaded && code == TEDER_OK)
 		e->status.current.epoch++;
-	if (loaded) {
+	if (loaded && code == TEDER_OK) {
 		e->status.transport = TEDER_READY;
 		e->status.source_frame = e->status.output_frame = 0;
 		e->status.underrun_frames = 0;
@@ -89,7 +89,7 @@ void td_stop(teder_engine *e, uint32_t slot)
 		return; /* staged rewind or shutdown owns terminal completion */
 	}
 	td_lock(e);
-	if (code != TEDER_OK) {
+	if (code != TEDER_OK && e->status.output_state != TEDER_OUTPUT_LOST) {
 		e->status.transport = TEDER_FAILED;
 		e->status.last_error = code;
 	}

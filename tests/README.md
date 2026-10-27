@@ -188,6 +188,22 @@ Normal stop must leave the private loss flag clear.
 Missing backend/device support fails the test. Headless ALSA output and silent
 WASAPI submission are native lifecycle evidence, not audible music acceptance.
 
+## Engine device loss
+
+`output.loss-states` checks EMPTY, READY, DRAINING, PAUSED and ENDED output loss,
+exact clock/epoch resets, no new allocations, retained position and explicit recovery.
+`output.loss-controls` removes output during unacknowledged gain/pause, STOP and
+close. `output.loss-preparing` holds seek, successor, device-retarget and autoplay
+preparation while loss retires output; request input remains pinned until STALE.
+`output.loss-commit` exercises both sides of seek commitment.
+
+`output.loss-closing` holds native dispatch through uninit: budgets and the old epoch
+remain until that borrower returns. `output.loss-transition` retains the correct
+source on either side of a gapless boundary, including its unreported final clock.
+`output.loss-repeated` runs eight loss/failed-reopen/recovery cycles, checks warmed
+Windows handles and verifies epoch exhaustion. All use public requests with a
+synthetic native backend; physical unplug/default-change behavior is not inferred.
+
 ## Public device enumeration
 
 `-R '^output\.'` selects the engine output integration cases. Enumeration covers

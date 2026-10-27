@@ -34,6 +34,8 @@ bool td_device_running(td_device *); /* lifecycle-owner observation, not a join 
  * delegated report reader only; excludes concurrent lifecycle changes. This is
  * observation, never proof of callback/notification quiescence. Replace to reset. */
 bool td_device_lost(td_device *);
+/* Known loss bypasses native stop and uninitializes, returning DEVICE_LOST.
+ * The report stays readable until close; this instance cannot restart. */
 teder_code td_device_stop(td_device *);
 /* One bounded coherent read, including while running; AGAIN retries later.
  * A delegated producer may borrow this with lifecycle/configuration held stable.

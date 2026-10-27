@@ -505,14 +505,15 @@ START_TEST(notifications)
 			              TEDER_DEVICE_LOST &&
 			          !revision);
 		}
-		OK(td_device_stop(f.device));
-		notify(f.native, ma_device_notification_type_stopped); /* intentional stop stays healthy */
 		notify(f.native, ma_device_notification_type_interruption_ended);
 		notify(f.native, ma_device_notification_type_started);
+		ck_assert(td_device_stop(f.device) == (lost ? TEDER_DEVICE_LOST : TEDER_OK));
+		if (!lost)
+			notify(f.native, ma_device_notification_type_stopped); /* intentional stop */
 		ck_assert(td_device_lost(f.device) == lost);
 		if (lost) {
 			ck_assert(td_device_configure(f.device, (td_audio_config){2, 1, 1, 0}) ==
-			          TEDER_DEVICE_LOST);
+			          TEDER_BAD_STATE);
 			OK(td_device_close(&f.device));
 			OK(open_device(&f, (teder_blob){0}, 0));
 			ck_assert(!td_device_lost(f.device));
@@ -547,7 +548,7 @@ START_TEST(loss_state)
 	ck_assert(!atomic_load(&feed->lost) && td_device_running(f.device));
 	ck_assert(td_device_lost(f.device) && atomic_load(&feed->lost));
 	ck_assert(td_device_start(f.device) == TEDER_DEVICE_LOST);
-	OK(td_device_stop(f.device));
+	ck_assert(td_device_stop(f.device) == TEDER_DEVICE_LOST);
 	ck_assert(td_device_lost(f.device) && !td_device_running(f.device));
 	uninit(&f);
 	ck_assert(f.initialized == 1 && f.released == 1);
