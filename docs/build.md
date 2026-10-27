@@ -117,7 +117,7 @@ on PATH for Windows shared consumers, or its `lib` on the appropriate runtime
 search path. The private FLAC archive and notices are installed with teder;
 third-party headers and Check are not part of the installed API.
 
-## Optional renderer foundation
+## Optional renderer
 
 `TEDER_WITH_NOTCURSES=OFF` is the default and performs no notcurses discovery.
 Enabling it requires an explicitly supplied installation of
@@ -131,11 +131,18 @@ cmake -S . -B build-renderer -DTEDER_WITH_NOTCURSES=ON -DTEDER_NOTCURSES_PREFIX=
 Headers and the shared core runtime/import library must exist under that prefix.
 Private static copies of notcurses are rejected. Missing inputs
 fail configuration. The revision is the builder's provenance assertion; a
-numeric runtime version check cannot prove fork identity. Actual loaded-library identity must
-be verified before any borrowed plane is accepted.
-This target currently provides only the build/runtime-version query, not drawing.
+numeric runtime version check cannot prove fork identity or inspect a foreign
+plane safely. The host must supply the same loaded runtime that created the plane;
+verify deployment/module identity before passing planes. Native tests record the
+actual loaded library path.
+This target implements the [renderer API](renderer.md).
 An installed renderer consumer supplies `TEDER_NOTCURSES_LIBRARY` pointing to
 that runtime's core import/shared library and links `teder::notcurses`.
+For the installed test consumer, also supply `TEDER_NOTCURSES_PREFIX`; it compiles
+against those headers and checks a real native plane through the installed library.
+Core-only builds do not register renderer tests. Renderer-enabled CTest runs real
+headless notcurses planes with xterm-256color terminfo; missing native requirements
+fail explicitly. These checks inspect cells, not terminal-emulator presentation.
 
 ## Source reproducibility
 

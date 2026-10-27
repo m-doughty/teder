@@ -5,11 +5,13 @@ renderer. Version 0.1.0 plays local FLAC, with play/pause/stop,
 seeking, gapless playback across source-format changes, submitted clocks and
 software gain/mute, peak/RMS meters and overlapping spectrum snapshots.
 [Spectrum calculation](docs/spectrum.md) defines logarithmic bands, normalization
-and audio-time smoothing/decay. Terminal rendering remains in progress.
+and audio-time smoothing/decay. The optional [notcurses renderer](docs/renderer.md) draws spectrum and stereo levels.
 
 Implemented exports:
 
-- `teder_get_build_info`; optional `teder_renderer_get_build_info`.
+- `teder_get_build_info`.
+- Optional renderer: `teder_renderer_get_build_info`, `teder_renderer_create`,
+  `teder_renderer_configure`, `teder_renderer_draw`, and `teder_renderer_destroy`.
 - `teder_create`, `teder_get_config`, `teder_get_status`,
   `teder_request_close`, and `teder_destroy`.
 - `teder_open`, `teder_seek`, `teder_probe`, `teder_enumerate_devices`, and `teder_select_device`.

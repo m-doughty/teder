@@ -412,3 +412,15 @@ checks stopped-only attachment and exact 48000-Hz post-gain data, then reads cop
 after device/source retirement. The feed callback object has its own import audit
 and deliberate forbidden-free control. The renderer may call only its three audited
 producer helpers. No timing deadline, public analysis worker or real DSP is inferred.
+
+## Native renderer
+
+Renderer-enabled builds register `renderer.bounds/cells/clipping/levels/wide`.
+These use the pinned real core runtime and inspect exact glyphs, styles and RGB
+channels on native planes, including wide/complex existing cells, resize, extremes,
+no-data and retained worker snapshots after engine destruction. A private allocator
+seam proves the single arena, failed creation and allocation-free configure/draw.
+Tests print the actual loaded runtime path. Headless initialization uses explicit
+xterm-256color terminfo and fails if unavailable; it is not emulator presentation.
+Installed renderer consumers also create and inspect a real plane through the
+installed public library. Core-only builds require no notcurses installation.

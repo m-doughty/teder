@@ -629,7 +629,7 @@ Counters saturate; successful publication sequence exhaustion closes with LIMIT.
 Snapshots copy counters at publication; failed publication leaves current data
 and existing loans unchanged. The host chooses when retained data becomes stale.
 
-### Rendering (planned)
+### Rendering (implemented)
 
 Spectrum analysis is implemented. Build capability/backend masks remain zero;
 use the implemented API list.
@@ -643,6 +643,8 @@ plane/renderer operations, owns presentation and keeps their runtime loaded.
 Renderer scratch has a finite bound independent of rectangle area; teder does
 not allocate per-cell/per-draw buffers. A drawing error may leave partial cell
 updates; retry uses the same full-redraw contract.
+See [renderer behavior](renderer.md) for exact mapping, quantization, wide-glyph
+boundary rejection, restored drawing attributes and native glyph-pool allocation.
 
 ## Shutdown
 
