@@ -98,8 +98,10 @@ int main(int argc, char **argv)
 		return 13;
 	uint64_t id;
 	teder_code code;
-	teder_analysis_config analysis = {
-	    .struct_size = sizeof(analysis), .abi_version = TEDER_ABI_VERSION, .enabled = 1};
+	teder_analysis_config analysis = {.struct_size = sizeof(analysis),
+	                                  .abi_version = TEDER_ABI_VERSION,
+	                                  .enabled = 1,
+	                                  .bands = 64};
 	for (unsigned enabled = 1;; enabled = 0) {
 		analysis.enabled = enabled;
 		do {

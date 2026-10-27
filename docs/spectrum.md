@@ -1,9 +1,8 @@
 # Spectrum calculation
 
-This checkpoint implements the private numerical core. Public playback still supports
-meters only; spectrum configuration remains unsupported until worker integration.
-The rules below describe the calculation, not new public callable functions.
-Overlap, smoothing and peak decay are not implemented yet.
+`teder_configure_analysis` enables overlapping spectrum snapshots alongside
+stereo peak/RMS. See [configuration and lifetime rules](api-contract.md#analysis-configuration-implemented).
+The numerical core remains private; snapshots copy its output before scratch reuse.
 
 ## Storage and input
 
@@ -15,7 +14,7 @@ The owner must stop all users before releasing the arena. One worker serializes
 each instance; separate instances have independent scratch.
 
 The FFT length N is a power of two from 32 through 65536. Band count B is
-1 through 4096, additionally subject to future engine limits and byte budgets.
+1 through 4096, additionally subject to engine limits and byte budgets.
 Settings require finite positive low frequency, either zero high frequency
 (Nyquist) or finite high frequency above low, and a finite negative dB floor.
 The numerical core receives resolved settings; it supplies no other defaults.
@@ -26,7 +25,7 @@ Invalid settings, nonfinite samples or an auto-Nyquist range below the low edge
 are rejected before replacing output. Returned band pointers borrow the region
 until the next successful measurement or destruction. Publication must copy them
 into the independent snapshot pool. A reference profile for measurement is
-N=2048, B=64, 20–20000 Hz, floor −90 dB; this does not select future UI defaults.
+N=2048, B=64, 20–20000 Hz, floor −90 dB; the public default high edge instead follows Nyquist.
 
 ## Levels and normalization
 
@@ -75,6 +74,28 @@ A full-range constant or Nyquist signal of magnitude one measures +3.0103 dB.
 Values above 0 dB are allowed; there is no hidden clipping. Bands report integrated
 energy, not energy per Hz, so wider bands contain more broadband noise power.
 
+## Audio-time filters
+
+The first valid window after enable/reconfigure, a gap, pause, epoch/rate change,
+or invalid window primes all filters directly from raw measurements. A continuous
+track boundary preserves history and filters, with identities covering the whole
+overlapping window. Disabled/no-data intervals cause no filter updates.
+
+For each subsequent window, dt = hop_frames / output_rate seconds:
+
+- `smoothing_ms=0` preserves raw bands/RMS. Otherwise alpha =
+  `1 - exp(-1000*dt/smoothing_ms)`. Band dB values use
+  `(1-alpha)*previous + alpha*raw`. RMS uses the same recurrence in mean-square
+  power, then takes its square root. This is not smoothing of linear RMS amplitude.
+- `peak_decay_db_per_s=0` preserves raw peaks. Otherwise each channel uses
+  `max(raw_peak, previous_peak * 10^(-dt*decay/20))`: instantaneous attack,
+  exponential amplitude decay. Filtered peak and RMS need not retain their raw
+  ordering when independently configured.
+
+Both controls accept finite nonnegative values. There is no UI-clock dependence,
+startup fade or per-paint decay. Pool pressure skips publication while filters
+advance; feed discontinuities reset them. Paused views retain their last snapshot.
+
 ## Verification boundary
 
 Tests compare against an independent direct DFT and explicit cell intersections.
@@ -83,5 +104,6 @@ Nyquist and impulses; finite extremes and invalid inputs exercise rollback.
 A separate build of the pinned KissFFT sources denies heap allocation/release,
 proves its hooks with controls, then initializes and measures every supported size.
 This verifies the admitted out-of-place power-of-two path, not arbitrary KissFFT
-usage. Worker scheduling, overlapping history, temporal filters and public
-configuration failure/cancellation are not implemented yet.
+usage. Worker tests cover overlapping identities, retained loans, sample-time
+filters, different polling rates, pressure, invalid history, cancellation and
+close. Public installed consumers enable spectrum without a terminal or device.

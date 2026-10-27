@@ -72,17 +72,34 @@ static size_t owned(teder_engine *e)
 	return bytes;
 }
 
-static uint64_t configure(teder_engine *e, unsigned enabled, unsigned window)
+static uint64_t configure_with(teder_engine *e, teder_analysis_config c)
 {
-	teder_analysis_config c = INIT(teder_analysis_config);
-	c.enabled = enabled;
-	c.window_frames = window;
 	uint64_t id;
 	teder_code code;
 	RETRY(code, teder_configure_analysis(e, &c, &id));
 	OK(code);
 	memset(&c, 0xff, sizeof(c)); /* admission must own a copy */
 	return id;
+}
+
+static uint64_t configure(teder_engine *e, unsigned enabled, unsigned window)
+{
+	teder_analysis_config c = INIT(teder_analysis_config);
+	c.enabled = enabled;
+	c.window_frames = window;
+	return configure_with(e, c);
+}
+
+static teder_analysis_config spectral(unsigned window, unsigned hop)
+{
+	teder_analysis_config c = INIT(teder_analysis_config);
+	c.enabled = 1;
+	c.bands = 2;
+	c.window_frames = window;
+	c.hop_frames = hop;
+	c.low_hz = 750;
+	c.high_hz = 12000;
+	return c;
 }
 
 static void completed(teder_engine *e, uint64_t id, teder_code outcome)
@@ -212,7 +229,7 @@ START_TEST(configuration)
 	fixture f;
 	teder_engine *e = create(&f);
 	size_t base = owned(e);
-	for (unsigned mode = 0; mode < 13; mode++) {
+	for (unsigned mode = 0; mode < 19; mode++) {
 		teder_analysis_config c = INIT(teder_analysis_config);
 		c.enabled = 1;
 		teder_code expected = TEDER_INVALID;
@@ -248,15 +265,36 @@ START_TEST(configuration)
 			break;
 		case 9:
 			c.bands = 1;
-			expected = TEDER_UNSUPPORTED;
+			c.window_frames = 33;
 			break;
 		case 10:
-			c.hop_frames = 1;
-			expected = TEDER_UNSUPPORTED;
+			c.hop_frames = 2049;
 			break;
 		case 11:
 			c.floor_db = -80;
 			expected = TEDER_UNSUPPORTED;
+			break;
+		case 13:
+			c.smoothing_ms = -1;
+			break;
+		case 14:
+			c.peak_decay_db_per_s = -1;
+			break;
+		case 15:
+			c.bands = 1;
+			c.window_frames = 16;
+			break;
+		case 16:
+			c.bands = 1;
+			c.low_hz = -1;
+			break;
+		case 17:
+			c.bands = 1;
+			c.high_hz = 20;
+			break;
+		case 18:
+			c.bands = 1;
+			c.floor_db = 1;
 			break;
 		case 12:
 			c.abi_version++;
@@ -271,19 +309,19 @@ START_TEST(configuration)
 	drain(e);
 	size_t bytes = owned(e);
 	f.tracker.fail_at = f.tracker.attempts + 1;
-	completed(e, configure(e, 1, 2), TEDER_NO_MEMORY);
+	completed(e, configure_with(e, spectral(32, 16)), TEDER_NO_MEMORY);
 	f.tracker.fail_at = 0;
 	ck_assert(owned(e) == bytes && f.tracker.live == 3);
 	uint64_t limit = e->config.engine_bytes_limit;
 	td_lock(e);
 	e->config.engine_bytes_limit = bytes;
 	td_unlock(e);
-	completed(e, configure(e, 1, 2), TEDER_LIMIT);
+	completed(e, configure_with(e, spectral(32, 16)), TEDER_LIMIT);
 	td_lock(e);
 	e->config.engine_bytes_limit = limit;
 	e->analysis_version = UINT64_MAX;
 	td_unlock(e);
-	completed(e, configure(e, 1, 2), TEDER_LIMIT);
+	completed(e, configure_with(e, spectral(32, 16)), TEDER_LIMIT);
 	td_lock(e);
 	e->analysis_version = 1;
 	td_unlock(e);
@@ -327,7 +365,7 @@ START_TEST(cancellation)
 		teder_engine *e = create(&f);
 		size_t base = owned(e);
 		atomic_store(&f.point, after ? TD_ANALYSIS_AFTER_COMMIT : TD_ANALYSIS_BEFORE_COMMIT);
-		uint64_t id = configure(e, 1, 4), other = 99;
+		uint64_t id = configure_with(e, spectral(32, 16)), other = 99;
 		th_gate_await(&f.gate);
 		teder_analysis_config c = INIT(teder_analysis_config);
 		ck_assert(teder_configure_analysis(e, &c, &other) == TEDER_BUSY && !other);
@@ -338,7 +376,7 @@ START_TEST(cancellation)
 		completed(e, id, after ? TEDER_OK : TEDER_CANCELLED);
 		ck_assert((owned(e) > base) == (after != 0));
 		if (after) {
-			feed(e, 1, 0, 4, 1, 1);
+			feed(e, 1, 0, 32, 1, 1);
 			drain(e);
 			teder_snapshot *s = acquire(e);
 			ck_assert(info(s).config_revision == 1);
@@ -456,6 +494,227 @@ START_TEST(stale)
 }
 END_TEST
 
+/* Model one producer callback at a known output clock, without wall-clock sleeps. */
+static void signal(teder_engine *e,
+                   uint64_t start,
+                   unsigned frames,
+                   unsigned rate,
+                   float amplitude,
+                   bool tone,
+                   uint64_t source)
+{
+	float pcm[512];
+	ck_assert(frames <= 256);
+	for (unsigned n = 0; n < frames; n++) {
+		float x = tone ? (float)sin(2 * 3.141592653589793 * (double)((start + n) % 8) / 8) : 1;
+		pcm[2 * n] = amplitude * x;
+		pcm[2 * n + 1] = -pcm[2 * n];
+	}
+	td_analysis_write w = td_analysis_begin(&e->analysis, 1, rate, start, true);
+	td_analysis_append(&w, pcm, frames, source, source + 10);
+	td_analysis_finish(&w);
+	drain(e);
+}
+
+static float band(teder_snapshot *s, unsigned index)
+{
+	const float *values;
+	uint32_t count;
+	OK(teder_snapshot_bands(s, &values, &count));
+	ck_assert(count == 2 && index < count);
+	return values[index];
+}
+
+START_TEST(overlap)
+{
+	fixture f;
+	teder_engine *e = create(&f);
+	completed(e, configure_with(e, spectral(32, 16)), TEDER_OK);
+	signal(e, 0, 16, 48000, 1, true, 11);
+	empty(e);
+	signal(e, 16, 16, 48000, 1, true, 22);
+	teder_snapshot *a = acquire(e);
+	teder_snapshot_info first = info(a);
+	ck_assert(first.sequence == 1 && first.frames == 32 && first.output_start == 0 &&
+	          first.config_revision == 1 && first.peak[0] == 1 && first.peak[1] == 1);
+	ck_assert_float_eq_tol(first.rms[0], sqrt(.5), 1e-6);
+	ck_assert_float_eq_tol(band(a, 1), 0, 1e-5);
+	ck_assert(band(a, 0) == -90);
+	const teder_span *spans;
+	uint32_t count;
+	OK(teder_snapshot_spans(a, &spans, &count));
+	const teder_span expected[] = {{0, 16, 11, 21}, {16, 16, 22, 32}};
+	ck_assert(count == 2 && !memcmp(spans, expected, sizeof(expected)));
+	for (unsigned n = 0; n < 2; n++) {
+		signal(e, 32 + 16 * n, 16, 48000, 1, true, n ? 33 : 22);
+		teder_snapshot *b = acquire(e);
+		teder_snapshot_info i = info(b);
+		ck_assert(i.output_start == 16 + 16 * n && i.frames == 32 && i.sequence == 2 + n);
+		const teder_span *actual;
+		OK(teder_snapshot_spans(b, &actual, &count));
+		ck_assert(count == n + 1 && actual[0].source == 22 && actual[0].track == 32 &&
+		          actual[0].output_start == i.output_start && actual[0].frames == (n ? 16 : 32));
+		if (n)
+			ck_assert(actual[1].source == 33 && actual[1].track == 43 &&
+			          actual[1].output_start == 48 && actual[1].frames == 16);
+		teder_snapshot_release(b);
+	}
+	teder_analysis_config c = spectral(0, 0);
+	c.low_hz = c.high_hz = 0; /* public defaults: 2048/512, 20 Hz/Nyquist, -90 dB */
+	completed(e, configure_with(e, c), TEDER_OK);
+	for (unsigned n = 0; n < 8; n++)
+		signal(e, 64 + 256 * n, 256, 48000, 0, false, 44);
+	teder_snapshot *b = acquire(e);
+	ck_assert(info(b).frames == 2048 && info(b).output_start == 64 && band(b, 1) == -90);
+	teder_snapshot_release(b);
+	for (unsigned n = 0; n < 2; n++)
+		signal(e, 2112 + 256 * n, 256, 48000, 0, false, 44);
+	b = acquire(e);
+	ck_assert(info(b).output_start == 576 && info(b).frames == 2048);
+	teder_snapshot_release(b);
+	completed(e, configure(e, 0, 0), TEDER_OK);
+	OK(th_close(e));
+	OK(teder_destroy(&e));
+	teder_snapshot_info retained = info(a);
+	ck_assert(!memcmp(&first, &retained, sizeof(first)) &&
+	          !memcmp(spans, expected, sizeof(expected)) && band(a, 0) == -90);
+	ck_assert_float_eq_tol(band(a, 1), 0, 1e-5);
+	teder_snapshot_release(a);
+	dispose(&f, &e);
+}
+END_TEST
+
+START_TEST(filters)
+{
+	teder_snapshot_info results[2];
+	for (unsigned polling = 0; polling < 2; polling++) {
+		fixture f;
+		teder_engine *e = create(&f);
+		teder_analysis_config c = INIT(teder_analysis_config);
+		c.enabled = 1;
+		c.window_frames = 4;
+		c.hop_frames = 2;
+		c.smoothing_ms = (float)(1000 / log(2)); /* one-second hops give alpha=1/2 */
+		c.peak_decay_db_per_s = (float)(20 * log10(2));
+		completed(e, configure_with(e, c), TEDER_OK);
+		const float levels[] = {1, 0, 0};
+		for (unsigned n = 0; n < 3; n++) {
+			signal(e, n ? 2 + 2 * n : 0, n ? 2 : 4, 2, levels[n], false, 1);
+			if (polling) {
+				teder_snapshot *s = acquire(e);
+				teder_snapshot_info i = info(s);
+				ck_assert_float_eq_tol(i.peak[0], n == 2 ? .5 : 1, 1e-6);
+				ck_assert_float_eq_tol(i.rms[0], n ? sqrt(n == 1 ? .75 : .375) : 1, 1e-6);
+				teder_snapshot_release(s);
+			}
+		}
+		teder_snapshot *s = acquire(e);
+		results[polling] = info(s);
+		teder_snapshot_release(s);
+		/* Pause, clock gaps and rate changes prime a new raw window. */
+		for (unsigned n = 0; n < 3; n++) {
+			uint64_t start = n == 0 ? 8 : 20 + 4 * n;
+			if (!n)
+				(void)td_analysis_begin(&e->analysis, 1, 2, start, false);
+			signal(e, start, 4, n == 2 ? 4 : 2, .125f, false, 1);
+			s = acquire(e);
+			ck_assert(info(s).rms[0] == .125f && info(s).peak[0] == .125f &&
+			          !info(s).dropped_frames);
+			teder_snapshot_release(s);
+		}
+		td_lock(e);
+		e->status.current.epoch = 2;
+		td_analysis_invalidate(e);
+		td_unlock(e);
+		for (unsigned n = 0; n < 2; n++) {
+			if (n)
+				completed(e, configure_with(e, c), TEDER_OK);
+			feed(e, 2, 4 * n, 4, n ? .03125f : .0625f, 2);
+			drain(e);
+			s = acquire(e);
+			ck_assert(info(s).epoch == 2 && info(s).config_revision == 1 + n &&
+			          info(s).rms[0] == (n ? .03125f : .0625f) &&
+			          info(s).peak[0] == info(s).rms[0]);
+			teder_snapshot_release(s);
+		}
+		dispose(&f, &e);
+	}
+	ck_assert(!memcmp(results, results + 1, sizeof(results[0])));
+}
+END_TEST
+
+START_TEST(spectrum_filters)
+{
+	float result[2];
+	for (unsigned pinned = 0; pinned < 2; pinned++) {
+		fixture f;
+		teder_engine *e = create(&f);
+		teder_analysis_config c = spectral(32, 32);
+		c.smoothing_ms = (float)((32.0 / 48) / log(2));
+		completed(e, configure_with(e, c), TEDER_OK);
+		teder_snapshot *held[2] = {NULL, NULL};
+		const float levels[] = {1, .5f, 0, 0};
+		for (unsigned n = 0; n < 4; n++) {
+			if (n == 3)
+				teder_snapshot_release(held[1]);
+			signal(e, 32 * n, 32, 48000, levels[n], true, 1);
+			if (pinned && n < 2)
+				held[n] = acquire(e);
+		}
+		teder_snapshot *s = acquire(e);
+		result[pinned] = band(s, 1);
+		ck_assert_float_eq_tol(result[pinned], (-3.0102999566 - 90 - 180) / 4, 1e-4);
+		ck_assert(info(s).output_start == 96 && info(s).sequence == 4 - pinned &&
+		          info(s).dropped_publications == pinned && !info(s).dropped_frames);
+		teder_snapshot_release(s);
+		teder_snapshot_release(held[0]);
+		dispose(&f, &e);
+	}
+	ck_assert(result[0] == result[1]); /* dropped publications still advance audio-time filters */
+}
+END_TEST
+
+START_TEST(overlap_drops)
+{
+	fixture f;
+	teder_engine *e = create(&f);
+	completed(e, configure_with(e, spectral(32, 16)), TEDER_OK);
+	feed(e, 1, 0, 8, 1, 1);
+	feed(e, 1, 8, 8, 1, 2);
+	feed(e, 1, 16, 16, 1, 3);
+	drain(e);
+	empty(e); /* three identities exceed the configured span capacity */
+	feed(e, 1, 32, 16, .5f, 3);
+	drain(e);
+	teder_snapshot *s = acquire(e);
+	ck_assert(info(s).output_start == 16 && info(s).span_count == 1 &&
+	          info(s).dropped_frames == 32 && info(s).dropped_publications == 1);
+	teder_snapshot_release(s);
+	feed(e, 1, 48, 16, NAN, 3);
+	feed(e, 1, 64, 16, .25f, 3);
+	feed(e, 1, 80, 16, .25f, 3);
+	feed(e, 1, 96, 8, .25f, 3);
+	drain(e);
+	feed(e, 1, 112, 32, .125f, 3); /* only eight fresh partial frames are discarded */
+	drain(e);
+	s = acquire(e);
+	ck_assert(info(s).output_start == 112 && info(s).dropped_frames == 72 &&
+	          info(s).dropped_publications == 3 && info(s).rms[0] == .125f);
+	teder_snapshot_release(s);
+	teder_analysis_config c = spectral(32, 16);
+	c.high_hz = 0;
+	completed(e, configure_with(e, c), TEDER_OK);
+	signal(e, 0, 32, 1000, .5f, false, 1); /* auto Nyquist below low edge */
+	empty(e);
+	signal(e, 32, 32, 48000, .25f, false, 1);
+	s = acquire(e);
+	ck_assert(info(s).output_start == 32 && info(s).dropped_frames == 104 &&
+	          info(s).dropped_publications == 4 && info(s).rms[0] == .25f);
+	teder_snapshot_release(s);
+	dispose(&f, &e);
+}
+END_TEST
+
 START_TEST(closing)
 {
 	const unsigned points[] = {
@@ -463,16 +722,16 @@ START_TEST(closing)
 	for (unsigned n = 0; n < 3; n++) {
 		fixture f;
 		teder_engine *e = create(&f);
-		completed(e, configure(e, 1, 4), TEDER_OK);
-		feed(e, 1, 0, 4, .5f, 1);
+		completed(e, configure_with(e, spectral(32, 16)), TEDER_OK);
+		feed(e, 1, 0, 32, .5f, 1);
 		drain(e);
 		teder_snapshot *s = acquire(e), *empty_snapshot = NULL;
 		atomic_store(&f.point, points[n]);
 		uint64_t id = 0;
 		if (n == 2)
-			id = configure(e, 1, 2);
+			id = configure_with(e, spectral(64, 16));
 		else
-			feed(e, 1, 4, 4, 1, 1);
+			feed(e, 1, 32, 16, 1, 1);
 		th_gate_await(&f.gate);
 		OK(teder_request_close(e));
 		ck_assert(teder_destroy(&e) == TEDER_BUSY && e);
@@ -503,7 +762,11 @@ int main(int argc, char **argv)
 	             {"cancellation", cancellation},
 	             {"drops", drops},
 	             {"stale", stale},
-	             {"closing", closing}};
+	             {"closing", closing},
+	             {"overlap", overlap},
+	             {"filters", filters},
+	             {"spectrum-filters", spectrum_filters},
+	             {"overlap-drops", overlap_drops}};
 	for (unsigned n = 0; n < sizeof(cases) / sizeof(cases[0]); n++) {
 		if (strcmp(argv[1], cases[n].name))
 			continue;

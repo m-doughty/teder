@@ -576,7 +576,7 @@ The analysis worker consumes enabled configurations; it sleeps while disabled
 and polls at 5 ms intervals when enabled without queued data. The callback never
 wakes it. No spectrum or level calculation runs on the callback.
 
-### Analysis configuration (implemented meters)
+### Analysis configuration (implemented)
 
 `teder_configure_analysis` copies a prefixed configuration into a retained request.
 Only one may be pending (otherwise BUSY). Enable, reconfigure and disable commit
@@ -585,43 +585,54 @@ configuration, partial window and publication. Old and candidate arenas both cou
 against the engine budget until cleanup. Each success advances a nonwrapping
 revision and clears current data. Revision exhaustion returns LIMIT unchanged.
 
-Set `enabled=1`, `bands=0` for meters; `enabled=0` disables. `window_frames=0`
-selects 2048; explicit sizes 1–65536 are supported. `hop_frames=0` uses that window
-size. Only equal window/hop sizes are supported now. All frequency, floor,
-smoothing and decay fields must be zero. Nonfinite floats, invalid enable/reserved
-values return INVALID. Oversized window/band limits return LIMIT; spectrum,
-overlap and nonzero DSP options return UNSUPPORTED, including on disable.
+Set `enabled=1`, `bands=0` for meters, or request 1–4096 spectrum bands within
+`max_bands`; `enabled=0` disables. `window_frames=0` selects 2048. Meter windows
+support 1–65536 frames; spectrum requires powers of two from 32 through 65536.
+`hop_frames=0` selects the whole meter window or one quarter of a spectrum window;
+explicit hops support 1 through window size. Small hops increase worker cost.
+With bands enabled, zero low/high/floor selects 20 Hz/Nyquist/−90 dB. Explicit
+low must be positive, high must exceed low, and floor must be negative. Explicit
+edges above Nyquist remain fixed with zero unavailable energy; automatic Nyquist
+at/below low makes a window invalid. Frequency/floor fields without bands remain
+UNSUPPORTED. All floats must be finite; smoothing/decay must be nonnegative.
+Invalid fields return INVALID; oversized window/band counts return LIMIT.
+Validation also applies to disable. Rejected admission writes request zero.
 
-Complete, nonoverlapping rectangular windows produce independent stereo peak
-(maximum absolute sample) and RMS (square root of mean squared samples), in
-linear amplitude. Accumulation uses double precision. Bands have count zero and
-NULL data. No partial final window is published. Each snapshot covers one epoch,
-revision, sample rate and contiguous output interval, with complete ordered source
-spans. Adjacent equal identities merge; source/track zero denotes inserted silence.
-Mute preserves source identity. Pause/final padding creates no new analysis data.
+Each complete window measures unwindowed stereo peak/RMS and optionally Hann
+spectrum bands. With zero smoothing/decay, meters retain their raw linear values.
+Zero bands means count zero and NULL band data. [Spectrum calculation](spectrum.md)
+defines normalization, filters and numerical limits. One configuration arena owns
+bounded PCM/identity history, output spans, FFT scratch and filter state together.
+The callback copies samples only; measurement and filtering run on the worker.
+No partial final window is published. Each snapshot covers one epoch, revision,
+sample rate and contiguous output interval, including retained overlap and complete
+ordered source spans. Adjacent equal identities merge; source/track zero denotes
+inserted silence. Mute preserves identity. Pause/final padding creates no new data.
 
 Acquire is bounded by `snapshot_loans`. Disabled/no-current data returns AGAIN;
 closing returns CLOSED; exhausted loan capacity returns LIMIT. A held snapshot
 stays immutable through publication, pause, seek, disable, close and destroy.
 Epoch/revision mismatches are discarded. Discontinuities reset partial windows;
-a window never combines samples across a gap, pause, rate change or new epoch.
+filters prime from the next valid window. A window never combines samples across
+a gap, pause, rate change or new epoch. Reconfiguration also resets filter state.
 
 Status exposes cumulative sequence, dropped-frame and dropped-publication counters.
 Callback overflow counts the complete rejected interval immediately. Incomplete
-windows abandoned at a same-epoch/revision discontinuity count their frames.
-Nonfinite samples or excessive spans discard the entire window, counting its
-frames and one publication. All-pinned slots count one dropped publication only.
+windows abandoned at a same-epoch/revision discontinuity count newly accumulated
+frames. Nonfinite samples, excessive spans or invalid auto-Nyquist ranges reject
+the entire window, counting new frames and one publication. Retained overlap is
+not counted again. Invalid windows reset filters; retained invalid samples may
+also reject subsequent windows until they leave history. All-pinned slots count
+one dropped publication only; history and filters still advance.
 Intentional epoch/configuration invalidation is not counted as pressure loss.
 Counters saturate; successful publication sequence exhaustion closes with LIMIT.
 Snapshots copy counters at publication; failed publication leaves current data
 and existing loans unchanged. The host chooses when retained data becomes stale.
 
-### Spectrum and rendering (planned)
+### Rendering (planned)
 
-The private [spectrum core](spectrum.md) specifies and tests Hann normalization,
-stereo power and logarithmic bands. Public spectrum configuration, overlapping
-history, smoothing and decay await worker integration. Full analysis capability
-stays clear; the meters-only contract above is unchanged.
+Spectrum analysis is implemented. Build capability/backend masks remain zero;
+use the implemented API list.
 
 The renderer owns no analysis history; decay belongs to analysis time, not UI
 paint frequency. Draw borrows the snapshot and plane only until return, clips

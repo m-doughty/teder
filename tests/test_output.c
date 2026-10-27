@@ -2660,7 +2660,13 @@ START_TEST(loss_preparing)
 		loss_event(e, after);
 		ck_assert(after.media_request == id);
 		teder_request_info r = INIT(teder_request_info);
-		OK(teder_request_get(e, id, &r));
+		td_lock(e);
+		code = teder_request_get(e, id, &r);
+		td_unlock(e);
+		ck_assert(code == TEDER_AGAIN); /* bounded reads report gate contention */
+		while ((code = teder_request_get(e, id, &r)) == TEDER_AGAIN)
+			th_yield();
+		OK(code);
 		ck_assert(r.state == TEDER_RUNNING);
 		ck_assert(teder_request_ack(e, id) == TEDER_BUSY);
 		th_gate_release(&f.gate);

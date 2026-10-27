@@ -3,9 +3,9 @@
 A C17 playback and analysis library, with a separate notcurses
 renderer. Version 0.1.0 plays local FLAC, with play/pause/stop,
 seeking, gapless playback across source-format changes, submitted clocks and
-software gain/mute and peak/RMS meters. Spectrum and rendering remain in progress.
-The private [spectrum calculation](docs/spectrum.md) now has numerical and
-allocation tests; public spectrum enablement awaits worker integration.
+software gain/mute, peak/RMS meters and overlapping spectrum snapshots.
+[Spectrum calculation](docs/spectrum.md) defines logarithmic bands, normalization
+and audio-time smoothing/decay. Terminal rendering remains in progress.
 
 Implemented exports:
 
@@ -22,13 +22,13 @@ Implemented exports:
   and `teder_result_release`.
 - `teder_configure_analysis`, `teder_snapshot_acquire`, `teder_snapshot_get_info`,
   `teder_snapshot_bands`, `teder_snapshot_spans`, and `teder_snapshot_release`.
-  Meters-only snapshots contain linear peak/RMS and complete source spans.
+  Snapshots contain linear peak/RMS, optional dB bands and complete source spans.
 
 The engine budgets a disabled post-gain feed in its arena and an independent
 snapshot pool. Native output borrows the stable feed until device retirement.
 The pool pin lasts until destroy; held loans retain only that pool afterward.
 A dedicated worker handles transactional configuration and bounded publication.
-See [analysis configuration](docs/api-contract.md#analysis-configuration-implemented-meters).
+See [analysis configuration](docs/api-contract.md#analysis-configuration-implemented).
 
 Build queries still report zero capabilities/backend mask. FLAC open and seek
 prepare sources asynchronously and stream bounded PCM. AUTOPLAY starts the selected
