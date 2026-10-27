@@ -32,12 +32,13 @@ The pool pin lasts until destroy; held loans retain only that pool afterward.
 A dedicated worker handles transactional configuration and bounded publication.
 See [analysis configuration](docs/api-contract.md#analysis-configuration-implemented).
 
-Build queries still report zero capabilities/backend mask. FLAC open and seek
+Build queries report implemented features and compiled backends, as defined by the
+[ABI 1 contract](docs/abi.md); they do not certify device availability. FLAC open and seek
 prepare sources asynchronously and stream bounded PCM. AUTOPLAY starts the selected
 output after bounded prefill. Prepared successors follow the current
 track within the same device stream. See [successor usage](docs/sources.md#prepared-successors)
 and [gapless behavior](docs/sources.md#gapless-playback).
-Other declarations remain draft contracts and will not link.
+Every public declaration is implemented.
 
 `teder_probe` reads FLAC tags and optional artwork on a dedicated worker without
 decoding audio or blocking source preparation. It copies accepted data into one

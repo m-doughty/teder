@@ -18,7 +18,8 @@ teder_code TEDER_CALL teder_get_build_info(teder_build_info *out)
 	info.version_major = TEDER_VERSION_MAJOR;
 	info.version_minor = TEDER_VERSION_MINOR;
 	info.version_patch = TEDER_VERSION_PATCH;
-	/* WHY: compiled dependencies do not establish tested playback capabilities. */
+	info.capabilities = TEDER_CAP_FLAC | TEDER_CAP_GAPLESS | TEDER_CAP_ANALYSIS | TEDER_CAP_ARTWORK;
+	info.backend_mask = TEDER_BACKEND_MASK;
 	memcpy(out, &info, sizeof(info));
 	return TEDER_OK;
 }

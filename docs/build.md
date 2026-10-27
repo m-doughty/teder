@@ -3,6 +3,7 @@
 Require CMake 3.25+, a C17 compiler, and a C++ compiler for libFLAC's upstream
 configuration checks (teder itself is C). Ninja is recommended. All v1 targets
 are 64-bit little-endian with IEEE binary32 float.
+Tests additionally require Python 3 and symbol-inspection tools; see [ABI checks](abi.md#validation-boundaries).
 
 | Required v1 platform | Architecture | Toolchain target | Audio backend |
 |---|---|---|---|
@@ -136,8 +137,10 @@ plane safely. The host must supply the same loaded runtime that created the plan
 verify deployment/module identity before passing planes. Native tests record the
 actual loaded library path.
 This target implements the [renderer API](renderer.md).
-An installed renderer consumer supplies `TEDER_NOTCURSES_LIBRARY` pointing to
-that runtime's core import/shared library and links `teder::notcurses`.
+An installed renderer host links `teder::notcurses` and the matching runtime's
+core import/shared library. Static teder packages also require
+`TEDER_NOTCURSES_LIBRARY` pointing to that library. Shared deployments must make
+the runtime discoverable by the loader; ELF executable RUNPATH is not transitive.
 For the installed test consumer, also supply `TEDER_NOTCURSES_PREFIX`; it compiles
 against those headers and checks a real native plane through the installed library.
 Core-only builds do not register renderer tests. Renderer-enabled CTest runs real

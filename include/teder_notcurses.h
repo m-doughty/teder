@@ -36,7 +36,7 @@ typedef struct teder_rectangle {
 } teder_rectangle;
 
 /* Check the linked runtime's numeric version, then copy teder build information.
- * This does not certify fork identity or promise implemented drawing features.
+ * This does not certify fork identity. The returned masks describe the core.
  */
 TEDER_NOTCURSES_API teder_code TEDER_CALL teder_renderer_get_build_info(teder_build_info *out);
 

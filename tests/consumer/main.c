@@ -46,7 +46,7 @@ int main(int argc, char **argv)
 	info.abi_version = TEDER_ABI_VERSION;
 	if (teder_get_build_info(&info) != TEDER_OK)
 		return 1;
-	if (info.abi_version != 1 || info.capabilities != 0 || info.backend_mask != 0)
+	if (info.abi_version != 1 || info.capabilities != 15 || info.backend_mask == 0)
 		return 2;
 	uint64_t invalid_request = 99;
 	if (teder_enumerate_devices(NULL, &invalid_request) != TEDER_INVALID || invalid_request != 0)

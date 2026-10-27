@@ -1,10 +1,9 @@
 # teder C API contract
 
-This is the implementation contract for the draft headers
-`include/teder.h` and `include/teder_notcurses.h`.
-[README.md](../README.md) lists the implemented symbols. ABI 1 is
-provisional; incompatible changes before
-release require updating this document and the headers.
+This is the implemented contract for `include/teder.h` and
+`include/teder_notcurses.h`. All public declarations link. The
+[ABI 1 reference](abi.md) defines compatibility, layouts, build queries and
+platform-validation boundaries. Incompatible changes require a new ABI.
 
 ## ABI and buffers
 
@@ -234,7 +233,8 @@ mixed formats use a fixed output stream and the
 No native transition depends on event polling. Late preparation reports its
 outcome; starvation emits UNDERRUN and initialized silence, never invented media.
 EOF without a committed successor ends this sequence; late readiness alone
-does not silently start another track. A new open is required after ENDED.
+does not silently start another track. Open a new source or stop/seek the retained
+source before requesting playback after ENDED.
 
 ## Clocks, metadata, analysis and rendering
 
@@ -366,7 +366,8 @@ PLAYING requires successful native startup; missing output returns BAD_STATE.
 Failed startup leaves output LOST and the committed source PAUSED. Preparation
 failure before commitment preserves the old source. Ordinary open stops the old
 consumer and leaves READY. Seeking while playing resumes at the requested frame.
-Build capability bits remain unchanged while the broader contracts are incomplete.
+Build queries distinguish implemented features from compiled backend choices;
+neither promises an available output device.
 
 The producer reads coherent, generation-tagged callback reports. Final PCM
 submission sets SUBMIT_EOF and ENDED; output continues with silence until explicit
@@ -631,8 +632,8 @@ and existing loans unchanged. The host chooses when retained data becomes stale.
 
 ### Rendering (implemented)
 
-Spectrum analysis is implemented. Build capability/backend masks remain zero;
-use the implemented API list.
+Spectrum analysis and native rendering are implemented. The separate renderer
+returns the core's build-query masks; see [ABI 1](abi.md#features-and-platforms).
 
 The renderer owns no analysis history; decay belongs to analysis time, not UI
 paint frequency. Draw borrows the snapshot and plane only until return, clips

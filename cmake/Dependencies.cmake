@@ -22,10 +22,13 @@ target_compile_definitions(teder_miniaudio PUBLIC MA_NO_DECODING MA_NO_ENCODING
 	MA_NO_ENGINE MA_NO_NODE_GRAPH MA_NO_RESOURCE_MANAGER MA_ENABLE_ONLY_SPECIFIC_BACKENDS)
 if(WIN32)
 	target_compile_definitions(teder_miniaudio PUBLIC MA_ENABLE_WASAPI)
+	set(teder_backend_mask "(UINT64_C(1) << TEDER_BACKEND_WASAPI)")
 elseif(APPLE)
 	target_compile_definitions(teder_miniaudio PUBLIC MA_ENABLE_COREAUDIO)
+	set(teder_backend_mask "(UINT64_C(1) << TEDER_BACKEND_COREAUDIO)")
 else()
 	target_compile_definitions(teder_miniaudio PUBLIC MA_ENABLE_ALSA MA_ENABLE_PULSEAUDIO)
+	set(teder_backend_mask "((UINT64_C(1) << TEDER_BACKEND_ALSA) | (UINT64_C(1) << TEDER_BACKEND_PULSE))")
 	target_compile_definitions(teder_miniaudio PRIVATE _DEFAULT_SOURCE _POSIX_C_SOURCE=200809L)
 endif()
 add_library(teder_kissfft OBJECT "${teder_kissfft_source_SOURCE_DIR}/kiss_fft.c"

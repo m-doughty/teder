@@ -1,7 +1,7 @@
 #ifndef TEDER_H
 #define TEDER_H
 
-/* ABI draft 1; not a released library. See README.md for implemented symbols.
+/* ABI 1; not a released library. See docs/abi.md for the compatibility contract.
  * Read docs/api-contract.md for states, bounds, threading and ownership.
  * No function invokes application callbacks. No public call is audio-safe.
  */
@@ -211,7 +211,8 @@ typedef struct teder_snapshot_info {
 } teder_snapshot_info;
 
 /* Build info is a caller-buffer copy, with no library-owned output pointers.
- * Backend mask bit n means backend ID n; capabilities promise tested features.
+ * Capability bits identify implemented features; backend bit n means compiled
+ * backend ID n. Neither mask certifies devices, dependencies or platform testing.
  */
 TEDER_API teder_code TEDER_CALL teder_get_build_info(teder_build_info *out);
 /* Zero config limits select documented build defaults; query resolved values.

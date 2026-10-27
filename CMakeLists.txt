@@ -136,7 +136,7 @@ if(TEDER_WITH_NOTCURSES)
 endif()
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(FILES README.md DESTINATION ${CMAKE_INSTALL_DOCDIR})
-install(FILES docs/api-contract.md docs/build.md docs/dependencies.md docs/sources.md docs/spectrum.md docs/renderer.md docs/demos.md
+install(FILES docs/abi.md docs/api-contract.md docs/build.md docs/dependencies.md docs/sources.md docs/spectrum.md docs/renderer.md docs/demos.md
 	DESTINATION ${CMAKE_INSTALL_DOCDIR}/docs)
 set(teder_config_dir "${CMAKE_INSTALL_LIBDIR}/cmake/teder")
 configure_package_config_file(cmake/tederConfig.cmake.in

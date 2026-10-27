@@ -253,3 +253,6 @@ target_compile_definitions(teder_test_spectrum_audit PRIVATE TD_FFT_AUDIT)
 target_link_libraries(teder_test_spectrum_audit PRIVATE teder_spectrum teder_fft_audit teder_test_support Check::check)
 add_test(NAME spectrum.no-allocation COMMAND teder_test_spectrum_audit sizes)
 set_tests_properties(spectrum.no-allocation PROPERTIES TIMEOUT 30 LABELS "analysis;allocation-audit")
+
+set(teder_abi_headers "${PROJECT_SOURCE_DIR}/include")
+add_subdirectory(abi)

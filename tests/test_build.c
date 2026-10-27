@@ -15,8 +15,14 @@ START_TEST(valid)
 	ck_assert_uint_eq(info.version_major, TEDER_VERSION_MAJOR);
 	ck_assert_uint_eq(info.version_minor, TEDER_VERSION_MINOR);
 	ck_assert_uint_eq(info.version_patch, TEDER_VERSION_PATCH);
-	ck_assert_uint_eq(info.capabilities, 0);
-	ck_assert_uint_eq(info.backend_mask, 0);
+	ck_assert_uint_eq(info.capabilities, 15);
+#ifdef _WIN32
+	ck_assert_uint_eq(info.backend_mask, 2);
+#elif defined(__APPLE__)
+	ck_assert_uint_eq(info.backend_mask, 4);
+#else
+	ck_assert_uint_eq(info.backend_mask, 24);
+#endif
 	ck_assert_uint_eq(info.reserved, 0);
 }
 END_TEST
