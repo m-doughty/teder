@@ -363,17 +363,27 @@ and a queued gain command. All five slots are occupied. Two release orders prove
 that native/source retirement can finish while probe close remains pending, or
 that probe retirement can finish while source preparation remains blocked.
 Destroy returns BUSY at each held boundary; no timeout reclaims borrowed storage.
-Each schedule joins all four engine workers, closes exactly three source files
+Each schedule joins all five engine workers, closes exactly three source files
 and three probe files, and releases the native device/context exactly once.
 
-`output.shutdown-startup` rejects the engine allocation and all eleven startup
+`output.shutdown-startup` rejects the engine allocation and all fourteen startup
 stages, including post-thread publication. It checks exact worker entry/exit
 masks, zero tracked allocations and unchanged warmed Windows handle counts.
 `output.rollback-composed` fails every allocation observed during probe,
-successor replacement, output replacement, seek and STOP rewind. Each operation
-starts with a paused source, ready successor, detached results and an untaken
-probe result. Probe/next/seek failures preserve the old state and reservation;
-all paths close with only their expected untaken result and engine arena left.
+successor replacement, output replacement, seek, STOP rewind and spectrum
+configuration replacement. Each operation starts with a paused 128-frame source,
+ready successor, active FFT arena, held spectrum loan, detached results and an
+untaken probe result. Probe/next/seek/configuration failures preserve the old
+state and reservation. The loan's complete info, bands and source span remain
+unchanged through failures, successful replacements and engine destruction.
+After destroy, exactly two result arenas and one snapshot pool remain; releasing
+results leaves precisely the pool, and final loan release restores zero allocations.
+
+`output.shutdown-analysis` holds spectrum publication and a probe read together.
+Native output and source retirement finish first, but destroy remains BUSY.
+Both worker release orders preserve the loan and prevent a late publication.
+All five worker exits and exact native/file counts are checked before destroy;
+independent result/snapshot owners then follow the same staged release checks.
 
 These extend the existing cancellation, preparation, refill, native-init/loss,
 PCM-reference and dependency-allocation tests. Native dispatch is synthetic;

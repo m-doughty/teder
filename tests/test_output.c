@@ -1,5 +1,6 @@
 #include "support/harness.h"
 #include "support/engine.h"
+#include "analysis_pool.h"
 #include <check.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,6 +9,7 @@
 #include "support/track.h"
 #include "support/mixed.h"
 #define LONG_TRACK OUTPUT_DIR "/output-long.flac"
+#define AUDIT_TRACK OUTPUT_DIR "/output-audit.flac"
 enum { LONG_FRAMES = 32769 };
 #define TRACK FIXTURE_DIR "/track-a.flac"
 
@@ -321,6 +323,8 @@ static void checkpoint(void *p, uint64_t request, unsigned point)
 		hit(p, 16);
 	if (point == TD_NEXT_AFTER_PUBLISH)
 		hit(p, 17);
+	if (point == TD_ANALYSIS_BEFORE_PUBLISH)
+		hit(p, 19);
 }
 
 static void control_checkpoint(void *p, uint32_t point)
@@ -3059,6 +3063,127 @@ static teder_snapshot *analysis_current(teder_engine *e)
 	return s;
 }
 
+typedef struct {
+	teder_snapshot *loan;
+	teder_snapshot_info info;
+	float bands[2];
+	teder_span span;
+} held_spectrum;
+
+static uint64_t configure_spectrum(teder_engine *e, unsigned window)
+{
+	teder_analysis_config c = INIT(teder_analysis_config);
+	c.enabled = 1;
+	c.window_frames = window;
+	c.hop_frames = 16;
+	c.bands = 2;
+	c.low_hz = 750;
+	c.high_hz = 12000;
+	uint64_t id;
+	teder_code code;
+	RETRY(code, teder_configure_analysis(e, &c, &id));
+	OK(code);
+	return id;
+}
+
+static held_spectrum retain_spectrum(teder_engine *e)
+{
+	held_spectrum s = {.loan = analysis_current(e), .info = INIT(teder_snapshot_info)};
+	OK(teder_snapshot_get_info(s.loan, &s.info));
+	const float *bands;
+	const teder_span *spans;
+	uint32_t count;
+	OK(teder_snapshot_bands(s.loan, &bands, &count));
+	ck_assert(count == 2 && s.info.bands == 2 && s.info.frames == 32 &&
+	          s.info.config_revision == 1 && s.info.output_start == 0);
+	memcpy(s.bands, bands, sizeof(s.bands));
+	OK(teder_snapshot_spans(s.loan, &spans, &count));
+	ck_assert(count == 1 && s.info.span_count == 1 && spans->output_start == 0 &&
+	          spans->frames == 32 && spans->source == 1 && spans->track == 99);
+	s.span = *spans;
+	return s;
+}
+
+static void verify_spectrum(const held_spectrum *s)
+{
+	teder_snapshot_info info = INIT(teder_snapshot_info);
+	const float *bands;
+	const teder_span *spans;
+	uint32_t count;
+	OK(teder_snapshot_get_info(s->loan, &info));
+	ck_assert(!memcmp(&info, &s->info, sizeof(info)));
+	OK(teder_snapshot_bands(s->loan, &bands, &count));
+	ck_assert(count == 2 && !memcmp(bands, s->bands, sizeof(s->bands)));
+	OK(teder_snapshot_spans(s->loan, &spans, &count));
+	ck_assert(count == 1 && !memcmp(spans, &s->span, sizeof(s->span)));
+}
+
+static void
+destroy_with_spectrum(fixture *f, teder_engine **e, teder_result **results, const held_spectrum *s)
+{
+	size_t pool_bytes = (*e)->snapshots->bytes;
+	for (unsigned i = 0; i < 5; i++)
+		ck_assert(atomic_load(&f->worker_entries[i]) == 1 && atomic_load(&f->worker_exits[i]) == 1);
+	OK(teder_destroy(e));
+	ck_assert(!*e && f->tracker.live == 3 &&
+	          f->tracker.bytes == pool_bytes + results[0]->bytes + results[1]->bytes);
+	verify_retained(results);
+	verify_spectrum(s);
+	for (unsigned i = 0; i < 2; i++)
+		teder_result_release(results[i]);
+	ck_assert(f->tracker.live == 1 && f->tracker.bytes == pool_bytes);
+	teder_snapshot_release(s->loan);
+	dispose(f);
+}
+
+START_TEST(shutdown_analysis)
+{
+	th_make_track(AUDIT_TRACK, 128);
+	for (unsigned analysis_first = 0; analysis_first < 2; analysis_first++) {
+		fixture f;
+		init(&f);
+		f.manual = true;
+		teder_config config = INIT(teder_config);
+		teder_engine *e = create(&f, config, false);
+		teder_result *results[2];
+		retain_pair(e, results);
+		outcome(e, configure_spectrum(e, 32), TEDER_OK);
+		outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
+		outcome(e, autoplay(e, AUDIT_TRACK), TEDER_OK);
+		step(&f, 32);
+		held_spectrum s = retain_spectrum(e);
+		atomic_store(&f.point, 19);
+		step(&f, 16);
+		th_gate_await(&f.gate); /* analysis still borrows a copied feed record */
+		atomic_store(&f.hold_probe, 1);
+		uint64_t probe = probe_track(e);
+		th_gate_await(&f.probe_gate);
+		OK(teder_request_close(e));
+		while (!atomic_load(&f.source_closed))
+			th_yield(); /* native output is quiescent before source retirement */
+		ck_assert(f.devices == 1 && f.releases == 1 && f.closed == 1 && !f.worker &&
+		          !atomic_load(&f.worker_exits[2]) && !atomic_load(&f.worker_exits[4]));
+		ck_assert(status(e).lifecycle == TEDER_CLOSING && teder_destroy(&e) == TEDER_BUSY);
+		verify_retained(results);
+		verify_spectrum(&s);
+
+		th_gate_release(analysis_first ? &f.gate : &f.probe_gate);
+		unsigned first = analysis_first ? 4 : 2, last = analysis_first ? 2 : 4;
+		while (!atomic_load(&f.worker_exits[first]))
+			th_yield();
+		ck_assert(!atomic_load(&f.worker_exits[last]) && status(e).lifecycle == TEDER_CLOSING &&
+		          teder_destroy(&e) == TEDER_BUSY);
+		verify_spectrum(&s);
+		th_gate_release(analysis_first ? &f.probe_gate : &f.gate);
+		OK(th_close(e));
+		outcome(e, probe, TEDER_CANCELLED);
+		ck_assert(status(e).analysis_sequence == s.info.sequence &&
+		          atomic_load(&f.source_closed) == 1 && atomic_load(&f.probe_closed) == 2);
+		destroy_with_spectrum(&f, &e, results, &s);
+	}
+}
+END_TEST
+
 START_TEST(analysis_playback)
 {
 	fixture f;
@@ -3201,7 +3326,8 @@ END_TEST
 
 START_TEST(rollback_composed)
 {
-	for (unsigned operation = 0; operation < 5; operation++) {
+	th_make_track(AUDIT_TRACK, 128);
+	for (unsigned operation = 0; operation < 6; operation++) {
 		size_t count = 0;
 		for (size_t fail = 0; fail <= count; fail++) {
 			fixture f;
@@ -3214,10 +3340,11 @@ START_TEST(rollback_composed)
 			teder_result *results[2];
 			retain_pair(e, results);
 			outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
-			load_track(e);
-			outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
-			step(&f, 1);
-			clock_at(e, 1);
+			outcome(e, configure_spectrum(e, 32), TEDER_OK);
+			outcome(e, autoplay(e, AUDIT_TRACK), TEDER_OK);
+			step(&f, 32);
+			clock_at(e, 32);
+			held_spectrum spectrum = retain_spectrum(e);
 			atomic_store(&f.point, 13);
 			boundary(&f, e, transport(e, TEDER_PAUSE));
 			gap_prepare(e, TRACK);
@@ -3240,8 +3367,10 @@ START_TEST(rollback_composed)
 				id = select_device(e, entry(results[0], 1).key);
 			else if (operation == 3)
 				id = seek_frame(e, 9);
-			else
+			else if (operation == 4)
 				id = transport(e, TEDER_STOP);
+			else
+				id = configure_spectrum(e, 64);
 			th_gate_release(&f.owner_gate);
 			outcome(e, id, fail ? TEDER_NO_MEMORY : TEDER_OK);
 			ma_mutex_lock(&f.tracker.lock);
@@ -3251,19 +3380,23 @@ START_TEST(rollback_composed)
 				ck_assert(f.tracker.failed_site != NULL);
 			f.tracker.fail_at = 0;
 			ma_mutex_unlock(&f.tracker.lock);
-			if (fail && (operation == 0 || operation == 1 || operation == 3)) {
+			if (fail && (operation == 0 || operation == 1 || operation == 3 || operation == 5)) {
 				teder_status s = status(e);
 				ck_assert(owned(e) == baseline && s.transport == TEDER_PAUSED &&
-				          s.source_frame == 1 && s.next_state == TEDER_NEXT_READY &&
+				          s.source_frame == 32 && s.next_state == TEDER_NEXT_READY &&
 				          s.next_source == 2);
 			}
+			if (operation == 5)
+				ck_assert(e->analysis_version == (fail ? 1 : 2));
+			verify_spectrum(&spectrum);
 			OK(th_close(e));
 			ck_assert(owned(e) == base + results[1]->bytes &&
 			          terminal(e, retained).outcome == TEDER_OK);
-			destroy_with_results(&f, &e, results);
+			destroy_with_spectrum(&f, &e, results, &spectrum);
 		}
 		ck_assert(count > 0);
-		printf("composed operation=%u allocation failures 1..%zu unwind\n", operation, count);
+		printf(
+		    "composed operation=%u allocation failures 1..%u unwind\n", operation, (unsigned)count);
 	}
 }
 END_TEST
@@ -3370,6 +3503,8 @@ int main(int argc, char **argv)
 		test = shutdown_states;
 	else if (!strcmp(argv[1], "shutdown-borrowers"))
 		test = shutdown_borrowers;
+	else if (!strcmp(argv[1], "shutdown-analysis"))
+		test = shutdown_analysis;
 	else if (!strcmp(argv[1], "analysis-playback"))
 		test = analysis_playback;
 	else if (!strcmp(argv[1], "analysis-owners"))
