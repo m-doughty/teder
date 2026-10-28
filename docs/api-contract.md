@@ -187,6 +187,8 @@ is admitted until it terminates. Another returns BUSY. Probes/enumeration have
 bounded independent jobs and cannot starve playback. Control actions and close
 remain admissible under their own slot rules. Queued control actions execute in
 admission order; slow preparation commits only after rechecking current state.
+Stop and select-device reopen the retained source; requests queued after them
+wait until that reopen commits.
 Stop cancels outstanding media mutation and successor intent when stop commits.
 Cancel an in-flight preparation and wait for terminal before submitting a new
 one; a ready successor can be replaced directly.
@@ -360,6 +362,13 @@ source, preparation reopens it at the saved source-frame position and new rate;
 source ID and track label are preserved, transport becomes PAUSED. Preparation
 still needs a source reservation alongside the retained source. Its failure leaves
 the output READY and source FAILED; retry select, seek or open explicitly.
+
+Status shows the new epoch and READY output as soon as the device is committed,
+before the reopened source commits. As during stop, requests admitted after the
+selection stay queued in admission order until that reopen commits and the
+selection terminates. A PLAY built from that status is valid: it runs afterwards,
+from the saved frame with a zero clock, instead of starting output without a
+source. Loss observation and close remain available meanwhile.
 
 Open with AUTOPLAY prefills the bounded PCM pool, then starts the selected output.
 PLAYING requires successful native startup; missing output returns BAD_STATE.

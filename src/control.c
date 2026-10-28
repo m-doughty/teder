@@ -92,6 +92,18 @@ void td_prepare_signal(teder_engine *e)
 		abort();
 }
 
+/* Gate held. A RUNNING selection owns the media slot only while its retained
+ * source reopens; until that commits, the current source has no active producer. */
+static bool reopening(const teder_engine *e)
+{
+	uint64_t id = e->status.media_request;
+	for (uint32_t i = 0; id && i < e->config.request_capacity; i++)
+		if (e->requests[i].info.request == id)
+			return e->requests[i].info.operation == TEDER_OP_SELECT_DEVICE &&
+			       e->requests[i].info.state == TEDER_RUNNING;
+	return false;
+}
+
 static void control(teder_engine *e)
 {
 	checkpoint(e, TD_STARTED);
@@ -113,7 +125,10 @@ static void control(teder_engine *e)
 		td_refill_resume(e);
 		td_lock(e);
 		uint32_t slot = e->config.request_capacity;
-		for (uint32_t i = 0; i < e->config.request_capacity; i++)
+		/* Like stop, selection keeps later requests queued in admission order until
+		 * its reopen commits, so PLAY cannot start output without a source. Unlike
+		 * stop's wait, this loop keeps recovering loss and committing preparation. */
+		for (uint32_t i = 0; !reopening(e) && i < e->config.request_capacity; i++)
 			if (e->requests[i].info.state == TEDER_QUEUED &&
 			    (e->runtime.execute || (e->requests[i].info.operation != TEDER_OP_PROBE &&
 			                            e->requests[i].info.operation != TEDER_OP_ANALYSIS)) &&

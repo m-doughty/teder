@@ -16,7 +16,10 @@ static bool preparation_finished(teder_engine *e)
 		td_unlock(e);
 		if (!pending)
 			return true;
-		if (!td_decode_step(e) && ma_event_wait(&e->wake) != MA_SUCCESS)
+		if (td_decode_step(e))
+			continue;
+		td_media_checkpoint(e, 0, TD_PREPARATION_WAIT);
+		if (ma_event_wait(&e->wake) != MA_SUCCESS)
 			abort();
 	}
 }

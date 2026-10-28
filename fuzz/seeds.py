@@ -1,0 +1,176 @@
+"""Generate the small CC0 regression corpus without a codec dependency."""
+import argparse
+import hashlib
+import importlib.util
+from pathlib import Path
+import struct
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+# The fixture generator is imported from the source tree; never cache bytecode there.
+sys.dont_write_bytecode = True
+
+
+def block(kind, payload, last=False):
+    return bytes([kind | (128 if last else 0)]) + len(payload).to_bytes(3, "big") + payload
+
+
+def comments(entries):
+    return struct.pack("<I", 5) + b"teder" + struct.pack("<I", len(entries)) + b"".join(
+        struct.pack("<I", len(entry)) + entry for entry in entries)
+
+
+def picture(description=b"cover"):
+    mime, image = b"image/png", b"\x00\x01\xff\x00\x03"
+    return (struct.pack(">II", 3, len(mime)) + mime + struct.pack(">I", len(description))
+            + description + struct.pack(">IIIII", 320, 200, 24, 0, len(image)) + image)
+
+
+def multichannel():
+    spec = importlib.util.spec_from_file_location("reference", ROOT / "tests/fixtures/generate.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    rows = [[(-2147483648 if i == 0 else 2147483647 if i == 1 else (i - c) * 10000000)
+             for c in range(8)] for i in range(16)]
+    pcm = b"".join(x.to_bytes(4, "little", signed=True) for row in rows for x in row)
+    info = (struct.pack(">HH", 16, 16) + bytes(6)
+            + ((44100 << 44) | (7 << 41) | (31 << 36) | 16).to_bytes(8, "big")
+            + hashlib.md5(pcm).digest())
+    header = bytes([255, 248, 105, 112, 0, 15])
+    frame = header + module.crc(header, 8, 7)
+    for c in range(8):
+        frame += b"\x02" + b"".join(row[c].to_bytes(4, "big", signed=True) for row in rows)
+    frame += module.crc(frame, 16, 0x8005)
+    return b"fLaC" + block(0, info, True) + frame
+
+
+def generate(output):
+    source, metadata = output / "source", output / "metadata"
+    source.mkdir(parents=True, exist_ok=True)
+    metadata.mkdir(parents=True, exist_ok=True)
+
+    def save(folder, name, body, controls=bytes(16)):
+        (folder / name).write_bytes(controls + body)
+
+    tracks = {name: (ROOT / f"tests/fixtures/{name}.flac").read_bytes()
+              for name in ("track-a", "track-b", "mono-24")}
+    tracks["eight-32"] = multichannel()
+    for name, body in tracks.items():
+        for mode in range(4):
+            control = bytearray(16)
+            control[0], control[1], control[4], control[8] = mode, mode, mode & 1, 7
+            save(source, f"{name}-{mode}", body, control)
+    save(source, "truncated", tracks["track-a"][:-1])
+    save(source, "empty", b"")
+    save(source, "bad-crc", tracks["track-a"][:-1] + b"\xff")
+    prefix = b"fLaC" + block(0, tracks["track-a"][8:42])
+    tagset = [b"ARTIST=one", b"ARTIST=two", b"EMPTY=", b"NOTE=a\0b", "TITLE=ש".encode()]
+    cases = {
+        "tags-picture": prefix + block(4, comments(tagset)) + block(6, picture(), True),
+        "tag-limit": prefix + block(4, comments([b"A=x"] * 1024), True),
+        "tag-over": prefix + block(4, comments([b"A=x"] * 1025), True),
+        "invalid-utf8": prefix + block(4, comments([b"TITLE=\xff"]), True),
+        "nul-picture": prefix + block(6, picture(b"a\0b"), True),
+        "block-over": prefix + block(1, b"") * 256 + block(1, b"", True),
+        "truncated": prefix + b"\x84\xff\xff\xff",
+        "empty": b"",
+    }
+    for name, body in cases.items():
+        save(metadata, name, body)
+    for mode in range(3):
+        control = bytearray(16)
+        control[mode] = (1, 1, 128)[mode]
+        save(metadata, f"control-{mode}", cases["tags-picture"], control)
+
+
+# Sequence opcodes and path selectors, matching fuzz/sequence.c.
+(OPEN, TRANSPORT, SEEK, GAIN, PREPARE, CLEAR, PROBE, DEVICES, SELECT, ANALYSIS, GET, POLL,
+ CANCEL, TAKE, ACK, EVENT, ACQUIRE, RELEASE_LOAN, RELEASE_RESULT, RENDER, LOSE, SETTLE, WAIT,
+ STATUS) = range(24)
+SHORT, LONG, MIXED, EMPTY, TEXT, DIRECTORY, MISSING, RELATIVE, NUL, UTF8, NO_BYTES, OVERSIZED = (
+    range(12))
+PLAY, PAUSE, STOP = 1, 2, 3
+
+
+def header(capacity=8, events=8, pcm=2, slots=4, loans=4, spans=2, bands=2, engine=0,
+           small_results=False, small_inputs=False, platform=0, fail_at=0):
+    """Configuration header decoded by LLVMFuzzerTestOneInput."""
+    fail = (128 | ((fail_at - 1) >> 8 & 7), (fail_at - 1) & 255) if fail_at else (0, 0)
+    return bytes([(capacity - 1) | (events - 1) << 3,
+                  pcm | (slots - 1) << 2 | (loans - 1) << 4 | (spans - 1) << 6,
+                  bands | engine << 2 | small_results << 4 | small_inputs << 5,
+                  platform, *fail, 0, 0])
+
+
+def ops(*steps):
+    return b"".join(bytes(step) for step in steps)
+
+
+def render(times=4, frames=255):
+    return [(RENDER, frames)] * times
+
+
+def sequences(output):
+    folder = output / "sequence"
+    folder.mkdir(parents=True, exist_ok=True)
+    def start(index=0):
+        return [(SELECT, 0), (SETTLE, index)]
+
+    seeds = {
+        "play": ops((DEVICES, 0), (SETTLE, 0), (TAKE, 0), (SELECT, 1), (SETTLE, 1),
+                    (OPEN, 1, SHORT), (SETTLE, 2), *render(8), (SETTLE, 2), (EVENT, 0),
+                    (EVENT, 0), (POLL, 0), (ACK, 0), (ACK, 1), (ACK, 2), *render(16)),
+        "transport": ops(*start(), (OPEN, 0, LONG), (SETTLE, 1), (TRANSPORT, PLAY, 0),
+                         *render(2), (SETTLE, 2), (TRANSPORT, PAUSE, 0), (GAIN, 1 | 8),
+                         *render(2), (SETTLE, 3), (SETTLE, 4), (TRANSPORT, PLAY, 0), *render(2),
+                         (TRANSPORT, STOP, 0), (SETTLE, 5), (SETTLE, 6), (STATUS, 0)),
+        "gapless": ops(*start(), (OPEN, 0, SHORT), (SETTLE, 1), (PREPARE, 0, 0, MIXED),
+                       (SETTLE, 2), (TRANSPORT, PLAY, 0), (SETTLE, 3),
+                       *[(RENDER, 15), (WAIT, 40)] * 16, (EVENT, 0), (EVENT, 0), (STATUS, 0),
+                       (PREPARE, 1, 0, EMPTY), (SETTLE, 4), *render(8)),
+        "gapless-playing": ops(*start(), (OPEN, 1, LONG), (SETTLE, 1), (PREPARE, 0, 0, SHORT),
+                               (SETTLE, 2), *[(RENDER, 63), (WAIT, 20)] * 36, (EVENT, 0),
+                               (EVENT, 0), (CLEAR, 0, 0), (SETTLE, 3)),
+        "analysis": ops((ANALYSIS, 2 | 32 | 64, 7, 4), (SETTLE, 0), *start(1), (OPEN, 1, LONG),
+                        (SETTLE, 2), *render(12), (WAIT, 255), (ACQUIRE, 0), (ACQUIRE, 0),
+                        (RELEASE_LOAN, 0), (ANALYSIS, 1, 0, 0), (SETTLE, 3), *render(4),
+                        (ACQUIRE, 0), (ANALYSIS, 0, 0, 0), (SETTLE, 4), (ACQUIRE, 0)),
+        "probe": ops(*[step for path in range(7)
+                       for step in ((PROBE, 1, path), (SETTLE, path), (TAKE, path))],
+                     (RELEASE_RESULT, 0)),
+        "seek": ops(*start(), (OPEN, 0, LONG), (SETTLE, 1), (SEEK, 1, 0, 0), (SETTLE, 2),
+                    (SEEK, 2, 0, 0), (SETTLE, 3), (SEEK, 0, 0, 0), (SETTLE, 4),
+                    (TRANSPORT, PLAY, 0), *render(4), (SEEK, 5, 0, 77), (SETTLE, 6), *render(4)),
+        "loss": ops(*start(), (OPEN, 1, LONG), (SETTLE, 1), *render(2), (LOSE, 0), *render(2),
+                    (WAIT, 255), (STATUS, 0), (EVENT, 0), (SELECT, 0), (SETTLE, 2),
+                    (TRANSPORT, PLAY, 0), *render(4), (SETTLE, 3)),
+        "cancel": ops((OPEN, 0, LONG), (CANCEL, 0), (PROBE, 1, LONG), (CANCEL, 1),
+                      (DEVICES, 0), (CANCEL, 2), (SETTLE, 0), (SETTLE, 1), (SETTLE, 2),
+                      (TAKE, 2), (ACK, 0), (ACK, 1), (ACK, 2)),
+        "capacity": ops((DEVICES, 0), (DEVICES, 0), (SETTLE, 0), (ACK, 0), (DEVICES, 0),
+                        (GET, 0), (GET, 1)),
+        "invalid": ops(*[(OPEN, 0, path) for path in range(RELATIVE, OVERSIZED + 1)],
+                       (OPEN, 6, SHORT), (TRANSPORT, 0, 0), (TRANSPORT, 4, 0), (SEEK, 4, 0, 0),
+                       (GAIN, 4), (GAIN, 6), (GAIN, 16), (PROBE, 2, SHORT), (SELECT, 4),
+                       (SELECT, 5), (SELECT, 3, 1),
+                       *[(ANALYSIS, 128 | 2, violation, 6) for violation in range(12)],
+                       (GET, 255), (TAKE, 254), (ACK, 252), (CANCEL, 250)),
+        "faults": ops((DEVICES, 0), (SETTLE, 0), (TAKE, 0), *start(1), (OPEN, 1, SHORT),
+                      (SETTLE, 2), (PROBE, 1, SHORT), (SETTLE, 3), (TAKE, 3), *render(4)),
+    }
+    configs = {"capacity": header(capacity=1), "faults": header(fail_at=40)}
+    for name, body in seeds.items():
+        (folder / name).write_bytes(configs.get(name, header()) + body)
+    tight = header(engine=1, small_results=True, small_inputs=True)
+    (folder / "tight").write_bytes(tight + seeds["probe"] + seeds["play"])
+    failing = header(platform=1 | 2 << 2)
+    (folder / "device-failure").write_bytes(failing + seeds["play"])
+    for fail_at in (1, 3, 12, 90, 300):
+        (folder / f"fault-{fail_at}").write_bytes(header(fail_at=fail_at) + seeds["play"])
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("output", type=Path)
+    generate(parser.parse_args().output)
+    sequences(parser.parse_args().output)

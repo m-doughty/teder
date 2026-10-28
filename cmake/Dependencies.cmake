@@ -63,6 +63,10 @@ if(MSVC)
 	target_compile_options(teder_flac_heap PRIVATE /W4 $<$<BOOL:${TEDER_WERROR}>:/WX>)
 else()
 	target_compile_options(FLAC PRIVATE "$<$<COMPILE_LANGUAGE:C>:-include${PROJECT_SOURCE_DIR}/cmake/flac_alloc.h>")
+	# Corrupt predictors overflow libFLAC's signed restore arithmetic by design
+	# (upstream annotates these sites for fuzzing). Make the wrap defined in every
+	# GCC/Clang build of this private copy; see docs/dependencies.md.
+	target_compile_options(FLAC PRIVATE "$<$<COMPILE_LANGUAGE:C>:-fwrapv>")
 	target_compile_options(teder_flac_heap PRIVATE -Wall -Wextra -Wpedantic $<$<BOOL:${TEDER_WERROR}>:-Werror>)
 endif()
 install(FILES "${teder_miniaudio_source_SOURCE_DIR}/LICENSE"

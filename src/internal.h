@@ -115,7 +115,8 @@ enum {
 	TD_ANALYSIS_BEFORE_COMMIT,
 	TD_ANALYSIS_AFTER_COMMIT,
 	TD_ANALYSIS_BLOCK,
-	TD_ANALYSIS_BEFORE_PUBLISH
+	TD_ANALYSIS_BEFORE_PUBLISH,
+	TD_PREPARATION_WAIT /* control waits for pending source preparation */
 };
 
 typedef struct {

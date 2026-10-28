@@ -29,7 +29,7 @@ def main():
     # headers, build trees and downloaded dependencies are outside these roots.
     files = sorted(
         path
-        for directory in ("src", "include", "tests", "cmake", "examples")
+        for directory in ("src", "include", "tests", "cmake", "examples", "fuzz")
         for path in (ROOT / directory).rglob("*")
         if path.is_file() and not path.is_symlink()
         and path.suffix in (".c", ".h")

@@ -32,7 +32,8 @@ static bool settled(demo *d)
 	return false;
 }
 
-static bool command(demo *d, char key, uint64_t frame, teder_code expected)
+/* BUSY is retryable gate contention, including while new workers start. */
+static teder_code admit(demo *d, char key, uint64_t frame)
 {
 	uint64_t deadline = demo_millis() + 20000;
 	teder_code code;
@@ -42,6 +43,12 @@ static bool command(demo *d, char key, uint64_t frame, teder_code expected)
 			break;
 		demo_wait(1);
 	} while (demo_millis() < deadline);
+	return code;
+}
+
+static bool command(demo *d, char key, uint64_t frame, teder_code expected)
+{
+	teder_code code = admit(d, key, frame);
 	return code == TEDER_OK ? settled(d) && d->outcome == expected
 	                        : code == expected && d->pending == 0;
 }
@@ -112,7 +119,7 @@ done:
 		REQUIRE(d.engine == NULL && d.metadata == NULL && d.snapshot == NULL);
 		/* Close while startup is admitted; finish must join and discard its result. */
 		REQUIRE(demo_start(&d, argv[1], NULL, false) == TEDER_OK);
-		REQUIRE(demo_issue(&d, 'i', 0) == TEDER_OK);
+		REQUIRE(admit(&d, 'i', 0) == TEDER_OK);
 		failed |= demo_finish(&d);
 	}
 	if (!failed)

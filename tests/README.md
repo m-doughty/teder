@@ -234,6 +234,13 @@ Cancellation/close gates cover both sides of commitment, native uninit and sourc
 preparation. A dispatched generation remains fixed across native loss before
 preparation, including the last representable epoch.
 
+`output.reopen-queue` holds the retained source's reopen after selection and after
+STOP. It parks control where it waits (idle for selection, the preparation wait
+for stop), admits PLAY for the new target, and requires PLAY to stay queued with
+no device start through a full control pass. It then requires the selection/stop
+to be terminal before PLAY commits, with a zero clock at the new epoch, and PCM
+from the saved frame. Before selection queued later requests, it ran PLAY early.
+
 `build/bin/teder_test_output native-select` opens a real output, verifies status,
 closes and fails each observed allocation in turn. It selects the default on
 Windows and the first enumerated output elsewhere. It never starts playback.

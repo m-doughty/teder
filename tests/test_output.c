@@ -2,6 +2,7 @@
 #include "support/engine.h"
 #include "analysis_pool.h"
 #include <check.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
@@ -325,6 +326,8 @@ static void checkpoint(void *p, uint64_t request, unsigned point)
 		hit(p, 17);
 	if (point == TD_ANALYSIS_BEFORE_PUBLISH)
 		hit(p, 19);
+	if (point == TD_PREPARATION_WAIT)
+		hit(p, 20);
 }
 
 static void control_checkpoint(void *p, uint32_t point)
@@ -1472,6 +1475,88 @@ START_TEST(stop_rewind)
 			outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
 		outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
 		capture_track(&f, e, 0, 16); /* no old partial block survives the rewind */
+		close_engine(&e);
+		dispose(&f);
+	}
+}
+END_TEST
+
+/* Selection and stop both reopen the retained source after advancing epoch. Later
+ * controls stay queued until that reopen commits, so PLAY with the new target never
+ * starts output without a source, and the new epoch's clock never runs backwards. */
+START_TEST(reopen_queue)
+{
+	for (unsigned stop = 0; stop < 2; stop++) {
+		fixture f;
+		init(&f);
+		f.manual = true;
+		teder_config config = INIT(teder_config);
+		teder_engine *e = create(&f, config, false);
+		outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
+		load_track(e);
+		teder_target before = status(e).current;
+		unsigned starts = f.starts;
+
+		atomic_store(&f.hold_prepare, 1);
+		uint64_t id = stop ? transport(e, TEDER_STOP) : select_device(e, (teder_blob){0});
+		th_gate_await(&f.prepare_gate); /* reopen held after the epoch advanced */
+		teder_status s = status(e);
+		ck_assert(s.current.epoch == before.epoch + 1 && s.current.source == before.source &&
+		          s.media_request == id && s.output_state == TEDER_OUTPUT_READY &&
+		          s.transport == (stop ? TEDER_READY : TEDER_PAUSED) && !s.output_frame &&
+		          !s.underrun_frames);
+
+		/* Park control where it waits: stop inside its preparation wait, selection at
+		 * the idle point. Admit a valid PLAY for the new target, then let control make
+		 * one full pass over the queue and park again. PLAY must still be queued. */
+		unsigned park = stop ? 20 : 7;
+		atomic_store(&f.point, park);
+		td_signal(e);
+		th_gate_await(&f.gate);
+		uint64_t play = transport(e, TEDER_PLAY);
+		atomic_store(&f.point, park);
+		th_gate_release(&f.gate);
+		th_gate_await(&f.gate);
+		teder_request_info r = INIT(teder_request_info);
+		teder_code code;
+		do {
+			code = teder_request_get(e, play, &r);
+		} while (code == TEDER_AGAIN);
+		ck_assert_msg(code == TEDER_OK && r.state == TEDER_QUEUED,
+		              "%s: PLAY state %u outcome %d while the reopen was held",
+		              stop ? "stop" : "selection",
+		              r.state,
+		              r.outcome);
+		ck_assert(f.starts == starts && !f.worker && status(e).transport != TEDER_PLAYING);
+
+		atomic_store(&f.point, 12);
+		th_gate_release(&f.prepare_gate);
+		th_gate_release(&f.gate);
+		th_gate_await(&f.gate); /* PLAY reached its commit point */
+		do {
+			code = teder_request_get(e, id, &r);
+		} while (code == TEDER_AGAIN);
+		ck_assert(code == TEDER_OK && r.state == TEDER_TERMINAL && r.outcome == TEDER_OK &&
+		          r.committed.epoch == before.epoch + 1 && r.committed.source == before.source);
+		s = status(e);
+		ck_assert(s.transport == (stop ? TEDER_READY : TEDER_PAUSED) && !s.media_request &&
+		          !s.output_frame && !s.underrun_frames && f.starts == starts && !f.worker);
+		th_gate_release(&f.gate);
+
+		outcome(e, play, TEDER_OK);
+		ack(e, id);
+		s = status(e);
+		/* The 16-frame fixture decodes to EOF during prefill, so PLAY may drain. */
+		ck_assert_msg((s.transport == TEDER_PLAYING || s.transport == TEDER_DRAINING) &&
+		                  s.current.epoch == before.epoch + 1 && f.starts == starts + 1,
+		              "%s: transport %u epoch %" PRIu64 " (expected %" PRIu64 ") starts %u/%u",
+		              stop ? "stop" : "selection",
+		              s.transport,
+		              s.current.epoch,
+		              before.epoch + 1,
+		              f.starts,
+		              starts + 1);
+		capture_track(&f, e, 0, 16); /* the reopened source plays from its saved frame */
 		close_engine(&e);
 		dispose(&f);
 	}
@@ -3451,6 +3536,8 @@ int main(int argc, char **argv)
 		test = transport_boundaries;
 	else if (!strcmp(argv[1], "stop-rewind"))
 		test = stop_rewind;
+	else if (!strcmp(argv[1], "reopen-queue"))
+		test = reopen_queue;
 	else if (!strcmp(argv[1], "seek-states"))
 		test = seek_states;
 	else if (!strcmp(argv[1], "stop-supersession"))

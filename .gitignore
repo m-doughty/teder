@@ -9,6 +9,10 @@
 /.cache/
 /.vs/
 
+# Python bytecode from the fixture/seed/tool scripts; it embeds local paths.
+__pycache__/
+*.py[cod]
+
 # OS metadata.
 .DS_Store
 Thumbs.db

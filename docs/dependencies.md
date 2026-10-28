@@ -77,6 +77,14 @@ a blocked OS read is not forcibly interruptible by the codec.
   Do not hand foreign malloc buffers to codec APIs that adopt ownership.
   Production sources must use stream callbacks with separately owned I/O;
   libFLAC's stdio helpers can allocate CRT storage outside this adapter.
+- Corrupt predictors overflow libFLAC's signed restore arithmetic by design
+  (upstream marks `FLAC__fixed_restore_signal*`, `FLAC__lpc_restore_signal*` and
+  `undo_channel_coding` for its own fuzzing); later bit-depth/CRC checks reject
+  the frame. GCC and Clang builds compile only the private libFLAC copy with
+  `-fwrapv`, making that wrap defined. Decoded output is identical and decode
+  cost is unchanged within noise. Clang's
+  restore loops compile to identical code. MSVC has no equivalent option, so
+  MSVC builds use libFLAC as upstream ships it.
 - `kiss_fftr_alloc` supports querying the complete plan size and initializing
   caller-owned aligned storage. That plan and its scratch fit one analysis
   region. Restrict v1 FFT sizes to bounded powers of two and use distinct input

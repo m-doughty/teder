@@ -1,0 +1,13 @@
+foreach(name source metadata sequence)
+	set(sources ${name}.c support.c)
+	if(name STREQUAL "sequence")
+		list(APPEND sources engine.c)
+	endif()
+	add_executable(teder_fuzz_${name} ${sources})
+	teder_target(teder_fuzz_${name})
+	target_compile_definitions(teder_fuzz_${name} PRIVATE _POSIX_C_SOURCE=200809L)
+	target_include_directories(teder_fuzz_${name} PRIVATE ../src "${teder_ma_patched}"
+		"${teder_flac_source_SOURCE_DIR}/include")
+	target_link_libraries(teder_fuzz_${name} PRIVATE teder FLAC Threads::Threads m)
+	target_link_options(teder_fuzz_${name} PRIVATE -fsanitize=fuzzer)
+endforeach()

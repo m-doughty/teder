@@ -3,6 +3,22 @@ on: [push, pull_request, workflow_dispatch]
 permissions:
   contents: read
 jobs:
+  fuzz:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install Clang and libFuzzer
+        run: sudo apt-get update && sudo apt-get install -y clang-18 libclang-rt-18-dev ninja-build
+      - name: Configure instrumented static core
+        run: >-
+          cmake -S . -B build-fuzz -G Ninja -DCMAKE_C_COMPILER=clang-18
+          -DCMAKE_BUILD_TYPE=Debug '-DCMAKE_C_FLAGS_DEBUG=-O1 -g'
+          -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=OFF -DTEDER_BUILD_EXAMPLES=OFF
+          -DTEDER_SANITIZER=address -DTEDER_BUILD_FUZZERS=ON -DTEDER_WERROR=ON
+      - name: Build, replay corpus and run fixed smoke campaigns
+        run: |
+          cmake --build build-fuzz --parallel 3
+          python3 fuzz/run.py build-fuzz --smoke
   format:
     runs-on: ubuntu-24.04
     steps:
