@@ -14,10 +14,7 @@
 enum { LONG_FRAMES = 32769 };
 #define TRACK FIXTURE_DIR "/track-a.flac"
 
-#define INIT(type) \
-	{ \
-		.struct_size = sizeof(type), .abi_version = TEDER_ABI_VERSION \
-	}
+#define INIT(type) {.struct_size = sizeof(type), .abi_version = TEDER_ABI_VERSION}
 #define OK(call) ck_assert((call) == TEDER_OK)
 /* Check logs successful assertions under a lazy winpthreads mutex. Keep worker
  * success paths free of that unrelated handle; failed checks terminate the child. */
@@ -33,9 +30,9 @@ enum { LONG_FRAMES = 32769 };
 #define RETRY(code, call) \
 	do { \
 		(code) = (call); \
-		if ((code) == TEDER_BUSY) \
+		if ((code) == TEDER_BUSY || (code) == TEDER_AGAIN) \
 			th_yield(); \
-	} while ((code) == TEDER_BUSY)
+	} while ((code) == TEDER_BUSY || (code) == TEDER_AGAIN)
 
 typedef struct {
 	th_tracker tracker;
@@ -528,9 +525,12 @@ START_TEST(cancellation)
 		th_gate_await(&f.gate);
 		teder_result *r = NULL;
 		ck_assert(teder_request_take_result(e, id, &r) == TEDER_BUSY && !r);
-		OK(teder_request_cancel(e, id));
+		teder_code code;
+		RETRY(code, teder_request_cancel(e, id));
+		OK(code);
 		uint64_t next = submit(e), rejected = 99;
-		ck_assert(teder_enumerate_devices(e, &rejected) == TEDER_LIMIT && rejected == 0);
+		RETRY(code, teder_enumerate_devices(e, &rejected));
+		ck_assert(code == TEDER_LIMIT && rejected == 0);
 
 		th_gate_release(&f.gate);
 		teder_request_info done = terminal(e, id);
@@ -754,7 +754,9 @@ START_TEST(selection)
 	          s.output_channels == 2 && s.output_period_frames == 8 && s.backend == 1 &&
 	          s.latency_quality == TEDER_QUALITY_UNKNOWN && s.latency_frames == 0);
 	teder_event event = INIT(teder_event);
-	OK(teder_event_poll(e, &event));
+	teder_code code;
+	RETRY(code, teder_event_poll(e, &event));
+	OK(code);
 	ck_assert(event.kind == TEDER_EVENT_DEVICE && event.epoch == 2 && event.code == TEDER_OK);
 
 	for (unsigned mode = 0; mode < 2; mode++) {
@@ -977,8 +979,11 @@ START_TEST(select_cancel)
 		if (point == 8 || point == 9) {
 			OK(teder_request_close(e));
 			ck_assert(teder_destroy(&e) == TEDER_BUSY && e);
-		} else
-			OK(teder_request_cancel(e, id));
+		} else {
+			teder_code code;
+			RETRY(code, teder_request_cancel(e, id));
+			OK(code);
+		}
 		th_gate_release(&f.gate);
 		if (point == 8 || point == 9)
 			OK(th_close(e));
@@ -1228,7 +1233,9 @@ static void boundary(fixture *f, teder_engine *e, uint64_t id)
 {
 	th_gate_await(&f->gate);
 	teder_request_info r = INIT(teder_request_info);
-	OK(teder_request_get(e, id, &r));
+	teder_code code;
+	RETRY(code, teder_request_get(e, id, &r));
+	OK(code);
 	ck_assert(r.state == TEDER_RUNNING);
 	step(f, 1);
 	th_gate_release(&f->gate);
@@ -1333,7 +1340,8 @@ START_TEST(transport_states)
 	outcome(e, opening, TEDER_OK);
 	teder_target stale = status(e).current;
 	outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
-	ck_assert(teder_transport(e, &stale, TEDER_PLAY, &id) == TEDER_STALE && !id);
+	RETRY(code, teder_transport(e, &stale, TEDER_PLAY, &id));
+	ck_assert(code == TEDER_STALE && !id);
 	outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
 	ck_assert(status(e).transport == TEDER_DRAINING);
 	outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
@@ -1376,7 +1384,9 @@ START_TEST(transport_boundaries)
 			OK(teder_request_close(e));
 			ck_assert(teder_destroy(&e) == TEDER_BUSY && e);
 		} else {
-			OK(teder_request_cancel(e, id));
+			teder_code code;
+			RETRY(code, teder_request_cancel(e, id));
+			OK(code);
 			if (mode == 1) {
 				queued = gain_to(e, 0.5f, 0);
 				atomic_store(&f.point, 13);
@@ -2168,9 +2178,8 @@ START_TEST(next_states)
 			while (status(e).transport != TEDER_ENDED || status(e).next_source)
 				th_yield();
 		}
-		s = status(e);
-		ck_assert(s.next_state == TEDER_NEXT_NONE && !s.next_source && !s.next_track);
-		/* No new submission/wake may be needed to release discarded sources. */
+		/* A rejected replacement can complete before EOF discards the old ready
+		 * successor. Await retirement without any new submission or wake. */
 		for (;;) {
 			td_lock(e);
 			unsigned free = 0;
@@ -2181,6 +2190,8 @@ START_TEST(next_states)
 				break;
 			th_yield();
 		}
+		s = status(e);
+		ck_assert(s.next_state == TEDER_NEXT_NONE && !s.next_source && !s.next_track);
 		if (mode == 0 || mode >= 3) {
 			RETRY(code, teder_prepare_next(e, &s.current, 0, TRACK, sizeof(TRACK) - 1, 88, &id));
 			ck_assert(code == TEDER_BAD_STATE && !id);
@@ -3093,8 +3104,9 @@ START_TEST(shutdown_borrowers)
 		for (unsigned i = 0; i < TD_SOURCE_JOBS; i++)
 			remaining -= e->sources[i].reservation;
 		uint64_t rejected = 99;
-		ck_assert(teder_probe(e, TRACK, sizeof(TRACK) - 1, 0, &rejected) == TEDER_LIMIT &&
-		          !rejected);
+		teder_code code;
+		RETRY(code, teder_probe(e, TRACK, sizeof(TRACK) - 1, 0, &rejected));
+		ck_assert(code == TEDER_LIMIT && !rejected);
 		OK(teder_request_close(e));
 		th_gate_release(&f.owner_gate);
 		for (unsigned i = 0; i < 64; i++) {

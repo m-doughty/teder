@@ -17,10 +17,7 @@
  * not serialized on stderr, then written by fz_trace_flush (and any FZ_CHECK). */
 void fz_trace(const char *format, ...) __attribute__((format(printf, 1, 2)));
 void fz_trace_flush(void);
-#define FZ_INIT(type) \
-	{ \
-		.struct_size = sizeof(type), .abi_version = TEDER_ABI_VERSION \
-	}
+#define FZ_INIT(type) {.struct_size = sizeof(type), .abi_version = TEDER_ABI_VERSION}
 enum { FZ_HEADER = 16, FZ_MAX_INPUT = 65536 + FZ_HEADER };
 /* One synchronous iteration. Its allocator context outlives all library owners. */
 typedef struct {

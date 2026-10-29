@@ -3,10 +3,7 @@
 #include <teder.h>
 #include <stdbool.h>
 
-#define DEMO_INIT(type) \
-	{ \
-		.struct_size = sizeof(type), .abi_version = TEDER_ABI_VERSION \
-	}
+#define DEMO_INIT(type) {.struct_size = sizeof(type), .abi_version = TEDER_ABI_VERSION}
 
 /* One frame-thread owner; paths borrow argv until finish. No private library API. */
 typedef struct demo {

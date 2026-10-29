@@ -25,8 +25,15 @@ foreach(line IN LISTS lines)
 	if(ALLOW_RENDER AND symbol MATCHES "^_?td_audio_render$")
 		continue()
 	endif()
+	# Audited AArch64 outline atomics use LSE or lock-free LL/SC instructions;
+	# neither helper calls, allocates, locks or performs I/O.
+	if(symbol STREQUAL "__aarch64_cas4_acq_rel" OR symbol STREQUAL "__aarch64_ldadd4_rel")
+		continue()
+	endif()
+	# Stack guards are compiler canary data loads, not callback work. Darwin's
+	# fortified memcpy/memset add a destination-size check to the same memory work.
 	# Sanitizer instrumentation is diagnostic, not part of production callback work.
-	if(NOT symbol MATCHES "^_*(memcpy|memset|chkstk(_ms)?|stack_chk_fail|security_check_cookie|security_cookie)$" AND
+	if(NOT symbol MATCHES "^_*(mem(cpy|set)(_chk)?|chkstk(_ms)?|stack_chk_(fail|guard)|security_check_cookie|security_cookie)$" AND
 		NOT symbol MATCHES "^_+(asan|ubsan|tsan)_[A-Za-z0-9_]+$")
 		message(FATAL_ERROR "Unexpected callback dependency: ${symbol}")
 	endif()

@@ -6,10 +6,7 @@
 #include <check.h>
 #include <stdio.h>
 
-#define INIT(type) \
-	{ \
-		.struct_size = sizeof(type), .abi_version = TEDER_ABI_VERSION \
-	}
+#define INIT(type) {.struct_size = sizeof(type), .abi_version = TEDER_ABI_VERSION}
 #define OK(call) ck_assert((call) == TEDER_OK)
 #define PATH OUTPUT_DIR "/refill-long.flac"
 enum { FRAMES = 32769 };

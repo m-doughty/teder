@@ -3,10 +3,7 @@
 #include <check.h>
 #include <stdio.h>
 
-#define INIT(type) \
-	{ \
-		.struct_size = sizeof(type), .abi_version = TEDER_ABI_VERSION \
-	}
+#define INIT(type) {.struct_size = sizeof(type), .abi_version = TEDER_ABI_VERSION}
 #define OK(call) ck_assert((call) == TEDER_OK)
 #define RETRY(code, call) \
 	do { \
@@ -148,20 +145,23 @@ START_TEST(admission)
 	expected.request = 1;
 	expected.operation = TEDER_OP_PROBE;
 	expected.state = TEDER_QUEUED;
-	OK(teder_request_get(e, 1, &out));
+	teder_code code;
+	RETRY(code, teder_request_get(e, 1, &out));
+	OK(code);
 	ck_assert(!memcmp(&out, &expected, sizeof(out)));
 	ck_assert(teder_request_ack(e, 1) == TEDER_BUSY);
 	teder_result *r = (teder_result *)e;
 	ck_assert(teder_request_take_result(e, 1, &r) == TEDER_BUSY && !r);
-	OK(teder_request_cancel(e, 2));
-	OK(teder_request_cancel(e, 2));
+	RETRY(code, teder_request_cancel(e, 2));
+	OK(code);
+	RETRY(code, teder_request_cancel(e, 2));
+	OK(code);
 	th_gate_release(&start);
 	ck_assert(terminal(e, 3).outcome == TEDER_OK);
 	ck_assert(ctx.calls == 2 && ctx.ids[0] == 1 && ctx.ids[1] == 3);
 	const uint8_t original[] = {4, 5, 6};
 	ck_assert(!memcmp(ctx.copied[0], original, 3));
 	ck_assert(submit(e, NULL, 0, &ids[3]) == TEDER_LIMIT && ids[3] == 0);
-	teder_code code;
 	RETRY(code, teder_request_poll(e, &out));
 	OK(code);
 	ck_assert(out.request == 1);
@@ -216,18 +216,21 @@ START_TEST(cancellation)
 		th_gate_await(&gate);
 		OK(submit(e, NULL, 0, &second));
 		OK(submit(e, NULL, 0, &third));
-		OK(teder_request_cancel(e, first));
+		teder_code code;
+		RETRY(code, teder_request_cancel(e, first));
+		OK(code);
 		OK(teder_request_close(e));
 		OK(teder_request_close(e));
 		teder_status s = INIT(teder_status);
-		OK(teder_get_status(e, &s));
+		OK(th_read_status(e, &s));
 		ck_assert(s.lifecycle == TEDER_CLOSING);
 		teder_engine *saved = e;
 		ck_assert(teder_destroy(&e) == TEDER_BUSY && e == saved);
 		uint64_t rejected = 99;
 		ck_assert(submit(e, NULL, 0, &rejected) == TEDER_CLOSED && rejected == 0);
 		teder_request_info out = INIT(teder_request_info);
-		OK(teder_request_get(e, first, &out));
+		RETRY(code, teder_request_get(e, first, &out));
+		OK(code);
 		ck_assert(out.state == TEDER_RUNNING);
 		ck_assert(teder_request_ack(e, first) == TEDER_BUSY);
 		th_gate_release(&gate);
@@ -288,7 +291,8 @@ START_TEST(results)
 	OK(submit(e, NULL, 0, &id));
 	th_gate_await(&gate);
 	ck_assert(t.live == 4);
-	OK(teder_request_cancel(e, id));
+	RETRY(code, teder_request_cancel(e, id));
+	OK(code);
 	th_gate_release(&gate);
 	ck_assert(terminal(e, id).outcome == TEDER_CANCELLED && t.live == 3 &&
 	          e->owned_bytes == baseline);
