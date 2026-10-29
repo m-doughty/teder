@@ -168,6 +168,23 @@ def sequences(output):
     for fail_at in (1, 3, 12, 90, 300):
         (folder / f"fault-{fail_at}").write_bytes(header(fail_at=fail_at) + seeds["play"])
 
+    # Every live-engine fault is followed by unrelated operations and repeated reads.
+    follow = ops((DEVICES, 0), (SETTLE, 1), (GAIN, 1), (SETTLE, 2), (GET, 0), (GET, 0))
+    failures = {
+        "oom-create-engine": (1, follow),
+        "oom-create-snapshots": (2, follow),
+        "oom-open": (3, ops((OPEN, 0, SHORT), (SETTLE, 0)) + follow),
+        "oom-analysis": (3, ops((ANALYSIS, 2, 7, 4), (SETTLE, 0)) + follow),
+        "oom-select-context": (3, ops((SELECT, 0), (SETTLE, 0)) + follow),
+        "oom-select-device": (5, ops((SELECT, 0), (SETTLE, 0)) + follow),
+        "oom-prepare": (19, ops((OPEN, 0, SHORT), (SETTLE, 0),
+                                (PREPARE, 0, 0, MIXED), (SETTLE, 1),
+                                (DEVICES, 0), (SETTLE, 2), (GAIN, 1), (SETTLE, 3),
+                                (GET, 1), (GET, 1))),
+    }
+    for name, (fail_at, body) in failures.items():
+        (folder / name).write_bytes(header(fail_at=fail_at) + body)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)

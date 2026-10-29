@@ -13,7 +13,10 @@
 #include <time.h>
 #endif
 
-#define INIT(type) {.struct_size = sizeof(type), .abi_version = TEDER_ABI_VERSION}
+#define INIT(type) \
+	{ \
+		.struct_size = sizeof(type), .abi_version = TEDER_ABI_VERSION \
+	}
 #define CHECK(expr) \
 	do { \
 		if (!(expr)) { \

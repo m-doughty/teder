@@ -14,7 +14,10 @@
 enum { LONG_FRAMES = 32769 };
 #define TRACK FIXTURE_DIR "/track-a.flac"
 
-#define INIT(type) {.struct_size = sizeof(type), .abi_version = TEDER_ABI_VERSION}
+#define INIT(type) \
+	{ \
+		.struct_size = sizeof(type), .abi_version = TEDER_ABI_VERSION \
+	}
 #define OK(call) ck_assert((call) == TEDER_OK)
 /* Check logs successful assertions under a lazy winpthreads mutex. Keep worker
  * success paths free of that unrelated handle; failed checks terminate the child. */

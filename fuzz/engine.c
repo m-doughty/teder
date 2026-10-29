@@ -17,7 +17,6 @@ typedef union {
 
 static void *heap_allocate(void *context, size_t size, const char *site)
 {
-	(void)site;
 	fz_heap *h = context;
 	FZ_CHECK(size && size <= FZ_HEAP_MAX);
 	FZ_CHECK(pthread_mutex_lock(&h->lock) == 0);
@@ -32,8 +31,11 @@ static void *heap_allocate(void *context, size_t size, const char *site)
 			h->peak = h->bytes;
 	}
 	FZ_CHECK(pthread_mutex_unlock(&h->lock) == 0);
-	if (fail)
+	if (fail) {
+		if (getenv("TEDER_FUZZ_TRACE"))
+			fz_trace("  allocation failure at %zu site %s\n", h->fail_at, site);
 		return NULL;
+	}
 	block *b = malloc(sizeof(*b) + size);
 	FZ_CHECK(b);
 	b->value.owner = h;

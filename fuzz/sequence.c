@@ -35,7 +35,7 @@ typedef struct {
 	uint32_t op, state, kind;
 	teder_code outcome;
 	int file;
-	bool terminal, taken, acked;
+	bool terminal, taken, acked, failed_before;
 } sq_request;
 
 typedef struct {
@@ -68,7 +68,7 @@ typedef struct {
 	uint64_t last_id, last_event, last_snapshot;
 	uint64_t deadline; /* monotonic end of this input's waiting budget */
 	unsigned count, result_count, loan_count;
-	bool closing;
+	bool closing, no_memory_seen;
 } sq_state;
 
 static sq_state q;
@@ -240,12 +240,18 @@ static void observe(void)
 	FZ_CHECK(owned <= q.config.engine_bytes_limit);
 }
 
+/* The fake backend allocates only at construction/enumeration, whose failures
+ * close poisoned contexts. Source/preparation errors belong to one request or
+ * become asynchronous stream failures; fresh requests cannot inherit them. */
 static void outcome(const sq_request *r)
 {
 	teder_code c = r->outcome;
-	bool injected = fz_heap_failed(&q.heap);
 	FZ_CHECK(c <= TEDER_OK && c != TEDER_BUSY && c != TEDER_INTERNAL && c != TEDER_ABI_MISMATCH &&
-	         c != TEDER_BUFFER_TOO_SMALL && (c != TEDER_NO_MEMORY || injected));
+	         c != TEDER_BUFFER_TOO_SMALL);
+	if (c == TEDER_NO_MEMORY) {
+		FZ_CHECK(fz_heap_failed(&q.heap) && !r->failed_before && !q.no_memory_seen);
+		q.no_memory_seen = true; /* inspect calls outcome only on the first terminal read */
+	}
 	bool bad_file = r->file >= P_TEXT;
 	if (bad_file)
 		FZ_CHECK(c != TEDER_OK);
@@ -262,12 +268,10 @@ static void outcome(const sq_request *r)
 		FZ_CHECK(c != TEDER_ENCODING && c != TEDER_TOO_LATE);
 		break;
 	case TEDER_OP_GAIN:
-		FZ_CHECK(c == TEDER_OK || c == TEDER_CANCELLED || c == TEDER_DEVICE_LOST ||
-		         c == TEDER_NO_MEMORY);
+		FZ_CHECK(c == TEDER_OK || c == TEDER_CANCELLED || c == TEDER_DEVICE_LOST);
 		break;
 	case TEDER_OP_CLEAR_NEXT:
-		FZ_CHECK(c == TEDER_OK || c == TEDER_CANCELLED || c == TEDER_STALE || c == TEDER_TOO_LATE ||
-		         c == TEDER_NO_MEMORY);
+		FZ_CHECK(c == TEDER_OK || c == TEDER_CANCELLED || c == TEDER_STALE || c == TEDER_TOO_LATE);
 		break;
 	case TEDER_OP_PROBE:
 		FZ_CHECK(c != TEDER_STALE && c != TEDER_BAD_STATE && c != TEDER_TOO_LATE &&
@@ -335,8 +339,13 @@ static void refresh(sq_request *r)
 }
 
 /* expect is OK for valid input, otherwise the exact rejection code. */
-static void
-admit(uint32_t op, teder_code expect, unsigned allowed, teder_code code, uint64_t id, int file)
+static void admit(uint32_t op,
+                  teder_code expect,
+                  unsigned allowed,
+                  teder_code code,
+                  uint64_t id,
+                  int file,
+                  bool failed_before)
 {
 	if (trace)
 		fz_trace("  submit op %u expect %d code %d id %" PRIu64 "\n", op, expect, code, id);
@@ -355,7 +364,8 @@ admit(uint32_t op, teder_code expect, unsigned allowed, teder_code code, uint64_
 	}
 	FZ_CHECK(id > q.last_id && q.count < SQ_OPS && outstanding() < q.config.request_capacity);
 	q.last_id = id;
-	q.requests[q.count++] = (sq_request){.id = id, .op = op, .state = TEDER_QUEUED, .file = file};
+	q.requests[q.count++] = (sq_request){
+	    .id = id, .op = op, .state = TEDER_QUEUED, .file = file, .failed_before = failed_before};
 }
 
 static sq_path path(uint8_t s)
@@ -591,6 +601,8 @@ static uint64_t pick(sq_bytes *b, sq_request **r)
 
 static void submit(sq_bytes *b, uint8_t op)
 {
+	/* The worker can fail before submission returns, so never sample in admit. */
+	bool failed_before = fz_heap_failed(&q.heap);
 	uint64_t id = 1;
 	teder_code code, expect = TEDER_OK;
 	uint8_t s = next(b);
@@ -603,7 +615,7 @@ static void submit(sq_bytes *b, uint8_t op)
 			expect = TEDER_INVALID;
 		}
 		code = teder_open(q.engine, p.data, p.bytes, s >> 3, flags, &id);
-		admit(TEDER_OP_OPEN, expect, 0, code, id, p.file);
+		admit(TEDER_OP_OPEN, expect, 0, code, id, p.file, failed_before);
 	} else if (op == 1) {
 		teder_target t = target(next(b));
 		uint32_t action = s % 5;
@@ -611,7 +623,7 @@ static void submit(sq_bytes *b, uint8_t op)
 		if (trace)
 			fz_trace("  transport action %u epoch %" PRIu64 "\n", action, t.epoch);
 		code = teder_transport(q.engine, &t, action, &id);
-		admit(TEDER_OP_TRANSPORT, expect, A_STALE, code, id, P_NONE);
+		admit(TEDER_OP_TRANSPORT, expect, A_STALE, code, id, P_NONE, failed_before);
 	} else if (op == 2) {
 		teder_target t = target(next(b));
 		uint64_t d = q.status.duration_frames;
@@ -619,34 +631,46 @@ static void submit(sq_bytes *b, uint8_t op)
 		uint64_t frame = frames[s % 6];
 		expect = frame >= (UINT64_C(1) << 36) ? TEDER_INVALID : TEDER_OK;
 		code = teder_seek(q.engine, &t, frame, &id);
-		admit(TEDER_OP_SEEK, expect, A_STALE | A_BAD_STATE, code, id, P_NONE);
+		admit(TEDER_OP_SEEK, expect, A_STALE | A_BAD_STATE, code, id, P_NONE, failed_before);
 	} else if (op == 3) {
 		static const float gains[] = {0, 0.25f, 1, -0.0f, 1.5f, -1, NAN, INFINITY};
 		float gain = gains[s % 8];
 		uint32_t mute = (s >> 3) % 3;
 		expect = gain >= 0 && gain <= 1 && mute <= 1 ? TEDER_OK : TEDER_INVALID;
 		code = teder_set_gain(q.engine, gain, mute, &id);
-		admit(TEDER_OP_GAIN, expect, 0, code, id, P_NONE);
+		admit(TEDER_OP_GAIN, expect, 0, code, id, P_NONE, failed_before);
 	} else if (op == 4 || op == 5) {
 		teder_target t = target(next(b));
 		uint64_t expected[] = {0, q.status.next_source, q.status.current.source, 12345};
 		if (op == 5) {
 			code = teder_clear_next(q.engine, &t, expected[s % 4], &id);
-			admit(TEDER_OP_CLEAR_NEXT, TEDER_OK, A_STALE | A_TOO_LATE, code, id, P_NONE);
+			admit(TEDER_OP_CLEAR_NEXT,
+			      TEDER_OK,
+			      A_STALE | A_TOO_LATE,
+			      code,
+			      id,
+			      P_NONE,
+			      failed_before);
 			return;
 		}
 		sq_path p = path(next(b));
 		code = teder_prepare_next(q.engine, &t, expected[s % 4], p.data, p.bytes, s >> 2, &id);
-		admit(TEDER_OP_PREPARE, p.expect, A_STALE | A_BAD_STATE | A_TOO_LATE, code, id, p.file);
+		admit(TEDER_OP_PREPARE,
+		      p.expect,
+		      A_STALE | A_BAD_STATE | A_TOO_LATE,
+		      code,
+		      id,
+		      p.file,
+		      failed_before);
 	} else if (op == 6) {
 		sq_path p = path(next(b));
 		uint32_t flags = p.expect == TEDER_OK ? s % 3 : s % 2;
 		expect = flags > 1 ? TEDER_INVALID : p.expect;
 		code = teder_probe(q.engine, p.data, p.bytes, flags, &id);
-		admit(TEDER_OP_PROBE, expect, 0, code, id, p.file);
+		admit(TEDER_OP_PROBE, expect, 0, code, id, p.file, failed_before);
 	} else if (op == 7) {
 		code = teder_enumerate_devices(q.engine, &id);
-		admit(TEDER_OP_DEVICES, TEDER_OK, 0, code, id, P_NONE);
+		admit(TEDER_OP_DEVICES, TEDER_OK, 0, code, id, P_NONE, failed_before);
 	} else if (op == 8) {
 		const uint8_t *key = NULL;
 		uint64_t bytes = 0;
@@ -668,11 +692,11 @@ static void submit(sq_bytes *b, uint8_t op)
 			expect = TEDER_INVALID;
 		}
 		code = teder_select_device(q.engine, key, bytes, &id);
-		admit(TEDER_OP_SELECT_DEVICE, expect, 0, code, id, P_NONE);
+		admit(TEDER_OP_SELECT_DEVICE, expect, 0, code, id, P_NONE, failed_before);
 	} else {
 		teder_analysis_config c = analysis(b, s, &expect);
 		code = teder_configure_analysis(q.engine, &c, &id);
-		admit(TEDER_OP_ANALYSIS, expect, 0, code, id, P_NONE);
+		admit(TEDER_OP_ANALYSIS, expect, 0, code, id, P_NONE, failed_before);
 	}
 }
 
@@ -886,6 +910,8 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 		         (code == TEDER_LIMIT || (code == TEDER_NO_MEMORY && fz_heap_failed(&q.heap))));
 		fz_platform_end(&q.platform);
 		fz_heap_end(&q.heap);
+		if (trace)
+			fz_trace_flush();
 		return 0;
 	}
 	q.config = (teder_config)FZ_INIT(teder_config);

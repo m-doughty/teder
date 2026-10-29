@@ -1,4 +1,4 @@
-# Formatting is pinned to clang-format 18 by tools/format-c.py.
+# Formatting is pinned to clang-format 18.1.3 exactly by tools/format-c.py.
 BasedOnStyle: LLVM
 ColumnLimit: 100
 IndentWidth: 4

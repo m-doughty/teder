@@ -98,7 +98,11 @@ Oracles are schedule-independent:
 - Valid arguments are never INVALID; each single invalid argument returns its exact
   documented code with a zero request ID. LIMIT requires a full request table.
 - IDs increase; states only advance; terminal outcome and result kind never change.
-  INTERNAL, BUSY and unexpected per-operation codes fail. NO_MEMORY needs injection.
+  INTERNAL, BUSY and unexpected per-operation codes fail. A request may report
+  NO_MEMORY only if injection was not yet visible before its submission and is
+  visible when its terminal outcome is checked. At most one request per input
+  may report it; repeated terminal reads do not consume the allowance again.
+  Gain and clear-next never accept NO_MEMORY. Creation failure is checked separately.
 - Take succeeds exactly once for a present result; ack invalidates the ID.
 - Probe results match the generated STREAMINFO; device lists match the fake exactly.
 - Status relations hold: no source means EMPTY; epochs, counters and sequences
@@ -108,8 +112,18 @@ Oracles are schedule-independent:
   snapshots keep identical contents afterward. Workers, files, contexts, devices
   and every heap allocation balance to zero.
 
+The NO_MEMORY rule is scoped to this fake backend: its tracked allocations occur
+during context/device construction and enumeration, whose failed operations close
+poisoned native heaps. Its start/stop callbacks allocate no tracked memory. Source
+and analysis failures belong to one request or become asynchronous stream errors;
+a later seek/reopen uses fresh source storage. An injected failure need not produce
+a request NO_MEMORY: cancellation or another error can take precedence. Named
+`oom-*` seeds cover creation, open, prepare, analysis and selection, with later
+operations wherever engine creation succeeds.
+
 When triaging a saved input, `TEDER_FUZZ_TRACE=1` logs each operation, admission,
 cancellation, settle wait, terminal outcome and status snapshot (including clocks).
+It also records the injected allocation's index and site, including failed creation.
 `TEDER_FUZZ_TRACE=2` adds the library's worker checkpoints and fake device
 start/stop. Lines go to a bounded in-memory log, written to stderr after the input
 or when a check fails, so tracing perturbs worker scheduling as little as possible.

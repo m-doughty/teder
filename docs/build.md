@@ -23,7 +23,7 @@ through its PulseAudio compatibility service; no native PipeWire backend is sele
 
 ## C formatting
 
-Use clang-format 18 and Python 3. The shared `.clang-format` targets 100 columns,
+Use clang-format 18.1.3 and Python 3. The shared `.clang-format` targets 100 columns,
 four-column tabs for indentation, and spaces for alignment. Keep one statement
 per line. Function bodies, branches and loops expand onto separate lines.
 Literal strings remain intact; a long diagnostic string can exceed the target.
@@ -36,9 +36,25 @@ python3 tools/format-c.py --check
 ```
 
 Check mode is the default and never edits files. Pass `--clang-format /path/to/tool`
-if needed. The helper checks the formatter's major version and covers authored
-`.c`/`.h` files in `src`, `include`, `tests`, `cmake`, and `examples`. Downloaded dependencies,
-build outputs and CMake templates stay outside the pass. CI runs the same check.
+if needed. The helper covers authored `.c`/`.h` files in `src`, `include`, `tests`,
+`cmake`, `examples` and `fuzz`. Downloaded dependencies, build outputs and CMake
+templates stay outside the pass. CI runs the same check.
+
+The helper refuses any formatter other than 18.1.3. Patch releases of clang-format 18
+disagree on layout: 18.1.8 joins brace-initializer macros onto one line, and 18.1.3
+splits them, so each version rejects the other's output. Ubuntu 24.04's
+`clang-format-18` package and the GitHub `ubuntu-24.04` runner provide 18.1.3.
+Homebrew's `llvm@18` is 18.1.8 and is refused. On macOS, Windows or another
+distribution, install the PyPI wheel, which matches Ubuntu's output, into its own
+virtual environment:
+
+```sh
+python3 -m venv ~/.venvs/clang-format-18.1.3
+~/.venvs/clang-format-18.1.3/bin/pip install clang-format==18.1.3
+python3 tools/format-c.py --clang-format ~/.venvs/clang-format-18.1.3/bin/clang-format
+```
+
+On Windows the executable is `Scripts\clang-format.exe` inside the environment.
 Formatting is separate from clang-tidy's static analysis; see the
 [clang-format options](https://clang.llvm.org/docs/ClangFormatStyleOptions.html).
 

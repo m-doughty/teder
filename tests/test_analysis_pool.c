@@ -5,7 +5,10 @@
 #include <math.h>
 #include <stdio.h>
 
-#define INIT(type) {.struct_size = sizeof(type), .abi_version = TEDER_ABI_VERSION}
+#define INIT(type) \
+	{ \
+		.struct_size = sizeof(type), .abi_version = TEDER_ABI_VERSION \
+	}
 #define OK(call) ck_assert((call) == TEDER_OK)
 
 static teder_config config(void)

@@ -5,7 +5,10 @@
 #include "support/metadata.h"
 #include <check.h>
 #define PATH OUTPUT_DIR "/metadata-test.flac"
-#define INIT(type) {.struct_size = sizeof(type), .abi_version = TEDER_ABI_VERSION}
+#define INIT(type) \
+	{ \
+		.struct_size = sizeof(type), .abi_version = TEDER_ABI_VERSION \
+	}
 #define OK(call) ck_assert_msg((call) == TEDER_OK, "%s failed", #call)
 
 static td_metadata_config config(const char *path)
