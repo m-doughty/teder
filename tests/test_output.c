@@ -1494,9 +1494,199 @@ START_TEST(stop_rewind)
 }
 END_TEST
 
+static teder_status clock_at(teder_engine *e, uint64_t output)
+{
+	teder_status s;
+	do {
+		s = status(e);
+		ck_assert(s.output_frame <= output);
+		th_yield();
+	} while (s.output_frame != output);
+	return s;
+}
+
+/* Every stage's status continues one chain: the epoch never decreases, and within an
+ * epoch neither the output clock nor the underrun count runs backwards. */
+static teder_status watch(teder_status *last, teder_status now)
+{
+	ck_assert_msg(now.current.epoch >= last->current.epoch,
+	              "epoch %" PRIu64 " after %" PRIu64,
+	              now.current.epoch,
+	              last->current.epoch);
+	if (now.current.epoch == last->current.epoch)
+		ck_assert_msg(now.output_frame >= last->output_frame &&
+		                  now.underrun_frames >= last->underrun_frames,
+		              "epoch %" PRIu64 ": output %" PRIu64 " after %" PRIu64 ", underruns %" PRIu64
+		              " after %" PRIu64,
+		              now.current.epoch,
+		              now.output_frame,
+		              last->output_frame,
+		              now.underrun_frames,
+		              last->underrun_frames);
+	*last = now;
+	return now;
+}
+
+typedef struct {
+	bool stop;
+	const char *name;
+	teder_target before, committed; /* before the stop or selection, and the target it made */
+	uint64_t reopen, play;
+	unsigned starts;
+	teder_status seen; /* the last status checked by watch */
+} held;
+
+static void ends_with(teder_engine *e, uint64_t id, teder_code expected, const char *schedule)
+{
+	teder_request_info r = terminal(e, id);
+	ck_assert_msg(r.outcome == expected,
+	              "%s: request %" PRIu64 " operation %u outcome %d, expected %d",
+	              schedule,
+	              id,
+	              r.operation,
+	              r.outcome,
+	              expected);
+	ack(e, id);
+}
+
+static void play_queued(fixture *f, teder_engine *e, const held *h)
+{
+	teder_request_info r = INIT(teder_request_info);
+	teder_code code;
+	do {
+		code = teder_request_get(e, h->play, &r);
+	} while (code == TEDER_AGAIN);
+	ck_assert_msg(code == TEDER_OK && r.state == TEDER_QUEUED,
+	              "%s: PLAY state %u outcome %d while the reopen was held",
+	              h->name,
+	              r.state,
+	              r.outcome);
+	ck_assert(f->starts == h->starts && !f->worker && status(e).transport != TEDER_PLAYING);
+}
+
+/* Play three frames, then let selection or STOP advance the epoch and hold its reopen of
+ * the retained source. Frame 3 avoids frame 8, whose zero samples look like silence.
+ * Control parks where it waits (idle for selection, the preparation wait for stop) with
+ * PLAY for the new target admitted and queued behind the reopen. On return control is
+ * parked on gate and preparation on prepare_gate. */
+static void held_reopen(fixture *f, teder_engine *e, bool stop, held *h)
+{
+	h->stop = stop;
+	h->name = stop ? "stop" : "selection";
+	h->seen = status(e);
+	outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
+	load_track(e);
+	outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
+	step(f, 3);
+	h->before = watch(&h->seen, clock_at(e, 3)).current;
+	h->starts = f->starts;
+
+	atomic_store(&f->hold_prepare, 1);
+	h->reopen = stop ? transport(e, TEDER_STOP) : select_device(e, (teder_blob){0});
+	th_gate_await(&f->prepare_gate); /* reopen held after the epoch advanced */
+	teder_status s = watch(&h->seen, status(e));
+	h->committed = s.current;
+	ck_assert_msg(s.current.epoch == h->before.epoch + 1 && s.current.source == h->before.source &&
+	                  s.media_request == h->reopen && s.output_state == TEDER_OUTPUT_READY &&
+	                  s.transport == (stop ? TEDER_READY : TEDER_PAUSED) &&
+	                  s.source_frame == (stop ? 0 : 3) && !s.output_frame && !s.underrun_frames,
+	              "%s: held reopen transport %u source_frame %" PRIu64 " epoch %" PRIu64,
+	              h->name,
+	              s.transport,
+	              s.source_frame,
+	              s.current.epoch);
+
+	/* Admit a valid PLAY for the new target while control is parked, then let control make
+	 * one full pass over the queue and park again. PLAY must still be queued. */
+	unsigned park = stop ? 20 : 7;
+	atomic_store(&f->point, park);
+	td_signal(e);
+	th_gate_await(&f->gate);
+	h->play = transport(e, TEDER_PLAY);
+	atomic_store(&f->point, park);
+	th_gate_release(&f->gate);
+	th_gate_await(&f->gate);
+	play_queued(f, e, h);
+}
+
+/* PLAY committed after the reopen: output starts once and plays the reopened position,
+ * frame 0 after STOP and the saved frame 3 after selection. */
+static void plays(fixture *f, teder_engine *e, held *h)
+{
+	teder_status s = watch(&h->seen, status(e));
+	/* The 16-frame fixture decodes to EOF during prefill, so PLAY may drain. */
+	ck_assert_msg((s.transport == TEDER_PLAYING || s.transport == TEDER_DRAINING) &&
+	                  f->starts == h->starts + 1,
+	              "%s: transport %u starts %u/%u",
+	              h->name,
+	              s.transport,
+	              f->starts,
+	              h->starts + 1);
+	capture_track(f, e, h->stop ? 0 : 3, h->stop ? 16 : 13);
+	watch(&h->seen, status(e));
+}
+
+/* Release the held reopen. It commits at the saved position and is terminal before PLAY
+ * commits, with a zero clock at the new epoch and no device start. */
+static void reopen_commits(fixture *f, teder_engine *e, held *h)
+{
+	atomic_store(&f->point, 12);
+	th_gate_release(&f->prepare_gate);
+	th_gate_release(&f->gate);
+	th_gate_await(&f->gate); /* PLAY reached its commit point */
+	teder_request_info r = INIT(teder_request_info);
+	teder_code code;
+	do {
+		code = teder_request_get(e, h->reopen, &r);
+	} while (code == TEDER_AGAIN);
+	ck_assert_msg(code == TEDER_OK && r.state == TEDER_TERMINAL && r.outcome == TEDER_OK &&
+	                  r.committed.epoch == h->committed.epoch &&
+	                  r.committed.source == h->before.source,
+	              "%s: reopen state %u outcome %d before PLAY committed",
+	              h->name,
+	              r.state,
+	              r.outcome);
+	teder_status s = watch(&h->seen, status(e));
+	ck_assert_msg(s.current.epoch == h->committed.epoch &&
+	                  s.transport == (h->stop ? TEDER_READY : TEDER_PAUSED) && !s.media_request &&
+	                  s.source_frame == (h->stop ? 0 : 3) && !s.output_frame &&
+	                  !s.underrun_frames && f->starts == h->starts && !f->worker,
+	              "%s: reopen committed transport %u source_frame %" PRIu64 " starts %u",
+	              h->name,
+	              s.transport,
+	              s.source_frame,
+	              f->starts);
+	th_gate_release(&f->gate);
+
+	ends_with(e, h->play, TEDER_OK, h->name);
+	ack(e, h->reopen);
+	ck_assert(status(e).current.epoch == h->committed.epoch);
+	plays(f, e, h);
+}
+
+/* Explicit reselection of device A reopens the retained source PAUSED at its saved
+ * position, then PLAY plays the rest of the track from there. */
+static void reselect(fixture *f, teder_engine *e, held *h)
+{
+	uint64_t epoch = h->seen.current.epoch;
+	ends_with(e, select_device(e, (teder_blob){0}), TEDER_OK, h->name);
+	teder_status s = watch(&h->seen, status(e));
+	ck_assert_msg(s.current.epoch == epoch + 1 && s.output_state == TEDER_OUTPUT_READY &&
+	                  s.transport == TEDER_PAUSED && s.source_frame == (h->stop ? 0 : 3) &&
+	                  f->starts == h->starts,
+	              "%s: reselected transport %u source_frame %" PRIu64 " output_state %u",
+	              h->name,
+	              s.transport,
+	              s.source_frame,
+	              s.output_state);
+	ends_with(e, transport(e, TEDER_PLAY), TEDER_OK, h->name);
+	plays(f, e, h);
+}
+
 /* Selection and stop both reopen the retained source after advancing epoch. Later
  * controls stay queued until that reopen commits, so PLAY with the new target never
- * starts output without a source, and the new epoch's clock never runs backwards. */
+ * starts output without a source, and the new epoch's clock never runs backwards.
+ * Playing three frames first separates selection's saved frame from stop's rewind. */
 START_TEST(reopen_queue)
 {
 	for (unsigned stop = 0; stop < 2; stop++) {
@@ -1505,71 +1695,119 @@ START_TEST(reopen_queue)
 		f.manual = true;
 		teder_config config = INIT(teder_config);
 		teder_engine *e = create(&f, config, false);
-		outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
-		load_track(e);
-		teder_target before = status(e).current;
-		unsigned starts = f.starts;
+		held h;
+		held_reopen(&f, e, stop, &h);
 
-		atomic_store(&f.hold_prepare, 1);
-		uint64_t id = stop ? transport(e, TEDER_STOP) : select_device(e, (teder_blob){0});
-		th_gate_await(&f.prepare_gate); /* reopen held after the epoch advanced */
-		teder_status s = status(e);
-		ck_assert(s.current.epoch == before.epoch + 1 && s.current.source == before.source &&
-		          s.media_request == id && s.output_state == TEDER_OUTPUT_READY &&
-		          s.transport == (stop ? TEDER_READY : TEDER_PAUSED) && !s.output_frame &&
-		          !s.underrun_frames);
+		reopen_commits(&f, e, &h);
+		close_engine(&e);
+		dispose(&f);
+	}
+}
+END_TEST
 
-		/* Park control where it waits: stop inside its preparation wait, selection at
-		 * the idle point. Admit a valid PLAY for the new target, then let control make
-		 * one full pass over the queue and park again. PLAY must still be queued. */
-		unsigned park = stop ? 20 : 7;
-		atomic_store(&f.point, park);
-		td_signal(e);
-		th_gate_await(&f.gate);
-		uint64_t play = transport(e, TEDER_PLAY);
-		atomic_store(&f.point, park);
-		th_gate_release(&f.gate);
-		th_gate_await(&f.gate);
-		teder_request_info r = INIT(teder_request_info);
+/* The reopen committed when its epoch advanced, so cancelling it cannot roll it back:
+ * the reopen and the queued PLAY both finish OK, as in reopen-queue. */
+START_TEST(reopen_cancel)
+{
+	for (unsigned stop = 0; stop < 2; stop++) {
+		fixture f;
+		init(&f);
+		f.manual = true;
+		teder_config config = INIT(teder_config);
+		teder_engine *e = create(&f, config, false);
+		held h;
+		held_reopen(&f, e, stop, &h);
+
 		teder_code code;
-		do {
-			code = teder_request_get(e, play, &r);
-		} while (code == TEDER_AGAIN);
-		ck_assert_msg(code == TEDER_OK && r.state == TEDER_QUEUED,
-		              "%s: PLAY state %u outcome %d while the reopen was held",
-		              stop ? "stop" : "selection",
-		              r.state,
-		              r.outcome);
-		ck_assert(f.starts == starts && !f.worker && status(e).transport != TEDER_PLAYING);
+		RETRY(code, teder_request_cancel(e, h.reopen));
+		ck_assert_msg(code == TEDER_OK, "%s: cancel returned %d", h.name, code);
 
-		atomic_store(&f.point, 12);
+		reopen_commits(&f, e, &h);
+		close_engine(&e);
+		dispose(&f);
+	}
+}
+END_TEST
+
+/* The held reopen fails on its first allocation after the file opened. Both selection and
+ * stop leave output READY and the source FAILED at the advanced epoch, so the queued PLAY
+ * finds no playable source. Reselection retries the reopen at the saved position. */
+START_TEST(reopen_failure)
+{
+	for (unsigned stop = 0; stop < 2; stop++) {
+		fixture f;
+		init(&f);
+		f.manual = true;
+		teder_config config = INIT(teder_config);
+		teder_engine *e = create(&f, config, false);
+		held h;
+		held_reopen(&f, e, stop, &h);
+
+		ma_mutex_lock(&f.tracker.lock);
+		f.tracker.fail_at = f.tracker.attempts + 1;
+		ma_mutex_unlock(&f.tracker.lock);
+		th_gate_release(&f.prepare_gate); /* preparation takes the failure, not control */
+		th_gate_release(&f.gate);
+		ends_with(e, h.reopen, TEDER_NO_MEMORY, h.name);
+		ends_with(e, h.play, TEDER_BAD_STATE, h.name);
+
+		ma_mutex_lock(&f.tracker.lock);
+		const char *site = f.tracker.failed_site;
+		f.tracker.fail_at = 0;
+		ma_mutex_unlock(&f.tracker.lock);
+		teder_status s = watch(&h.seen, status(e));
+		ck_assert_msg(site && !strcmp(site, "flac.heap") && s.current.epoch == h.committed.epoch &&
+		                  s.current.source == h.before.source &&
+		                  s.output_state == TEDER_OUTPUT_READY && s.transport == TEDER_FAILED &&
+		                  s.last_error == TEDER_NO_MEMORY && s.source_frame == (stop ? 0 : 3) &&
+		                  !s.media_request && f.starts == h.starts,
+		              "%s: failed at %s, transport %u last_error %d source_frame %" PRIu64
+		              " epoch %" PRIu64 " output_state %u",
+		              h.name,
+		              site ? site : "no allocation",
+		              s.transport,
+		              s.last_error,
+		              s.source_frame,
+		              s.current.epoch,
+		              s.output_state);
+
+		reselect(&f, e, &h);
+		close_engine(&e);
+		dispose(&f);
+	}
+}
+END_TEST
+
+/* Close while the reopen is held with PLAY queued behind it: both requests finish
+ * CANCELLED, output never starts, and every source, device and allocation is released. */
+START_TEST(reopen_close)
+{
+	for (unsigned stop = 0; stop < 2; stop++) {
+		fixture f;
+		init(&f);
+		f.manual = true;
+		teder_config config = INIT(teder_config);
+		teder_engine *e = create(&f, config, false);
+		held h;
+		held_reopen(&f, e, stop, &h);
+
+		OK(teder_request_close(e));
+		ck_assert(teder_destroy(&e) == TEDER_BUSY && e);
 		th_gate_release(&f.prepare_gate);
 		th_gate_release(&f.gate);
-		th_gate_await(&f.gate); /* PLAY reached its commit point */
-		do {
-			code = teder_request_get(e, id, &r);
-		} while (code == TEDER_AGAIN);
-		ck_assert(code == TEDER_OK && r.state == TEDER_TERMINAL && r.outcome == TEDER_OK &&
-		          r.committed.epoch == before.epoch + 1 && r.committed.source == before.source);
-		s = status(e);
-		ck_assert(s.transport == (stop ? TEDER_READY : TEDER_PAUSED) && !s.media_request &&
-		          !s.output_frame && !s.underrun_frames && f.starts == starts && !f.worker);
-		th_gate_release(&f.gate);
-
-		outcome(e, play, TEDER_OK);
-		ack(e, id);
-		s = status(e);
-		/* The 16-frame fixture decodes to EOF during prefill, so PLAY may drain. */
-		ck_assert_msg((s.transport == TEDER_PLAYING || s.transport == TEDER_DRAINING) &&
-		                  s.current.epoch == before.epoch + 1 && f.starts == starts + 1,
-		              "%s: transport %u epoch %" PRIu64 " (expected %" PRIu64 ") starts %u/%u",
-		              stop ? "stop" : "selection",
-		              s.transport,
-		              s.current.epoch,
-		              before.epoch + 1,
+		OK(th_close(e));
+		teder_code reopened = terminal(e, h.reopen).outcome;
+		teder_code played = terminal(e, h.play).outcome;
+		ck_assert_msg(reopened == TEDER_CANCELLED && played == TEDER_CANCELLED &&
+		                  f.starts == h.starts && !f.worker,
+		              "%s: reopen %d PLAY %d starts %u/%u",
+		              h.name,
+		              reopened,
+		              played,
 		              f.starts,
-		              starts + 1);
-		capture_track(&f, e, 0, 16); /* the reopened source plays from its saved frame */
+		              h.starts);
+		watch(&h.seen, status(e));
+
 		close_engine(&e);
 		dispose(&f);
 	}
@@ -1882,17 +2120,6 @@ START_TEST(seek_failure)
 	ck_assert(remove(path) == 0);
 }
 END_TEST
-
-static teder_status clock_at(teder_engine *e, uint64_t output)
-{
-	teder_status s;
-	do {
-		s = status(e);
-		ck_assert(s.output_frame <= output);
-		th_yield();
-	} while (s.output_frame != output);
-	return s;
-}
 
 START_TEST(clock_progress)
 {
@@ -2786,6 +3013,61 @@ START_TEST(loss_preparing)
 }
 END_TEST
 
+/* Loss while a held reopen has PLAY queued behind it is not a reopen failure. The reopen
+ * and PLAY finish STALE, and the source stays PAUSED with DEVICE_LOST at its committed
+ * position: frame 0 after STOP, the saved frame 3 after selection. Selection observes the
+ * loss on its next control pass. Stop observes it only when preparation finishes, and that
+ * same call decides the stop's result, so its state is read once the stop is terminal. */
+START_TEST(reopen_loss)
+{
+	for (unsigned stop = 0; stop < 2; stop++) {
+		fixture f;
+		init(&f);
+		f.manual = true;
+		teder_config config = INIT(teder_config);
+		teder_engine *e = create(&f, config, false);
+		held h;
+		held_reopen(&f, e, stop, &h);
+
+		lose(&f);
+		if (stop)
+			th_gate_release(&f.prepare_gate);
+		th_gate_release(&f.gate);
+		if (!stop) {
+			teder_status lost = watch(&h.seen, lost_status(e, h.committed, 3));
+			loss_event(e, lost);
+			ck_assert(lost.media_request == h.reopen);
+			play_queued(&f, e, &h);
+			th_gate_release(&f.prepare_gate);
+		}
+		ends_with(e, h.reopen, TEDER_STALE, h.name);
+		ends_with(e, h.play, TEDER_STALE, h.name);
+
+		teder_status s = watch(&h.seen, status(e));
+		ck_assert_msg(s.current.epoch == h.committed.epoch + 1 &&
+		                  s.current.source == h.before.source &&
+		                  s.output_state == TEDER_OUTPUT_LOST && s.transport == TEDER_PAUSED &&
+		                  s.last_error == TEDER_DEVICE_LOST && s.source_frame == (stop ? 0 : 3) &&
+		                  !s.media_request && f.starts == h.starts,
+		              "%s: transport %u last_error %d source_frame %" PRIu64 " epoch %" PRIu64
+		              " (expected %" PRIu64 ") output_state %u",
+		              h.name,
+		              s.transport,
+		              s.last_error,
+		              s.source_frame,
+		              s.current.epoch,
+		              h.committed.epoch + 1,
+		              s.output_state);
+		if (stop)
+			loss_event(e, s);
+
+		reselect(&f, e, &h);
+		close_engine(&e);
+		dispose(&f);
+	}
+}
+END_TEST
+
 START_TEST(loss_closing)
 {
 	fixture f;
@@ -3553,6 +3835,14 @@ int main(int argc, char **argv)
 		test = stop_rewind;
 	else if (!strcmp(argv[1], "reopen-queue"))
 		test = reopen_queue;
+	else if (!strcmp(argv[1], "reopen-cancel"))
+		test = reopen_cancel;
+	else if (!strcmp(argv[1], "reopen-loss"))
+		test = reopen_loss;
+	else if (!strcmp(argv[1], "reopen-failure"))
+		test = reopen_failure;
+	else if (!strcmp(argv[1], "reopen-close"))
+		test = reopen_close;
 	else if (!strcmp(argv[1], "seek-states"))
 		test = seek_states;
 	else if (!strcmp(argv[1], "stop-supersession"))

@@ -225,7 +225,8 @@ static void prepared(teder_engine *e, td_source_job *j)
 	bool autoplay = r->info.operation == TEDER_OP_OPEN && r->media.flags & TEDER_OPEN_AUTOPLAY;
 	/* Loss cancels native preparation cooperatively, but its epoch determines
 	 * the stale outcome even if cancellation prevented source construction. */
-	if (r->media.target.epoch != e->status.current.epoch ||
+	bool invalidated = r->media.target.epoch != e->status.current.epoch;
+	if (invalidated ||
 	    (code == TEDER_OK &&
 	     (j->source->generation.generation != e->status.current.epoch + (retarget ? 0 : 1) ||
 	      (seek && r->media.target.source != e->status.current.source))))
@@ -306,7 +307,9 @@ static void prepared(teder_engine *e, td_source_job *j)
 	} else if (!retire(e, j))
 		abort(); /* uncommitted source has no PCM references */
 	td_lock(e);
-	if (retarget && code != TEDER_OK) {
+	/* A reopen made stale by device loss is not a reopen failure. Invalidation already
+	 * left the retained source PAUSED with DEVICE_LOST at its committed position. */
+	if (retarget && code != TEDER_OK && !invalidated) {
 		e->status.transport =
 		    stopped || e->status.output_state == TEDER_OUTPUT_READY ? TEDER_FAILED : TEDER_PAUSED;
 		e->status.last_error = code;

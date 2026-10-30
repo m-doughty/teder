@@ -368,7 +368,10 @@ before the reopened source commits. As during stop, requests admitted after the
 selection stay queued in admission order until that reopen commits and the
 selection terminates. A PLAY built from that status is valid: it runs afterwards,
 from the saved frame with a zero clock, instead of starting output without a
-source. Loss observation and close remain available meanwhile.
+source. Loss observation and close remain available meanwhile. Loss makes the
+pending reopen finish STALE, and queued requests built from the old target then
+fail STALE. Close returns CANCELLED for the selection and every request queued
+behind it.
 
 Open with AUTOPLAY prefills the bounded PCM pool, then starts the selected output.
 PLAYING requires successful native startup; missing output returns BAD_STATE.
@@ -402,9 +405,14 @@ The event queue remains lossy; inspect status even when no event is available.
 Old preparation is cancelled cooperatively and finishes STALE after returning its
 borrowed input and temporary resources. Explicit cancellation before commitment
 still takes precedence. Pending callback controls fail DEVICE_LOST if loss is
-observed before successful acknowledgement. Loss during STOP preserves the final
-position rather than reporting a completed rewind. Epoch exhaustion closes the
-engine with LIMIT instead of wrapping.
+observed before successful acknowledgement. Loss detected before STOP finishes
+quiescing preserves the final position rather than reporting a completed rewind.
+Once STOP has quiesced and advanced the epoch, frame zero is committed: loss while
+its reopen is pending makes the stop finish STALE and leaves the source PAUSED at
+frame zero, as after any loss. A pending selection reopen likewise finishes STALE
+and leaves the source PAUSED at its saved frame. Loss is not a reopen failure, so
+neither enters FAILED and `last_error` stays DEVICE_LOST. Epoch exhaustion closes
+the engine with LIMIT instead of wrapping.
 
 Recover by selecting a device explicitly, waiting for successful completion,
 reading the new target and submitting PLAY. Selection reopens the retained source
@@ -457,6 +465,7 @@ output and advances epoch. Source ID, track label, output selection and gain/mut
 are retained. Old PCM is discarded only after the callback returns. Preparation
 reopens the retained path at frame zero; its source arena uses the same reservation
 and lifetime rules as seek. Failure leaves FAILED and reports the committed target.
+Device loss during that reopen is not a failure; see device loss.
 EMPTY stop succeeds without changing epoch, but still cancels pending preparation.
 Repeated stop with a retained source performs another rewind and advances epoch.
 

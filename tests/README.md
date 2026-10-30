@@ -234,12 +234,31 @@ Cancellation/close gates cover both sides of commitment, native uninit and sourc
 preparation. A dispatched generation remains fixed across native loss before
 preparation, including the last representable epoch.
 
-`output.reopen-queue` holds the retained source's reopen after selection and after
-STOP. It parks control where it waits (idle for selection, the preparation wait
-for stop), admits PLAY for the new target, and requires PLAY to stay queued with
-no device start through a full control pass. It then requires the selection/stop
-to be terminal before PLAY commits, with a zero clock at the new epoch, and PCM
-from the saved frame. Before selection queued later requests, it ran PLAY early.
+`output.reopen-queue` plays three frames, then holds the retained source's reopen
+after selection and after STOP. It parks control where it waits (idle for
+selection, the preparation wait for stop), admits PLAY for the new target, and
+requires PLAY to stay queued with no device start through a full control pass. It
+then requires the selection/stop to be terminal before PLAY commits, with a zero
+clock at the new epoch. Selection reopens at saved frame 3 and plays frames 3–15;
+stop rewinds and plays 0–15. A reopen reset to zero or a skipped rewind fails.
+Before selection queued later requests, it ran PLAY early.
+
+Four cases share that held reopen and queued PLAY. Each runs both schedules, and
+checks at every stage that the epoch never decreases and that, within an epoch,
+the output clock and underrun count never run backwards. Output never starts until
+a reopen commits.
+
+- `output.reopen-cancel` cancels the committed reopen. Nothing rolls back: both
+  requests succeed and play as above.
+- `output.reopen-loss` loses the device. The reopen and PLAY finish STALE, and the
+  source stays PAUSED with DEVICE_LOST at frame 3 (selection) or 0 (stop).
+  Selection observes the loss while PLAY is still queued; stop observes it when its
+  preparation finishes. Reselection then reopens and plays from that frame.
+- `output.reopen-failure` fails the reopen's FLAC decoder allocation. The reopen
+  finishes NO_MEMORY with output READY, the source FAILED and the epoch unchanged.
+  PLAY gets BAD_STATE, and reselection retries at the saved frame.
+- `output.reopen-close` closes the engine. Both requests finish CANCELLED and every
+  source, device and allocation is released.
 
 `build/bin/teder_test_output native-select` opens a real output, verifies status,
 closes and fails each observed allocation in turn. It selects the default on
