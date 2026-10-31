@@ -1,7 +1,7 @@
 # Pinned dependencies
 
-Exact archive hashes live in
-`cmake/Dependencies.cmake`; builds verify them before extraction.
+Exact archive hashes live in `cmake/Dependencies.cmake`; builds verify them
+before extraction.
 
 | Library | Version / commit | Role | License used |
 |---|---|---|---|
@@ -13,7 +13,8 @@ Exact archive hashes live in
 The optional renderer uses the separately supplied notcurses fork documented
 in [build.md](build.md). Runtime dependency notices are installed under
 `share/licenses/teder`. Check is not linked into or installed with teder.
-The project has not selected its own distribution license yet.
+teder itself is distributed under the BSD 3-Clause licence (`LICENSE`),
+installed as `share/licenses/teder/teder.txt`.
 
 ## Selected paths and limits
 
@@ -22,27 +23,27 @@ disabled. Only WASAPI, CoreAudio, or ALSA/PulseAudio are compiled for the target
 OS; null-device fallback is disabled. OS APIs/libraries retain their own heap
 ownership. No miniaudio structs cross the public ABI.
 
-`cmake/Miniaudio.cmake` applies reviewed context-failure cleanup fixes to a
-generated copy of the pinned header. It verifies the original header hash and
-patch anchors; downloaded sources stay unchanged. The fixes release the internal
-log and backend APIs on failed initialization, unwind context mutex stages, and
+`cmake/Miniaudio.cmake` applies context-failure cleanup fixes to a generated
+copy of the pinned header. It verifies the original header hash and patch
+anchors; downloaded sources stay unchanged. The fixes release the internal log
+and backend APIs on failed initialization, unwind context mutex stages, and
 release WASAPI/ALSA/PulseAudio libraries on their early failure paths.
-`backend.unwind` checks the reproduced Windows handle leak; allocator and native
+`backend.unwind` checks the Windows handle leak; allocator and native
 enumeration tests cover the context owner. `cmake/MiniaudioDevice.cmake` also
-repairs device initialization cleanup: release the stop event on backend failure,
-and run the resource destructor when initialization fails before a worker starts.
-CoreAudio now checks and tracks its separate stop event and frees it after unit
-disposal. Windows handle counts and post-init destructor assertions reproduce
-the device defects.
+fixes device initialization cleanup: it releases the stop event on backend
+failure and runs the resource destructor when initialization fails before a
+worker starts. On CoreAudio it checks and tracks the separate stop event and
+frees it after unit disposal. Windows handle counts and post-init destructor
+assertions check the device fixes.
 
 libFLAC serves both playback decoding and metadata probing. This avoids a second
 FLAC decoder and keeps frame/error/metadata handling in the maintained codec.
 Ogg, tools, examples, C++ wrappers and encoder multithreading are disabled.
 The upstream static library contains encoder objects, but teder exposes no
-encoding API. Planned v1 input coverage is native FLAC, 4–32-bit integer PCM,
-1–8 channels in FLAC channel order, rates 1–1048575 Hz. The adapter must validate
-that range and frame-size arithmetic before conversion; performance and exact
-format fixtures are not established by these dependency limits.
+encoding API. Supported input is native FLAC with 4–32-bit integer PCM, 1–8
+channels in FLAC channel order and rates 1–1048575 Hz; the source validates that
+range and frame-size arithmetic before conversion. See [sources.md](sources.md)
+for the complete input contract.
 Output remains stereo float at one negotiated device rate across track changes.
 
 libFLAC's stream callbacks support seek/tell/length and read-abort. Metadata
@@ -57,7 +58,7 @@ a blocked OS read is not forcibly interruptible by the codec.
 - miniaudio has allocator callbacks with caller data. Its data converter also
   has size-query/preallocated initialization. Device/context addresses and
   allocator context must remain stable through their final uninitialization.
-  The private backend owner now groups context and bounded enumeration scratch
+  The private backend owner groups context and bounded enumeration scratch
   in one arena. Its concurrent allocator charges headers and realloc overlap
   against a reserved cap. Native OS/library allocations remain dependency-owned;
   this cap covers requests through miniaudio's allocator callbacks.
@@ -65,26 +66,25 @@ a blocked OS read is not forcibly interruptible by the codec.
   checked allocations and unwinds partial construction; `stream_decoder_delete`
   calls finish and releases decoder-owned storage. Use those APIs, never free
   its interior pointers or pretend that its reallocations are arena no-ops.
-  The private build now redirects malloc/calloc/realloc/free/strdup through
+  The private build redirects malloc/calloc/realloc/free/strdup through
   `src/flac_heap.c`, including temporary metadata and alignment padding.
   Headers and realloc overlap count against a worker-owned byte budget;
   new allocations require a scope. This is a private build adaptation, not
   an upstream allocator API or process-wide allocator replacement.
-  Source integration must reserve that budget against the engine limit first.
+  Each source reserves that budget against the engine limit before construction.
   Keep the heap descriptor in its source arena through final decoder deletion
   and zero live codec allocations. Dependency buffers are individually freed
   and reused; only objects with common lifetimes share the source arena.
   Do not hand foreign malloc buffers to codec APIs that adopt ownership.
-  Production sources must use stream callbacks with separately owned I/O;
-  libFLAC's stdio helpers can allocate CRT storage outside this adapter.
+  Sources use stream callbacks with separately owned I/O, because libFLAC's
+  stdio helpers can allocate CRT storage outside this adapter.
 - Corrupt predictors overflow libFLAC's signed restore arithmetic by design
   (upstream marks `FLAC__fixed_restore_signal*`, `FLAC__lpc_restore_signal*` and
   `undo_channel_coding` for its own fuzzing); later bit-depth/CRC checks reject
   the frame. GCC and Clang builds compile only the private libFLAC copy with
-  `-fwrapv`, making that wrap defined. Decoded output is identical and decode
-  cost is unchanged within noise. Clang's
-  restore loops compile to identical code. MSVC has no equivalent option, so
-  MSVC builds use libFLAC as upstream ships it.
+  `-fwrapv`, so the predictor's signed overflow is defined; decoded output is
+  identical and decode cost is unchanged within measurement noise. MSVC has no
+  equivalent option, so MSVC builds use libFLAC as upstream ships it.
 - `kiss_fftr_alloc` supports querying the complete plan size and initializing
   caller-owned aligned storage. That plan and its scratch fit one analysis
   region. Restrict v1 FFT sizes to bounded powers of two and use distinct input
@@ -108,5 +108,4 @@ Source evidence: miniaudio's `ma_allocation_callbacks` and
 `ma_data_converter_init_preallocated`; libFLAC's `stream_decoder.c` constructor,
 destructor, metadata readers and public `stream_decoder.h`; KissFFT's
 `kiss_fftr_alloc`, `kf_bfly_generic` and in-place branch in `kiss_fft_stride`;
-Check's `src/check_run.c`. These pins are compiled and smoke-tested, not a
-substitute for the adversarial input/lifetime tests.
+Check's `src/check_run.c`.

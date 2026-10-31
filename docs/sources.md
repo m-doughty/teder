@@ -20,10 +20,10 @@ commits the new source, prefills the bounded PCM pool and starts output. PLAYING
 is published only after native startup succeeds. Startup failure leaves output
 LOST and the new source PAUSED. A decode failure during prefill leaves FAILED.
 Ordinary open leaves READY; a seek during playback resumes the replacement.
-PLAY/PAUSE/STOP and gain/mute use the [transport contract](api-contract.md#transport-controls-implemented-subset).
+PLAY/PAUSE/STOP and gain/mute use the [transport contract](api-contract.md#transport-controls).
 STOP reserves the media slot through cancellation cleanup and staged rewind. It
 retains source identity, advances epoch and returns READY at frame zero. A failed
-rewind leaves FAILED. The [playback clock](api-contract.md#playback-clock-implemented)
+rewind leaves FAILED. The [playback clock](api-contract.md#playback-clock)
 tracks consumed PCM, not decoder read-ahead, and preserves the final submitted
 source position across device replacement.
 
@@ -177,8 +177,8 @@ COMMITTED means successor PCM has been published and replacement/clear is TOO_LA
 The callback consumes the end of one source and the beginning of the next inside
 one output buffer when needed. It adds no overlap, fades or silence, and does not
 restart the device. Matching-rate output equals the concatenated source samples,
-including recorded leading/trailing silence. Existing per-source stereo conversion
-still applies when the device rate differs. Conversion positions remain estimates.
+including recorded leading/trailing silence. Per-source stereo conversion
+applies when the device rate differs. Conversion positions remain estimates.
 
 The first submitted successor frame changes `status.current.source` and `track`,
 clears the next fields, and emits TRANSITION with both source/track identities and
@@ -204,6 +204,6 @@ reports underruns and initialized silence. It cannot report that silence as medi
 A decode error before adoption discards the successor and preserves current audio.
 After adoption, a decode error fails the stream and quiesces output. Published PCM
 continues to pin its source until returned and reaped. Seek/stop/load/device changes
-flush through the existing quiescence protocol. Final sequence submission sets
+flush through the quiescence protocol. Final sequence submission sets
 ENDED/SUBMIT_EOF; hardware latency remains unknown, so this is not an audible-end
 measurement. Empty-marker publication preserves an already completed EOF seek.

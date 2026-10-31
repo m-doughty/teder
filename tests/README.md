@@ -25,10 +25,10 @@ only into tests; it is neither installed nor linked into the public library.
   reverse registration order before reset/free. Failed registration leaves
   resource ownership with the caller. Allocator context outlives the arena;
   reset/destroy require exclusive access and no borrowers. Engine and result
-  creation now use this same helper and their own independent arenas.
+  creation use this same helper and their own independent arenas.
 - `th_ma_allocator` adapts the same tracker to miniaudio's callbacks. Tests
   inject every observed allocation in the pinned stereo 48000-to-44100 float
-  converter constructor. `src/flac_heap.c` now routes the private libFLAC heap
+  converter constructor. `src/flac_heap.c` routes the private libFLAC heap
   through the tracker too. Check/framework/OS and stdio internals remain
   outside the tracker. KissFFT caller storage can use the arena.
 - `th_sink` borrows caller capture storage and a render callback. Step sizes,
@@ -48,11 +48,12 @@ only into tests; it is neither installed nor linked into the public library.
 
 [Reference fixtures](fixtures/README.md) have independent integer expectations.
 The fake sink tests sample capture and ownership observations, not real sound,
-device negotiation, decoder scheduling or production gapless playback. Future
-real-device tests must use a separate label and fail explicitly when their
-required backend/device is unavailable. There is no automatic fake fallback.
+device negotiation, decoder scheduling or production gapless playback.
+Real-device checks run as separate `native` modes of the test executables,
+described below, and fail explicitly when their required backend/device is
+unavailable. There is no automatic fake fallback.
 
-`ctest --test-dir build -R '^lifetime\.' --output-on-failure` selects the five lifetime
+`ctest --test-dir build -R '^lifetime\.' --output-on-failure` selects the lifetime
 cases. `-V -R lifetime.failures` prints injected engine/result allocation sites
 and exact retained baselines. Each constructor has one `arena.chunk` allocation;
 size, UTF-8 and ABI failures occur before allocation. Tests cover deep copies,
@@ -61,7 +62,7 @@ one-time transfer, close rejection and two concurrent readers after engine
 destruction. Inputs are borrowed and immutable only during private construction.
 The installed consumer exercises the exported lifecycle using the libc allocator.
 
-`-L requests` selects six request cases on the real native control worker. Private
+`-L requests` selects the request cases on the real native control worker. Private
 executors and startup/commit gates exercise copied payloads, full queues and
 retained completions, cancellation before/after commitment, result reservation
 and cleanup, event loss, identity exhaustion, and close during startup. A separate
@@ -70,7 +71,8 @@ while close still succeeds. No production entry point accepts these test hooks.
 Initialization failure injection covers lock, wake, thread-start and post-start
 publication stages. Logs count owned workers before/after join; 32 immediate-close
 cycles exercise wakeup timing. Native OS stack/handle allocation is outside the
-heap tracker.
+heap tracker. Fault injection does not reach dependency wake-event partial
+initialization.
 State polls yield and wait for observed states; sleeps never establish ordering.
 
 `-L pcm` selects sample/identity, ownership and callback-audit checks.
@@ -95,9 +97,9 @@ metadata and MD5 still pass on the success path. The archive audit rejects
 direct heap imports and verifies all five adapters; a deliberate free proves
 rejection. New codec versions require source review as well as this symbol check.
 
-These are private codec tests, not asynchronous source/player acceptance.
-The existing fixture test uses stdio; its CRT-owned file buffers are outside
-the codec budget. Production source callbacks will own/account I/O separately.
+These are private codec tests, not asynchronous source/player tests.
+The fixture test uses stdio; its CRT-owned file buffers are outside the codec
+budget.
 
 `-R '^source\.'` selects five private source cases. Tests generate original PCM
 through the pinned encoder, then compare decoded output against independent integer
@@ -110,7 +112,7 @@ and interpolation vectors; converted samples allow 1e-6 absolute error. Pool siz
 Failure sweeps cover both sequential decode and staged seek; codec/file/arena
 baselines must recover. These tests do not exercise public scheduling or real devices.
 
-`-R '^decode\.'` selects seven asynchronous engine cases: public open/seek and
+`-R '^decode\.'` selects the asynchronous engine cases: public open/seek and
 exact PCM, commitment/cancellation, active progress during blocked preparation,
 three-source retirement pressure, allocation/startup failures, close barriers,
 and identity/budget/corruption/unknown-duration outcomes. Source cancellation
@@ -121,7 +123,8 @@ also compare primed and direct conversion against the independent references.
 
 ## Callback rendering
 
-`-R '^audio\.'` selects five rendering cases and two callback audits.
+`-R '^audio\.'` selects the rendering cases, two callback audits and the
+`audio.feed-*` cases described below.
 Exact checks cover partial/cross-block output, source-final boundaries, gain,
 mute consumption, disabled preservation, stale/future generations, zero frames,
 invalid capacities/configuration and untouched guard samples. A 4,000-block
@@ -130,9 +133,9 @@ Heap guards verify no callback allocation/release; retired source arenas remain
 live until the producer reaps their last returned blocks.
 
 The audio object may import only `td_pcm_select`, `td_pcm_peek`, `td_pcm_consume`
-and the existing compiler/sanitizer/memory primitives. The PCM object has its own
+and the allowed compiler/sanitizer/memory primitives. The PCM object has its own
 stricter audit, and deliberate `free` imports must fail both audit modes. These
-tests supply coherent configuration by value; they do not certify future control
+tests supply coherent configuration by value; they do not certify control
 publication, native device stop, hardware deadlines, public underrun classification
 or audible output. Missing frames are raw unavailable PCM, including after EOF.
 
@@ -241,7 +244,6 @@ requires PLAY to stay queued with no device start through a full control pass. I
 then requires the selection/stop to be terminal before PLAY commits, with a zero
 clock at the new epoch. Selection reopens at saved frame 3 and plays frames 3–15;
 stop rewinds and plays 0–15. A reopen reset to zero or a skipped rewind fails.
-Before selection queued later requests, it ran PLAY early.
 
 Four cases share that held reopen and queued PLAY. Each runs both schedules, and
 checks at every stage that the epoch never decreases and that, within an epoch,
@@ -286,7 +288,8 @@ It arms the next allocation failure and proves no allocation is attempted.
 validation, controls during preparation, stale targets and invalid gain values.
 `output.transport-boundaries` gates cancellation before commitment, FIFO changes
 after publication, close before acknowledgement and native startup failure.
-The installed consumer links both new public exports without requiring hardware.
+The installed consumer links `teder_transport` and `teder_set_gain` without
+requiring hardware.
 
 ## Refill scheduling
 
@@ -297,12 +300,12 @@ keeps decode EOF separate from public playback clocks. This checks refill
 continuity under blocked control, not a hardware callback deadline.
 `refill.handoff` gates a producer borrow while replacing a source or closing;
 old arenas remain owned until acknowledgement. `refill.initialization` rejects
-each new event/thread stage and checks matched worker starts/stops, zero tracked
+each refill event/thread stage and checks matched worker starts/stops, zero tracked
 resources and unchanged warmed Windows handle counts. `refill.idle` keeps a full,
 stopped output parked through native enumeration. `refill.close-resume` holds
 refill after a pause acknowledgement and control after a new resume, then closes;
 exit must follow acknowledgement of that outstanding resume.
-Shared generated fixtures use a CTest resource lock. Callback audits are unchanged.
+Shared generated fixtures use a CTest resource lock.
 
 ## Linux ThreadSanitizer in Docker
 
@@ -366,7 +369,7 @@ holds worker startup to prove copied input, bounded FIFO slots and queued cancel
 `probe.cancellation` gates reads and both sides of commitment against cancel/close;
 pending slots remain owned until terminal. `probe.limits` checks work/headroom
 rejection, exact result capacity and one byte below it. `probe.failures` injects all
-32 allocation failures; `probe.initialization` rejects each new event/thread stage
+32 allocation failures; `probe.initialization` rejects each probe event/thread stage
 and later publication, with joined workers and unchanged warmed Windows handle counts.
 
 `refill.probe-progress` holds a probe read while consuming 32,769 exact PCM frames
@@ -374,7 +377,7 @@ and preparing a successor. Its constrained budget leaves just one source prepara
 plus 32 KiB of result space beyond existing owners and probe scratch/codec capacity.
 This verifies worker independence and memory headroom, not OS scheduling deadlines.
 
-## Composed playback shutdown checkpoint
+## Composed playback shutdown
 
 `output.shutdown-states` closes EMPTY without/with output, READY, PLAYING,
 PAUSED, DRAINING, ENDED, FAILED and PAUSED after device loss. Three unacknowledged
@@ -386,7 +389,7 @@ destruction, verifies their fields, then releases the last two tracked arenas.
 `output.shutdown-borrowers` combines an adopted successor, a seek held after
 file open, a probe held before read, held native dispatch, two untaken results
 and a queued gain command. All five slots are occupied. Two release orders prove
-that native/source retirement can finish while probe close remains pending, or
+that native/source retirement can finish while probe close stays pending, or
 that probe retirement can finish while source preparation remains blocked.
 Destroy returns BUSY at each held boundary; no timeout reclaims borrowed storage.
 Each schedule joins all five engine workers, closes exactly three source files
@@ -411,11 +414,11 @@ Both worker release orders preserve the loan and prevent a late publication.
 All five worker exits and exact native/file counts are checked before destroy;
 independent result/snapshot owners then follow the same staged release checks.
 
-These extend the existing cancellation, preparation, refill, native-init/loss,
+These complement the cancellation, preparation, refill, native-init/loss,
 PCM-reference and dependency-allocation tests. Native dispatch is synthetic;
 regular FLAC files, codec allocation, public requests and engine teardown are real.
 Run `ctest --test-dir <build> --output-on-failure -R '^output\.(shutdown-|rollback-composed)'`
-for the new cases. CTest terminates an entire hung test process; it never frees
+for these cases. CTest terminates an entire hung test process; it never frees
 resources out from under a blocked thread. OS/driver allocations and every
 possible native scheduling interleaving are outside fault-injection coverage.
 
@@ -434,7 +437,7 @@ matching arena free per round. These exercise the private pool and public views.
 
 ## Bounded analysis feed
 
-The `audio.feed-*` cases share the existing PCM/callback allocator fixture, with
+The `audio.feed-*` cases share the PCM/callback allocator fixture, with
 feed storage in that same arena. They verify exact post-gain/mute PCM, starvation
 identity, omitted pause/final padding, mixed-track records after source retirement,
 whole-interval overflow, unpublished render-error prefixes, 256-frame chunking,
@@ -447,7 +450,7 @@ Producer and consumer views finish before the fixture arena is released.
 checks stopped-only attachment and exact 48000-Hz post-gain data, then reads copies
 after device/source retirement. The feed callback object has its own import audit
 and deliberate forbidden-free control. The renderer may call only its three audited
-producer helpers. No timing deadline, public analysis worker or real DSP is inferred.
+producer helpers. No timing deadline or real DSP is inferred.
 
 ## Native renderer
 

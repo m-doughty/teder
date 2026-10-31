@@ -32,7 +32,7 @@ typedef struct td_backend td_backend;
 
 /* One non-audio lifecycle thread serializes these calls, including open/close
  * on the same thread (COM). token is a nonzero engine-instance identity, unique
- * across live/stale keys; its generation belongs to the engine. preferred=0 chooses
+ * across live/stale keys; the engine assigns it on first backend open. preferred=0 chooses
  * the platform's enabled native backends. No null/custom fallback is enabled.
  * NULL api selects miniaudio; non-NULL is a private test seam. */
 teder_code td_backend_plan(size_t heap_limit, size_t *reservation);

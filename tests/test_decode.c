@@ -817,7 +817,7 @@ START_TEST(next_adoption)
 			td_signal(e);
 		th_gate_await(&c.gate);
 		/* Control has paused refill. Borrow its exclusive producer for the real
-		 * source pump; production boundary scheduling is not exercised here. */
+		 * source pump; production boundary scheduling is covered by the output tests. */
 		publisher pub = {.engine = e};
 		td_lock(e);
 		for (unsigned i = 0; i < TD_SOURCE_JOBS; i++)

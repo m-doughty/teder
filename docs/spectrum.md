@@ -1,7 +1,7 @@
 # Spectrum calculation
 
 `teder_configure_analysis` enables overlapping spectrum snapshots alongside
-stereo peak/RMS. See [configuration and lifetime rules](api-contract.md#analysis-configuration-implemented).
+stereo peak/RMS. See [configuration and lifetime rules](api-contract.md#analysis-configuration).
 The numerical core remains private; snapshots copy its output before scratch reuse.
 
 ## Storage and input

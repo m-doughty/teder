@@ -26,8 +26,8 @@ the pinned dependencies' unreached paths are not covered.
 `run.py` replays `corpus/<target>` and `regressions/<target>`, then optionally runs
 a fixed smoke campaign with seed 2201: 10,000 mutations for `source` and `metadata`,
 2,000 for `sequence`. `--target` limits the run. Logs, profiles, new corpus entries
-and failures stay under the build directory. A failure stops the runner. The same
-command is in CI.
+and failures stay under the build directory. A failure stops the runner. CI runs
+the same command.
 
 ## libFLAC signed overflow
 

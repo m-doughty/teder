@@ -1,6 +1,6 @@
 # teder C API contract
 
-This is the implemented contract for `include/teder.h` and
+This is the contract for `include/teder.h` and
 `include/teder_notcurses.h`. All public declarations link. The
 [ABI 1 reference](abi.md) defines compatibility, layouts, build queries and
 platform-validation boundaries. Incompatible changes require a new ABI.
@@ -104,11 +104,11 @@ Request, input, event, PCM and analysis-feed storage shares one engine arena.
 PCM capacity is split into blocks of at most 1024 stereo float frames; a final shorter block
 preserves the exact configured frame count. Block records and both handoff queues
 also count against the engine byte limit. Native output consumes this handoff.
-Private FLAC sources now stream into this handoff; their format, conversion and
-reservation rules and implemented asynchronous open/seek behavior are specified
-in [sources.md](sources.md). Snapshot limits size an independent pool at creation,
-even while analysis is disabled. Both arenas, including their overhead, must fit
-the engine limit before either allocation. Enabled meter configuration adds one
+FLAC sources stream into this handoff; their format, conversion and reservation
+rules and asynchronous open/seek behavior are specified in [sources.md](sources.md).
+Snapshot limits size an independent pool at creation, even while analysis is
+disabled. Both arenas, including their overhead, must fit the engine limit
+before either allocation. Enabled meter configuration adds one
 worker-owned arena containing its accumulator and bounded source spans.
 Public enumeration and probing produce detached device lists and metadata.
 `result_tag` requires distinct key
@@ -270,7 +270,7 @@ engine-instance token; no growing engine-side ID registry is retained. All key
 lengths/fields are validated before backend access, including copied/fabricated
 input. This token is provenance validation, not a security credential.
 
-### Metadata probing (implemented)
+### Metadata probing
 
 Submit `teder_probe(engine, path, path_bytes, flags, &request)` with an absolute
 UTF-8 path of at most `min(max_input_bytes, 32767)` bytes. Flags are zero or
@@ -282,7 +282,7 @@ results survive source replacement and engine destruction. The
 [installed consumer](../tests/consumer/main.c) demonstrates this sequence.
 
 One dedicated worker processes probes in request order. Queued input is bounded
-by the existing request pool; only one probe owns temporary parsing storage at a
+by the request pool; only one probe owns temporary parsing storage at a
 time. Playback, preparation and device control use independent workers. Before
 parsing, teder reserves scratch, an 8 MiB codec cap and the available result budget
 under the engine limit. It leaves room for one maximum-path source preparation,
@@ -305,7 +305,7 @@ checked between native reads of at most 4096 bytes. A blocked OS call keeps clos
 pending until it returns. CLOSED requires the probe worker to have joined; no
 timeout or cancellation flag permits freeing borrowed input or engine storage.
 
-### Device enumeration (implemented)
+### Device enumeration
 
 Submit `teder_enumerate_devices(engine, &request)` from the serialized host
 thread. OK means queued; BUSY means retry admission later, and LIMIT means no
@@ -339,7 +339,7 @@ context. A native allocator failure discards that context before retry.
 Cancellation before commitment discards the result; a racing commitment can win.
 A blocked native operation keeps cancellation/close pending until it returns;
 the UI thread does not join it. No device is selected or started by enumeration.
-### Device selection (implemented)
+### Device selection
 
 Submit `teder_select_device(engine, key, bytes, &request)`. NULL/zero selects the
 current default; otherwise pass the complete key from this engine's enumeration.
@@ -388,7 +388,7 @@ position only for consumed PCM. Latency quality remains UNKNOWN; see below.
 A selected context's native allocator failure during enumeration closes its
 device/context, advances epoch and pauses the source. Explicit selection recovers.
 
-### Device loss (implemented)
+### Device loss
 
 Unexpected native stop, reroute or interruption invalidates the selected output.
 Detection continues while READY, PAUSED or ENDED. Worker scheduling and in-flight
@@ -419,7 +419,7 @@ reading the new target and submitting PLAY. Selection reopens the retained sourc
 at its saved frame and leaves it PAUSED. There is no automatic restart or default
 device following. A failed selection leaves LOST and permits explicit retry.
 
-### Transport controls (implemented subset)
+### Transport controls
 
 `teder_transport(engine, &target, TEDER_PLAY, &request)` starts READY output or
 resumes PAUSED playback. Copy target from a successful status read. PLAY is a
@@ -437,7 +437,7 @@ teder_code code = teder_transport(engine, &target, TEDER_PAUSE, &request);
 ```
 
 OK admits the request. Observe its terminal outcome, then acknowledge it using
-the existing request API. BUSY means retry admission later; the call performs no
+the request API. BUSY means retry admission later; the call performs no
 native wait. These controls do not occupy media_request and remain admissible
 during preparation. They execute in admission order; a source change can make a
 queued target stale. Neither pause/resume nor gain/mute changes the epoch.
@@ -481,7 +481,7 @@ DECODE_EOF and SUBMIT_EOF: no remaining PCM needs submission. An earlier seek
 preserves paused/playing intent; from ENDED or FAILED it yields READY. Invalid
 ranges and decoder failures before commitment preserve the existing stream.
 
-### Playback clock (implemented)
+### Playback clock
 
 `teder_get_status` copies a coherent worker-published snapshot. Its epoch, source,
 track, position, format and state belong together. It returns AGAIN with the
@@ -541,7 +541,7 @@ end-to-end latency estimate. AUDIBLE_END_ESTIMATED remains clear.
 | ALSA | Buffer availability supports writes; teder has no delay query. |
 | PulseAudio | Internal buffering does not provide a latency value through the device API. |
 
-### Snapshot storage (implemented foundation)
+### Snapshot storage
 
 Snapshot slots, copied bands and complete source spans share one independent
 bounded arena. Each successful acquire owes one release, even when two loans
@@ -562,11 +562,11 @@ failure releases it. Close invalidates current data after native users retire;
 destroy drops the engine pin. The pool remains charged until destroy even with
 held loans. Outstanding loans then retain only its arena, with no engine pointer.
 
-Public acquire and all four access/release functions link. Acquire takes no
-allocation and never waits for a gate: contention returns AGAIN. Publication and
-invalidation share the engine gate, so obsolete work cannot restore current data.
+Public acquire takes no allocation and never waits for a gate: contention returns
+AGAIN. Publication and invalidation share the engine gate, so obsolete work
+cannot restore current data.
 
-### Audio analysis feed (implemented foundation)
+### Audio analysis feed
 
 The private tap copies post-software-gain stereo PCM into a bounded ring in its
 owner's arena. Records contain at most 256 frames, one source/track identity,
@@ -595,7 +595,7 @@ The analysis worker consumes enabled configurations; it sleeps while disabled
 and polls at 5 ms intervals when enabled without queued data. The callback never
 wakes it. No spectrum or level calculation runs on the callback.
 
-### Analysis configuration (implemented)
+### Analysis configuration
 
 `teder_configure_analysis` copies a prefixed configuration into a retained request.
 Only one may be pending (otherwise BUSY). Enable, reconfigure and disable commit
@@ -648,10 +648,10 @@ Counters saturate; successful publication sequence exhaustion closes with LIMIT.
 Snapshots copy counters at publication; failed publication leaves current data
 and existing loans unchanged. The host chooses when retained data becomes stale.
 
-### Rendering (implemented)
+### Rendering
 
-Spectrum analysis and native rendering are implemented. The separate renderer
-returns the core's build-query masks; see [ABI 1](abi.md#features-and-platforms).
+The separate renderer returns the core's build-query masks; see
+[ABI 1](abi.md#features-and-platforms).
 
 The renderer owns no analysis history; decay belongs to analysis time, not UI
 paint frequency. Draw borrows the snapshot and plane only until return, clips

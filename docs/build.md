@@ -11,10 +11,10 @@ Tests additionally require Python 3 and symbol-inspection tools; see [ABI checks
 | Linux, glibc 2.35+ | x86_64, aarch64 | GCC 12+ or Clang 15+ | ALSA and PulseAudio |
 | macOS 13+ | arm64, x86_64 | Apple Clang 15+ | CoreAudio |
 
-These are release requirements. The CI workflow registers shared/static core and
-installed-consumer jobs on all three OSes.
-Windows MSVC 2022 core builds are allowed as an
-additional toolchain, but the notcurses fork requires UCRT64 for Windows.
+CI builds and tests the shared and static core libraries, and their installed
+consumers, on Linux, macOS and Windows.
+Windows MSVC 2022 is an optional core-library toolchain outside this table; the
+notcurses renderer requires UCRT64 on Windows.
 C17 lock-free unsigned atomics are checked during configuration. MSVC uses
 `/experimental:c11atomics` as documented by the
 [Microsoft C++ team](https://devblogs.microsoft.com/cppblog/c11-atomics-in-visual-studio-2022-version-17-5-preview-2/).
@@ -85,13 +85,11 @@ one exact allowance for process-local ASLR control, then runs tests offline with
 requirements, retained logs and temporary-resource handling.
 
 Check runs with `CK_NOFORK` on every OS. Each registered case runs as a separate
-CTest process with a timeout. Current tests cover build metadata, rejected ABI
-inputs, dependency linkage, engine lifecycles and detached result views. They do
-not open an audio device or certify playback/DSP. The harness supplies arena
-fault injection, reference FLAC/PCM, simulated output and controlled callback
-quiescence. Tests include concurrent result readers and controlled request/close
-interleavings on the actual control worker. See
-`tests/README.md` in the source tree.
+CTest process with a timeout. The harness supplies arena fault injection,
+reference FLAC/PCM, simulated output and controlled callback quiescence. Tests
+include concurrent result readers and controlled request/close interleavings on
+the actual control worker. These tests do not open an audio device or require an
+interactive terminal. See `tests/README.md` in the source tree.
 
 ## Neovim and clangd
 
@@ -100,8 +98,8 @@ configuration writes `compile_commands.json` into the build directory. clangd
 uses it for include paths, definitions and C17 flags, including private dependency
 headers. See the [clangd project setup](https://clangd.llvm.org/installation.html#project-setup).
 
-Generate the database on the machine running Neovim. Windows/Docker build paths
-will not resolve on macOS. From `teder/`:
+Generate the database on the machine running your editor; paths from another
+machine or container won't resolve. From the source root:
 
 ```sh
 cmake -S . -B build-macos -G Ninja -DCMAKE_BUILD_TYPE=Debug
@@ -117,7 +115,7 @@ already ignored by Git.
 If missing includes remain, inspect `:LspLog` to see which database and compile
 command clangd uses. A missing `miniaudio.h`, `FLAC/...` or `check.h` suggests a
 missing/stale database or incomplete configuration. Missing system headers also
-require a working macOS SDK/toolchain; check `xcrun --show-sdk-path`.
+require a working toolchain; on macOS, check `xcrun --show-sdk-path`.
 
 ## Installed consumers
 
@@ -138,8 +136,7 @@ third-party headers and Check are not part of the installed API.
 
 `TEDER_WITH_NOTCURSES=OFF` is the default and performs no notcurses discovery.
 Enabling it requires an explicitly supplied installation of
-`m-doughty/notcurses` commit `7152070f1b6c7cf6acc4e7447e5b6854f9f1e904`, matching
-Notcurses-Native's `binaries-notcurses-3.0.17-r17` source pin:
+`m-doughty/notcurses` commit `7152070f1b6c7cf6acc4e7447e5b6854f9f1e904`:
 
 ```sh
 cmake -S . -B build-renderer -DTEDER_WITH_NOTCURSES=ON -DTEDER_NOTCURSES_PREFIX=/absolute/fork/install -DTEDER_NOTCURSES_REVISION=7152070f1b6c7cf6acc4e7447e5b6854f9f1e904

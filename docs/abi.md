@@ -1,8 +1,8 @@
 # ABI 1 and C consumers
 
 Version 0.1.0 implements all 34 core exports and five optional renderer exports
-declared in the public headers. This is still a development build. The release
-version, ABI version and feature masks answer different questions.
+declared in the public headers. The release version, ABI version and feature
+masks answer different questions.
 
 Initialize every sized record with zeroes, its exact `sizeof`, and
 `abi_version=TEDER_ABI_VERSION`. Query `teder_get_build_info` before creating
@@ -21,7 +21,7 @@ matching; applications can instead omit the package version and check the ABI.
 
 ## Features and platforms
 
-`capabilities` now reports FLAC, GAPLESS, ANALYSIS and ARTWORK (`0x0f`). These
+`capabilities` reports FLAC, GAPLESS, ANALYSIS and ARTWORK (`0x0f`). These
 describe implemented code, subject to documented formats, bounds and deadlines.
 `backend_mask` uses bit `1 << TEDER_BACKEND_*`: WASAPI is `0x02` on Windows,
 CoreAudio `0x04` on macOS, ALSA plus PulseAudio `0x18` on Linux. These are compiled
@@ -90,3 +90,6 @@ commands in [build.md](build.md#installed-consumers). Tests require Python 3 and
 GNU `nm`/`objdump` on Windows/Linux; macOS uses Apple `nm`. Guarded prefix checks
 exercise native page protection, and GCC/Clang consumers also use `-fshort-enums`.
 MSVC lacks that compiler switch; its normal consumer is still registered.
+
+Compiled backend bits and source-level compatibility do not certify a platform
+or device.

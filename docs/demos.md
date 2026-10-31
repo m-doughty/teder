@@ -93,4 +93,3 @@ streaming tracks need a paced device. Null output is not physical audio evidence
 
 Device-loss/cutoff message assertions exercise client policy using copied status;
 they do not simulate a physical unplug or reproduce the library's cutoff race.
-Those native boundary tests remain in the library suite.
