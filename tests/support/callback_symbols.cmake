@@ -14,6 +14,11 @@ foreach(line IN LISTS lines)
 	if(symbol STREQUAL "_GLOBAL_OFFSET_TABLE_")
 		continue()
 	endif()
+	# Linker-defined bounds of the asan_globals section, through which ASan
+	# registers instrumented globals. They are data addresses, not calls.
+	if(symbol STREQUAL "__start_asan_globals" OR symbol STREQUAL "__stop_asan_globals")
+		continue()
+	endif()
 	# The renderer may call only these audited consumer operations. The PCM
 	# object is separately checked without this allowance (no recursive escape).
 	if(ALLOW_PCM AND symbol MATCHES "^_?td_pcm_(select|peek|consume|mark)$")

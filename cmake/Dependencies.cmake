@@ -90,6 +90,7 @@ if(BUILD_TESTING)
 	endfunction()
 	teder_configure_check()
 	target_link_libraries(check PUBLIC Threads::Threads)
+	include(cmake/CheckPack.cmake)
 	# Check 0.15.2 treats missing librt as missing clock_gettime. Probe the actual
 	# native function, preserving the independent timer compatibility sources.
 	if(MINGW)

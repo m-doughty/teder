@@ -11,8 +11,9 @@ Tests additionally require Python 3 and symbol-inspection tools; see [ABI checks
 | Linux, glibc 2.35+ | x86_64, aarch64 | GCC 12+ or Clang 15+ | ALSA and PulseAudio |
 | macOS 13+ | arm64, x86_64 | Apple Clang 15+ | CoreAudio |
 
-CI builds and tests the shared and static core libraries, and their installed
-consumers, on Linux, macOS and Windows.
+CI builds and tests the shared and static libraries and their installed consumers
+on Linux x86_64 and aarch64, macOS and Windows. Linux builds include the renderer,
+and sanitizer builds run on Linux and macOS; see [Continuous integration](#continuous-integration).
 Windows MSVC 2022 is an optional core-library toolchain outside this table; the
 notcurses renderer requires UCRT64 on Windows.
 C17 lock-free unsigned atomics are checked during configuration. MSVC uses
@@ -38,7 +39,7 @@ python3 tools/format-c.py --check
 Check mode is the default and never edits files. Pass `--clang-format /path/to/tool`
 if needed. The helper covers authored `.c`/`.h` files in `src`, `include`, `tests`,
 `cmake`, `examples` and `fuzz`. Downloaded dependencies, build outputs and CMake
-templates stay outside the pass. CI runs the same check.
+templates stay outside the pass. CI's `format` job runs the same check.
 
 The helper refuses any formatter other than 18.1.3. Patch releases of clang-format 18
 disagree on layout: 18.1.8 joins brace-initializer macros onto one line, and 18.1.3
@@ -76,13 +77,11 @@ selected compiler/runtime before enabling instrumentation. Dependencies inherit
 instrumentation; Check allocations are not teder's allocation-failure domain.
 `TEDER_WERROR` applies to authored library code, not upstream warning policy.
 
-For native Linux/amd64 Docker, run `python tools/run-tsan-docker.py` from the
-source tree. High-entropy ASLR can cause TSan to abort before `main` with
-`unexpected memory mapping`; newer runtimes may instead fail when Docker blocks
-their `personality` call. The helper uses a pinned default seccomp profile plus
-one exact allowance for process-local ASLR control, then runs tests offline with
-`setarch -R`. Host ASLR settings remain unchanged. See `tests/README.md` for its
-requirements, retained logs and temporary-resource handling.
+On Linux, high-entropy ASLR can cause TSan to abort before `main` with
+`unexpected memory mapping`. Run TSan tests under `setarch -R`, which disables
+randomization for that process tree only; host ASLR settings remain unchanged.
+[Continuous integration](#continuous-integration) runs each sanitizer
+configuration and its local equivalent.
 
 Check runs with `CK_NOFORK` on every OS. Each registered case runs as a separate
 CTest process with a timeout. The harness supplies arena fault injection,
@@ -90,6 +89,60 @@ reference FLAC/PCM, simulated output and controlled callback quiescence. Tests
 include concurrent result readers and controlled request/close interleavings on
 the actual control worker. These tests do not open an audio device or require an
 interactive terminal. See `tests/README.md` in the source tree.
+
+## Continuous integration
+
+`.github/workflows/build.yml` runs on every push and pull request:
+
+| Job | Runners | Covers |
+|---|---|---|
+| `format` | `ubuntu-24.04` | `tools/format-c.py --check` with clang-format 18.1.3 |
+| `fuzz` | `ubuntu-24.04` | Clang 18 libFuzzer harnesses: corpus replay and smoke campaigns |
+| `core` | `macos-14`, `windows-latest` | Shared and static core libraries, the suite and installed consumers |
+| `linux` | `ubuntu-24.04`, `ubuntu-24.04-arm` | One job per Linux configuration of `tools/ci.py` |
+| `macos-asan` | `macos-14` | `tools/ci.py macos-asan` |
+
+`tools/ci.py` holds the commands for these configurations, so a local run
+executes exactly what CI does. Each builds Debug with `TEDER_WERROR=ON`:
+
+| Configuration | Compiler | Build | Runs |
+|---|---|---|---|
+| `linux-shared` | GCC | Shared, renderer | Suite, then installed consumers |
+| `linux-static` | GCC | Static, renderer | Suite, then installed consumers |
+| `linux-asan` | Clang 18 | Shared, renderer, `TEDER_SANITIZER=address` | Suite |
+| `linux-tsan` | GCC | Shared, renderer, `TEDER_SANITIZER=thread` | Suite under `setarch -R` |
+| `macos-asan` | Apple Clang | Shared, core only, `TEDER_SANITIZER=address` | Suite |
+
+Linux configurations first fetch `m-doughty/notcurses` by the pinned commit hash
+and verify the checkout. notcurses is then built shared with the configuration's
+compiler and sanitizer flags, so one sanitizer runtime serves the whole process.
+A stamp in its install prefix records the revision, compiler, flags and options.
+CI caches that prefix; any mismatch rebuilds it. The installed consumers compile
+against the same notcurses and check a real plane through the installed renderer.
+
+Every tree lives under `build-ci/`, or under `--build-root DIR`. `--phase build`
+fetches sources and needs the network. `--phase test` runs CTest, the installation
+and the consumers offline from that build; the default runs both. The script prints
+the compiler, CMake, Ninja, Python and, on Linux, glibc and sanitizer runtime
+versions first. A failing step stops the run with that step's exit status.
+
+On macOS, run the macOS configuration directly:
+
+```sh
+python3 tools/ci.py macos-asan
+```
+
+On a host with Docker for Linux/amd64 or Linux/arm64, run a Linux configuration
+in a container of the host's architecture:
+
+```sh
+python3 tools/run-ci-docker.py linux-tsan
+```
+
+The container image comes from a pinned Ubuntu 24.04 index and adds the hosted
+runners' toolchain packages. The build phase runs with network access; the test
+phase runs offline under a hardened seccomp profile. See `tests/README.md` for
+its requirements, retained logs and temporary-resource handling.
 
 ## Neovim and clangd
 

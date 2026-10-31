@@ -1,6 +1,7 @@
 # Coverage-guided fuzzing
 
-These opt-in harnesses require Linux, Clang/libFuzzer and ASan/UBSan. No music
+These opt-in harnesses require Linux, Clang/libFuzzer and ASan/UBSan. libFLAC's
+upstream configure checks also need a C++ compiler (g++ or clang++). No music
 files, network input or host audio devices are used. Normal builds are unchanged.
 
 | Target | Input | Reaches |

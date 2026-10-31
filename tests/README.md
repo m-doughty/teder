@@ -307,21 +307,30 @@ refill after a pause acknowledgement and control after a new resume, then closes
 exit must follow acknowledgement of that outstanding resume.
 Shared generated fixtures use a CTest resource lock.
 
-## Linux ThreadSanitizer in Docker
+## Linux CI configurations in Docker
 
-From the package root, run `python tools/run-tsan-docker.py` with Python 3 and
-native Linux/amd64 Docker. It builds a cached Ubuntu builder image, compiles in
-a temporary Linux volume, runs the full suite, saves logs in
-`build-tsan-docker/`, and removes the volume. Failures propagate to the caller.
+From the package root, run `python3 tools/run-ci-docker.py <configuration>` with
+Python 3 and Docker for Linux/amd64 or Linux/arm64. The configuration is
+`linux-shared`, `linux-static`, `linux-asan` or `linux-tsan`, as in
+`tools/ci.py`. The runner builds a cached Ubuntu 24.04 image for the host's
+architecture and runs the same `tools/ci.py` commands as CI. The source tree is
+mounted read-only and the build tree is a temporary Docker volume, removed on exit.
+Each run saves `build.log`, `test.log`, CTest's `Testing/` trees and the control
+logs in a new directory under `build-ci/results/`. Failures propagate to the caller.
+
+Every container runs with all capabilities dropped and no-new-privileges. The
+build phase fetches pinned sources under Docker's default seccomp policy. The test
+phase runs offline, with one exact `personality` argument added to a
+checksum-verified Moby default seccomp profile. LeakSanitizer works under that
+policy without extra capabilities.
 
 High-entropy ASLR can put executables/libraries outside TSan's address ranges,
 causing `unexpected memory mapping` before `main`. Newer runtimes can also fail
-when Docker blocks their attempt to disable ASLR. This runner uses `setarch -R`
-only for the test process family. It adds one exact `personality` argument to
-a checksum-verified Moby default seccomp profile. Tests run offline, with all
-capabilities dropped and no-new-privileges; host ASLR settings remain unchanged.
-Builds use the default policy. The helper does not disable TSan checks or retry
-failing tests. Ordinary native sanitizer builds keep their existing CMake flags.
+when Docker blocks their attempt to disable ASLR. `linux-tsan` therefore runs
+CTest under `setarch -R`, the same command on x86_64 and aarch64, and the
+`personality` allowance permits exactly that call. Host ASLR settings remain
+unchanged. Neither script disables sanitizer checks or retries failing tests.
+Ordinary native sanitizer builds keep their existing CMake flags.
 
 ## Mixed-format gapless references
 

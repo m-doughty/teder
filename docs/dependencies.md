@@ -36,6 +36,15 @@ worker starts. On CoreAudio it checks and tracks the separate stop event and
 frees it after unit disposal. Windows handle counts and post-init destructor
 assertions check the device fixes.
 
+`cmake/CheckPack.cmake` fixes Check's message pack and unpack tables. The pinned
+source calls each typed function through a mismatched function-pointer type,
+which is undefined behaviour; Clang's `-fsanitize=function` reports every call.
+The build verifies the original `src/check_pack.c` hash and the table anchor,
+then compiles a generated copy in its place. One wrapper per message type takes
+`CheckMsg *` and converts it back to that message type, so the tables need no
+casts.
+Downloaded sources stay unchanged, and Check remains a test-only dependency.
+
 libFLAC serves both playback decoding and metadata probing. This avoids a second
 FLAC decoder and keeps frame/error/metadata handling in the maintained codec.
 Ogg, tools, examples, C++ wrappers and encoder multithreading are disabled.
