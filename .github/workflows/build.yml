@@ -33,10 +33,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, windows-latest]
+        os: [macos-15, windows-latest]
         shared: ['ON', 'OFF']
         include:
-          - os: macos-14
+          - os: macos-15
             shell: bash
           - os: windows-latest
             shell: 'msys2 {0}'
@@ -90,7 +90,7 @@ jobs:
       - name: Build and test
         run: python3 tools/ci.py linux-${{ matrix.configuration }}
   macos-asan:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

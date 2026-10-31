@@ -9,7 +9,7 @@ Tests additionally require Python 3 and symbol-inspection tools; see [ABI checks
 |---|---|---|---|
 | Windows 10 22H2 / Windows 11 | x86_64 | MSYS2 UCRT64 GCC 13+ | WASAPI shared mode |
 | Linux, glibc 2.35+ | x86_64, aarch64 | GCC 12+ or Clang 15+ | ALSA and PulseAudio |
-| macOS 13+ | arm64, x86_64 | Apple Clang 15+ | CoreAudio |
+| macOS 13+ | arm64, x86_64 | Apple Clang 17+ | CoreAudio |
 
 CI builds and tests the shared and static libraries and their installed consumers
 on Linux x86_64 and aarch64, macOS and Windows. Linux builds include the renderer,
@@ -98,9 +98,9 @@ interactive terminal. See `tests/README.md` in the source tree.
 |---|---|---|
 | `format` | `ubuntu-24.04` | `tools/format-c.py --check` with clang-format 18.1.3 |
 | `fuzz` | `ubuntu-24.04` | Clang 18 libFuzzer harnesses: corpus replay and smoke campaigns |
-| `core` | `macos-14`, `windows-latest` | Shared and static core libraries, the suite and installed consumers |
+| `core` | `macos-15`, `windows-latest` | Shared and static core libraries, the suite and installed consumers |
 | `linux` | `ubuntu-24.04`, `ubuntu-24.04-arm` | One job per Linux configuration of `tools/ci.py` |
-| `macos-asan` | `macos-14` | `tools/ci.py macos-asan` |
+| `macos-asan` | `macos-15` | `tools/ci.py macos-asan` |
 
 `tools/ci.py` holds the commands for these configurations, so a local run
 executes exactly what CI does. Each builds Debug with `TEDER_WERROR=ON`:
