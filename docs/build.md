@@ -97,7 +97,6 @@ interactive terminal. See `tests/README.md` in the source tree.
 | Job | Runners | Covers |
 |---|---|---|
 | `format` | `ubuntu-24.04` | `tools/format-c.py --check` with clang-format 18.1.3 |
-| `fuzz` | `ubuntu-24.04` | Clang 18 libFuzzer harnesses: corpus replay and smoke campaigns |
 | `core` | `macos-15`, `windows-latest` | Shared and static core libraries, the suite and installed consumers |
 | `linux` | `ubuntu-24.04`, `ubuntu-24.04-arm` | One job per Linux configuration of `tools/ci.py` |
 | `macos-asan` | `macos-15` | `tools/ci.py macos-asan` |
@@ -111,20 +110,23 @@ executes exactly what CI does. Each builds Debug with `TEDER_WERROR=ON`:
 | `linux-static` | GCC | Static, renderer | Suite, then installed consumers |
 | `linux-asan` | Clang 18 | Shared, renderer, `TEDER_SANITIZER=address` | Suite |
 | `linux-tsan` | GCC | Shared, renderer, `TEDER_SANITIZER=thread` | Suite under `setarch -R` |
+| `linux-fuzz` | Clang 18 | Static libFuzzer harnesses, renderer, `TEDER_SANITIZER=address` | Corpus replay and smoke campaigns (`fuzz/run.py --smoke`) |
 | `macos-asan` | Apple Clang | Shared, core only, `TEDER_SANITIZER=address` | Suite |
 
 Linux configurations first fetch `m-doughty/notcurses` by the pinned commit hash
 and verify the checkout. notcurses is then built shared with the configuration's
 compiler and sanitizer flags, so one sanitizer runtime serves the whole process.
+For `linux-fuzz` it also gets libFuzzer feedback and source coverage instrumentation.
 A stamp in its install prefix records the revision, compiler, flags and options.
 CI caches that prefix; any mismatch rebuilds it. The installed consumers compile
 against the same notcurses and check a real plane through the installed renderer.
 
 Every tree lives under `build-ci/`, or under `--build-root DIR`. `--phase build`
 fetches sources and needs the network. `--phase test` runs CTest, the installation
-and the consumers offline from that build; the default runs both. The script prints
-the compiler, CMake, Ninja, Python and, on Linux, glibc and sanitizer runtime
-versions first. A failing step stops the run with that step's exit status.
+and the consumers (or, for `linux-fuzz`, the fuzz replay and smoke runs) offline
+from that build; the default runs both. The script prints the compiler, CMake,
+Ninja, Python and, on Linux, glibc and sanitizer runtime versions first. A failing
+step stops the run with that step's exit status.
 
 On macOS, run the macOS configuration directly:
 
@@ -189,10 +191,10 @@ third-party headers and Check are not part of the installed API.
 
 `TEDER_WITH_NOTCURSES=OFF` is the default and performs no notcurses discovery.
 Enabling it requires an explicitly supplied installation of
-`m-doughty/notcurses` commit `7152070f1b6c7cf6acc4e7447e5b6854f9f1e904`:
+`m-doughty/notcurses` commit `fd67f2bafec21365f72a418797799d2051376fbe`:
 
 ```sh
-cmake -S . -B build-renderer -DTEDER_WITH_NOTCURSES=ON -DTEDER_NOTCURSES_PREFIX=/absolute/fork/install -DTEDER_NOTCURSES_REVISION=7152070f1b6c7cf6acc4e7447e5b6854f9f1e904
+cmake -S . -B build-renderer -DTEDER_WITH_NOTCURSES=ON -DTEDER_NOTCURSES_PREFIX=/absolute/fork/install -DTEDER_NOTCURSES_REVISION=fd67f2bafec21365f72a418797799d2051376fbe
 ```
 
 Headers and the shared core runtime/import library must exist under that prefix.

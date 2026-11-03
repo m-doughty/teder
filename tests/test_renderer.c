@@ -344,6 +344,37 @@ START_TEST(wide_boundaries)
 }
 END_TEST
 
+START_TEST(resize_cut)
+{
+	/* Shrinking the plane cuts wide glyphs at its new last column. Drawing that column
+	 * writes only inside it: the next row's first cell and the cells to its left keep
+	 * their contents. */
+	screen s = screen_open();
+	teder_renderer_config c = config();
+	teder_renderer *r;
+	OK(teder_renderer_create(&c, &r));
+	fill(s.plane);
+	ck_assert(ncplane_putegc_yx(s.plane, 0, 6, "界", NULL) == 2);
+	ck_assert(ncplane_putegc_yx(s.plane, 5, 6, "界", NULL) == 2);
+	ck_assert(ncplane_resize_simple(s.plane, 6, 7) == 0);
+	teder_rectangle rect = {0, 6, 6, 1};
+	OK(teder_renderer_draw(r, NULL, s.plane, &rect));
+	for (int y = 0; y < 6; y++)
+		for (int x = 0; x < 7; x++) {
+			bool in = x == 6;
+			cell(s.plane,
+			     y,
+			     x,
+			     in ? " " : "!",
+			     in ? channels(c.foreground_rgb, c.background_rgb) : channels(0xabcdef, 0x987654),
+			     in ? 0 : NCSTYLE_BOLD);
+		}
+	ck_assert(ncplane_dim_y(s.plane) == 6 && ncplane_dim_x(s.plane) == 7);
+	teder_renderer_destroy(r);
+	screen_close(&s);
+}
+END_TEST
+
 int main(int argc, char **argv)
 {
 	if (argc != 2)
@@ -371,7 +402,8 @@ int main(int argc, char **argv)
 	             {"cells", spectrum_cells},
 	             {"clipping", clipping},
 	             {"levels", levels},
-	             {"wide", wide_boundaries}};
+	             {"wide", wide_boundaries},
+	             {"resize-cut", resize_cut}};
 	for (unsigned n = 0; n < sizeof(cases) / sizeof(cases[0]); n++) {
 		if (strcmp(argv[1], cases[n].name))
 			continue;

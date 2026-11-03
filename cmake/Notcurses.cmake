@@ -1,6 +1,6 @@
 set(TEDER_NOTCURSES_PREFIX "" CACHE PATH "Installed m-doughty/notcurses fork prefix")
 set(TEDER_NOTCURSES_REVISION "" CACHE STRING "Source revision used for that installation")
-set(teder_notcurses_pin "7152070f1b6c7cf6acc4e7447e5b6854f9f1e904")
+set(teder_notcurses_pin "fd67f2bafec21365f72a418797799d2051376fbe")
 if(NOT TEDER_NOTCURSES_PREFIX OR NOT TEDER_NOTCURSES_REVISION STREQUAL teder_notcurses_pin)
 	message(FATAL_ERROR "TEDER_WITH_NOTCURSES requires an installed m-doughty/notcurses at ${teder_notcurses_pin}; set TEDER_NOTCURSES_PREFIX and TEDER_NOTCURSES_REVISION")
 endif()

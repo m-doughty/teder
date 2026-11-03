@@ -9,6 +9,7 @@ files, network input or host audio devices are used. Normal builds are unchanged
 | `source` | 16-byte controls + FLAC bytes | Private FLAC open, seek, prime, decode and conversion |
 | `metadata` | 16-byte controls + FLAC bytes | Private metadata/artwork reader and detached results |
 | `sequence` | 8-byte config + operations | Public engine API through a fake audio backend |
+| `renderer` | 55-byte header + operations | Notcurses renderer on real planes and snapshots |
 
 ```sh
 cmake -S . -B build-fuzz -G Ninja -DCMAKE_C_COMPILER=clang-18 \
@@ -24,11 +25,22 @@ calls forbidden by callback import audits. The fuzz option instruments teder,
 libFLAC, miniaudio and KissFFT before building them. System libc/kernel code and
 the pinned dependencies' unreached paths are not covered.
 
+The `renderer` target is built only when the same configuration also sets
+`TEDER_WITH_NOTCURSES=ON` with the pinned notcurses described in
+[the build guide](../docs/build.md). Build that notcurses shared, with the same
+sanitizer flags plus `-fsanitize=fuzzer-no-link`, so libFuzzer also gets feedback
+from inside it. `-fprofile-instr-generate -fcoverage-mapping`, with
+`-fprofile-instr-generate` when linking, adds it to coverage reports.
+`python3 tools/ci.py linux-fuzz` builds notcurses and every harness this way, then
+runs `run.py --smoke`. CI runs it on x86_64 and aarch64 Linux.
+
 `run.py` replays `corpus/<target>` and `regressions/<target>`, then optionally runs
 a fixed smoke campaign with seed 2201: 10,000 mutations for `source` and `metadata`,
-2,000 for `sequence`. `--target` limits the run. Logs, profiles, new corpus entries
-and failures stay under the build directory. A failure stops the runner. CI runs
-the same command.
+2,000 for `sequence` and 30,000 for `renderer`. `--target` limits the run. A build
+without the renderer reports it as not built; naming it with `--target` there
+fails. Fuzzers read standard input from `/dev/null`. Logs, profiles (one per
+process and instrumented module), new corpus entries and failures stay under the
+build directory. A failure stops the runner. CI runs the same command.
 
 ## libFLAC signed overflow
 
@@ -131,17 +143,84 @@ or when a check fails, so tracing perturbs worker scheduling as little as possib
 Level 2 still slows workers. If a timing-sensitive failure disappears, compare the
 plain, level 1 and level 2 reproduction rates before trusting a passing trace.
 
+## Renderer contract
+
+`LLVMFuzzerInitialize` leaves any controlling terminal with `setsid()`, then starts
+one headless notcurses context that writes to `/dev/null` using xterm-256color
+terminfo. It checks that the loaded notcurses matches its headers and stops the
+context at exit. Each input creates its own child plane (1–48 rows by 1–96
+columns), renderer and snapshot pool, the last two on separate counting heaps; the
+standard plane is never drawn. At the end every loan, the pool, the renderer and
+the plane are released. The pile must then hold only the standard plane, and both
+heaps must be empty.
+
+The header chooses the plane's size, position, fill glyph and style, the renderer
+configuration, an injected creation failure, the loan limit (1–4) and an optional
+first snapshot. Up to 64 operations follow, each an opcode byte and a fixed operand
+record: draw, put a glyph (at given coordinates, or at the cursor as text output
+is, wrapping and scrolling), set the base cell, styles, channels, scrolling and
+autogrow, resize, publish, acquire, release a loan, release the pool owner while
+loans are held, configure, recreate and build information. Glyphs include ASCII,
+two-column, combining and ZWJ sequences. Snapshots are published straight into the
+private pool with 0–256 bands and fuzzed band, RMS and peak values; only valid
+publications are generated. Handles are always of the right kind or NULL, so
+caller-induced UB is excluded.
+
+Sized records live in heap blocks of their exact size: the whole record when its
+size and ABI version match, otherwise only the 8-byte prefix, so ASan rejects any
+access beyond what the contract allows. Configurations cover every mode, colours
+with alpha bits, the reserved field and floors of zero, -0, denormals, ±FLT_MAX,
+NaN, infinities, positive values and raw bit patterns. Rectangle fields are near
+the plane, raw 32-bit values or extremes such as INT32_MIN and UINT32_MAX.
+
+The oracle follows [the renderer contract](../docs/renderer.md), not the
+implementation:
+
+- Before each draw it copies every plane cell (glyph bytes, style, channels and
+  wide continuation) and the plane's drawing state.
+- The expected code follows the documented order: an invalid renderer, plane or
+  rectangle; success without changes for an empty area or intersection;
+  UNSUPPORTED when a clipped row's boundary cuts a wide glyph; otherwise success.
+- On success every cell outside the clip is unchanged, and every cell inside is a
+  style-zero space with the configured foreground. Its background follows the
+  documented mapping: band grouping, the LEVELS channel split and one-column
+  maximum, heights against the original rectangle in exact arithmetic, and the
+  peak marker. An exact half may be one cell lower.
+- Any other code leaves every cell unchanged.
+- Channels, styles, base cell, geometry, position and flags always survive; the
+  cursor is not checked.
+- Configure, draw and build information allocate nothing. Creation allocates
+  once, or not at all after a validation failure. NO_MEMORY leaves nothing
+  allocated and a NULL result. Build information equals the core's, and
+  mismatched records keep their prefix.
+
+LIMIT for plane dimensions above INT_MAX, IO for failing native cell access and
+UNSUPPORTED from build information (a different notcurses runtime) cannot be
+reached here. Allocation failures inside notcurses are not injected.
+`TEDER_FUZZ_TRACE=1` logs each operation, each draw outcome and every height
+accepted as an exact half rounded down.
+
+`regressions/renderer` holds minimized inputs that overflowed rows in earlier
+notcurses revisions. `scroll-wide-last-column` puts a two-column glyph at a
+scrolling plane's last column. `resize-wide-obliterate` writes over a wide glyph
+that a resize cut. `draw-dangling-wide` and `draw-dangling-wide-alias` reach such
+a glyph through a renderer draw. Each must replay with the contract's result.
+
 ## Campaigns and failures
 
 Pin the source, compiler, seed, corpus and limits before each campaign. Keep raw
 logs, profiles and evolving corpora outside the distribution. For `sequence`, use
-`-max_len=4096` and omit the dictionary. Example with at least 1,800 seconds:
+`-max_len=4096` and omit the dictionary. For `renderer`, use `-max_len=1591`, omit
+the dictionary, redirect standard input from `/dev/null` and start it with
+`setsid`, so notcurses cannot reach the terminal. Ctrl-C then cannot reach it
+either: rely on `-max_total_time` or signal its process. Example with at least
+1,800 seconds:
 
 ```sh
 target=source
 out="$PWD/fuzz-campaign/$target"
 mkdir -p "$out/corpus" "$out/artifacts"
-LLVM_PROFILE_FILE="$out/%p.profraw" \
+LLVM_PROFILE_FILE="$out/%p-%m.profraw" \
 ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 \
 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
 "build-fuzz/bin/teder_fuzz_$target" "$out/corpus" "fuzz/corpus/$target" \
@@ -154,6 +233,8 @@ Add `fuzz/regressions/$target` as a further seed directory when it exists. Recor
 elapsed time, executions, final coverage/features and corpus entry/byte counts.
 Inspect `llvm-profdata-18 merge` and `llvm-cov-18 report/show` output to establish
 which functions actually ran; libFuzzer's aggregate edge count is not a percentage.
+Pass each instrumented shared library to `llvm-cov-18` with `-object` so its
+functions are reported too.
 
 Replay a saved failure by passing its file path to the same binary with the same
 limits. Use `-minimize_crash=1 -max_total_time=120` to minimize a reproducible crash;
@@ -168,5 +249,10 @@ them into a separate directory with `python3 fuzz/seeds.py OUTPUT` and compare
 bytes before updating them. They cover stereo 16-bit, mono 24-bit, eight-channel
 32-bit, seeks/rates, truncation/CRC, UTF-8/NUL, picture and count-limit cases, plus
 playback, gapless, analysis, probe, seek, loss, cancellation, capacity, invalid
-argument, tight-limit and allocation-failure sequences. They do not exhaust FLAC
-frame encodings, thread interleavings or real device behaviour.
+argument, tight-limit and allocation-failure sequences. Renderer seeds cover both
+modes, NULL arguments, NULL and band-less snapshots, extreme rectangles, wide
+glyphs inside and at either clip edge, complex graphemes, resize, scrolling and
+autogrow (with text output at the cursor scrolling the plane), drawing after the pool owner is released, the loan limit, malformed
+records, configure failure, failed creation, build information, extreme floors
+and bands, an exact half and plane styles. They do not exhaust FLAC frame
+encodings, thread interleavings, real device behaviour or terminal output.

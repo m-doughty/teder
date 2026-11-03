@@ -47,8 +47,9 @@ foreign-runtime plane is a caller-contract violation, not a safely probeable val
 ## Mapping
 
 Both modes map floor_db to zero height and 0 dB to full height, clamping outside
-that range. Heights round to the nearest whole cell (half rounds up). Bars grow
-up from the original rectangle bottom. There are no labels, axes or separators.
+that range. Heights round to the nearest whole cell; an exact half may round
+either way. Bars grow up from the original rectangle bottom. There are no labels,
+axes or separators.
 
 SPECTRUM maps column x to bands starting at floor(x*B/columns), ending before
 floor((x+1)*B/columns), using at least one band. It takes their maximum dB value;

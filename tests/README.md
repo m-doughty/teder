@@ -463,10 +463,13 @@ producer helpers. No timing deadline or real DSP is inferred.
 
 ## Native renderer
 
-Renderer-enabled builds register `renderer.bounds/cells/clipping/levels/wide`.
-These use the pinned real core runtime and inspect exact glyphs, styles and RGB
-channels on native planes, including wide/complex existing cells, resize, extremes,
-no-data and retained worker snapshots after engine destruction. A private allocator
+Renderer-enabled builds register
+`renderer.bounds/cells/clipping/levels/wide/resize-cut`. These use the pinned real
+core runtime and inspect exact glyphs, styles and RGB channels on native planes,
+including wide/complex existing cells, resize, extremes, no-data and retained
+worker snapshots after engine destruction. `resize-cut` draws the last column of a
+plane whose resize cut wide glyphs there, and checks that nothing outside it
+changes. A private allocator
 seam proves the single arena, failed creation and allocation-free configure/draw.
 Tests print the actual loaded runtime path. Headless initialization uses explicit
 xterm-256color terminfo and fails if unavailable; it is not emulator presentation.

@@ -3,6 +3,8 @@
 Linux configurations build the pinned m-doughty/notcurses fork with their own compiler and
 sanitizer flags, then build teder Debug with -Werror and the renderer and run CTest. linux-shared
 and linux-static also install teder and run the installed consumers against that notcurses.
+linux-fuzz builds the static libFuzzer harnesses, renderer included, against a notcurses with
+fuzzer and coverage instrumentation, then replays the corpora and runs fuzz/run.py's smoke.
 macos-asan builds and tests the shared core library with Apple Clang, ASan and UBSan.
 
 --phase build fetches sources and needs the network; --phase test runs offline from that build.
@@ -17,7 +19,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 NOTCURSES_URL = "https://github.com/m-doughty/notcurses"
-NOTCURSES_REVISION = "7152070f1b6c7cf6acc4e7447e5b6854f9f1e904"
+NOTCURSES_REVISION = "fd67f2bafec21365f72a418797799d2051376fbe"
 # The C library alone, shared, without multimedia, tools, tests or generated documentation.
 NOTCURSES_OPTIONS = (
     "-DUSE_MULTIMEDIA=none", "-DUSE_CXX=OFF", "-DUSE_DOCTEST=OFF", "-DUSE_PANDOC=OFF",
@@ -32,12 +34,18 @@ SANITIZER_FLAGS = {
     "thread": "-fsanitize=thread -fno-omit-frame-pointer",
 }
 SANITIZER_PACKAGES = ("libasan8", "libtsan2", "libclang-rt-18-dev", "llvm-18")
+# Fuzzing gives notcurses libFuzzer feedback and source coverage, as cmake/Fuzzing.cmake does
+# for teder. The shared library links its own profile runtime and writes its own profile.
+FUZZ_FLAGS = "-fsanitize=fuzzer-no-link -fprofile-instr-generate -fcoverage-mapping"
+FUZZ_LINK_FLAGS = "-fprofile-instr-generate"
+FUZZ_OPTIONS = ("-DCMAKE_C_FLAGS_DEBUG=-O1 -g", "-DBUILD_TESTING=OFF", "-DTEDER_BUILD_EXAMPLES=OFF",
+                "-DTEDER_BUILD_FUZZERS=ON")
 PARALLEL = "4"
 
 
-def configuration(cc, cxx, shared, sanitizer, renderer, consumers, host="linux"):
+def configuration(cc, cxx, shared, sanitizer, renderer, consumers, host="linux", fuzz=False):
     return {"cc": cc, "cxx": cxx, "shared": shared, "sanitizer": sanitizer,
-            "renderer": renderer, "consumers": consumers, "host": host}
+            "renderer": renderer, "consumers": consumers, "host": host, "fuzz": fuzz}
 
 
 CONFIGURATIONS = {
@@ -45,6 +53,8 @@ CONFIGURATIONS = {
     "linux-static": configuration("gcc", "g++", "OFF", "none", renderer=True, consumers=True),
     "linux-asan": configuration("clang-18", "clang++-18", "ON", "address", renderer=True, consumers=False),
     "linux-tsan": configuration("gcc", "g++", "ON", "thread", renderer=True, consumers=False),
+    "linux-fuzz": configuration("clang-18", "clang++-18", "OFF", "address", renderer=True,
+                                consumers=False, fuzz=True),
     "macos-asan": configuration("cc", "c++", "ON", "address", renderer=False, consumers=False, host="darwin"),
 }
 
@@ -100,12 +110,14 @@ def notcurses_library(prefix):
 
 
 def build_notcurses(config, paths):
-    flags = SANITIZER_FLAGS[config["sanitizer"]]
+    flags = link_flags = SANITIZER_FLAGS[config["sanitizer"]]
+    if config["fuzz"]:
+        flags, link_flags = f"{flags} {FUZZ_FLAGS}", f"{link_flags} {FUZZ_LINK_FLAGS}"
     # The stamp lives in the installed prefix, which CI restores from its cache without the
     # source or build trees. Any change of revision, compiler, flags or options rebuilds.
     stamp = {"url": NOTCURSES_URL, "revision": NOTCURSES_REVISION, "cc": config["cc"],
              "compiler": capture(config["cc"], "--version").splitlines()[0],
-             "flags": flags, "options": list(NOTCURSES_OPTIONS)}
+             "flags": flags, "link_flags": link_flags, "options": list(NOTCURSES_OPTIONS)}
     stamp_path = paths["notcurses_install"] / "ci-stamp.json"
     if stamp_path.is_file() and notcurses_library(paths["notcurses_install"]) \
             and (paths["notcurses_install"] / "include" / "notcurses" / "notcurses.h").is_file():
@@ -136,7 +148,7 @@ def build_notcurses(config, paths):
     run("cmake", "--fresh", "-S", source, "-B", paths["notcurses_build"], "-G", "Ninja",
         f"-DCMAKE_C_COMPILER={config['cc']}", "-DCMAKE_BUILD_TYPE=Debug",
         f"-DCMAKE_INSTALL_PREFIX={paths['notcurses_install']}", f"-DCMAKE_C_FLAGS={flags}",
-        f"-DCMAKE_SHARED_LINKER_FLAGS={flags}", *NOTCURSES_OPTIONS)
+        f"-DCMAKE_SHARED_LINKER_FLAGS={link_flags}", *NOTCURSES_OPTIONS)
     run("cmake", "--build", paths["notcurses_build"], "--parallel", PARALLEL)
     run("cmake", "--install", paths["notcurses_build"])
     if not notcurses_library(paths["notcurses_install"]):
@@ -157,13 +169,18 @@ def build(config, paths):
     run("cmake", "-S", ROOT, "-B", paths["build"], "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug",
         f"-DCMAKE_C_COMPILER={config['cc']}", f"-DCMAKE_CXX_COMPILER={config['cxx']}",
         f"-DBUILD_SHARED_LIBS={config['shared']}", "-DTEDER_WERROR=ON",
-        f"-DTEDER_SANITIZER={config['sanitizer']}", *renderer)
+        f"-DTEDER_SANITIZER={config['sanitizer']}", *renderer,
+        *(FUZZ_OPTIONS if config["fuzz"] else ()))
     run("cmake", "--build", paths["build"], "--parallel", PARALLEL)
 
 
 def test(config, paths):
-    if not (paths["build"] / "CTestTestfile.cmake").is_file():
+    if not (paths["build"] / "CMakeCache.txt").is_file():
         raise SystemExit(f"ci.py: no build in {paths['build']}; run --phase build first")
+    if config["fuzz"]:
+        # Replays every committed input, then runs each target's fixed smoke campaign.
+        run(sys.executable, ROOT / "fuzz" / "run.py", paths["build"], "--smoke")
+        return
     ctest = ["ctest", "--output-on-failure", "--no-tests=error", "-j", PARALLEL]
     launcher = []
     if config["sanitizer"] == "thread" and config["host"] == "linux":

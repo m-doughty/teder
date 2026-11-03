@@ -19,7 +19,7 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "build-ci"
-CONFIGURATIONS = ("linux-shared", "linux-static", "linux-asan", "linux-tsan")
+CONFIGURATIONS = ("linux-shared", "linux-static", "linux-asan", "linux-tsan", "linux-fuzz")
 # A multi-arch OCI index; Docker selects the manifest for the daemon's architecture.
 BASE = "ubuntu@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac"
 # llvm-18 supplies the llvm-symbolizer that Clang's sanitizer runtimes use for stack traces.
@@ -136,7 +136,13 @@ def main():
                     "    mkdir -p /results/$tree && cp -R $tree/Testing /results/$tree/\n"
                     "  fi\n"
                     "done\n"
-                    "if [ -d build ]; then find build -name 'control-*.log' -exec cp {} /results/ ';'; fi\n")
+                    "if [ -d build ]; then find build -name 'control-*.log' -exec cp {} /results/ ';'; fi\n"
+                    # Fuzz logs plus any libFuzzer crash, leak, timeout or OOM input.
+                    "if [ -d build/fuzz-results ]; then\n"
+                    "  find build/fuzz-results -type f \\( -name '*.log' -o -name 'crash-*'"
+                    " -o -name 'leak-*' -o -name 'timeout-*' -o -name 'oom-*' \\)"
+                    " -exec cp --parents {} /results/ ';'\n"
+                    "fi\n")
             # On a Linux host, copied files belong to the invoking user rather than root.
             owner = ["--user", f"{os.getuid()}:{os.getgid()}"] if hasattr(os, "getuid") else []
             run(*common, *owner, "--network", "none",

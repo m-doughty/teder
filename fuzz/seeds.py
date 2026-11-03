@@ -186,8 +186,138 @@ def sequences(output):
         (folder / name).write_bytes(header(fail_at=fail_at) + body)
 
 
+# Renderer opcodes, glyphs, floor-table indexes and record faults, matching fuzz/renderer.c.
+(R_DRAW, R_PUT, R_BASE, R_STYLE, R_FLAGS, R_RESIZE, R_PUBLISH, R_ACQUIRE, R_RELEASE, R_DISOWN,
+ R_CONFIGURE, R_RECREATE, R_BUILD_INFO) = range(13)
+ASCII, WIDE, FAMILY, COMBINING, NO_FILL = 0, 2, 3, 4, 8
+CURSOR = 0x80  # put at the cursor, after moving it to y, x when both are on the plane
+F_DEFAULT, F_NEG_ZERO, F_24, F_TINY, F_HUGE, F_NAN, F_INF, F_NEG_INF, F_POSITIVE = (
+    0, 1, 4, 5, 6, 7, 8, 9, 10)
+SIZE, ABI, NULL_RECORD, FG_ALPHA, BG_ALPHA, PEAK_ALPHA, RESERVED, MODE = range(8, 16)
+RAW, NEAR, NONE, NEWEST, OLDEST = 0x55, 0, 0, 1, 2
+
+
+def style(mask=2, fg=0x40ABCDEF, bg=0x40987654):
+    return struct.pack("<HII", mask, fg, bg)
+
+
+def config(mode=0, floor=F_DEFAULT, fault=0, value=0, fg=0x33CC66, bg=0x112233, peak=0xFF9900,
+           raw=None):
+    colors = b"".join(color.to_bytes(3, "little") for color in (fg, bg, peak))
+    return (bytes([fault | value << 4, mode]) + colors + bytes([floor if raw is None else 0xE0])
+            + struct.pack("<I", raw or 0))
+
+
+def xorshift(state):
+    state ^= (state << 13) & 0xFFFFFFFF
+    state ^= state >> 17
+    return state ^ (state << 5) & 0xFFFFFFFF
+
+
+def bands(count=8, generator=0, seed=1, rms=(0.5, 0.125), peak=(0.75, 0.25)):
+    return struct.pack("<HBI4f", count, generator, seed, *rms, *peak)
+
+
+def tie_band():
+    """A seed whose first extremes-table band is -27 dB, an exact half at 45 rows."""
+    return next(seed for seed in range(1, 1000) if xorshift(seed) % 12 == 5)
+
+
+def scene(rows=6, cols=8, fill=ASCII, cfg=None, fail=False, loans=2, initial=None):
+    pool = loans - 1 | (4 if initial is not None else 0)
+    return (bytes([rows - 1, cols - 1, 2 | 3 << 4, fill]) + style() + (cfg or config())
+            + bytes([fail, pool]) + (initial if initial is not None else bands(0)))
+
+
+def draw(y, x, rows, cols, modes=RAW, renderer=0, plane=0, rect=0, snapshot=NEWEST):
+    return (bytes([R_DRAW, renderer | plane << 2 | rect << 4 | snapshot << 6, modes])
+            + struct.pack("<iiII", y, x, rows, cols))
+
+
+def put(glyph, y, x, mask=0, fg=0x40102030, bg=0x40405060):
+    return bytes([R_PUT, glyph, y, x]) + style(mask, fg, bg)
+
+
+def renderers(output):
+    folder = output / "renderer"
+    folder.mkdir(parents=True, exist_ok=True)
+    full = draw(0, 0, 6, 8)
+    levels = config(mode=2, floor=F_24)
+    bad = [config(fault=fault, value=value) for fault, value in (
+        (SIZE, 0), (SIZE, 2), (SIZE, 5), (ABI, 0), (ABI, 3), (NULL_RECORD, 0), (FG_ALPHA, 7),
+        (BG_ALPHA, 0), (PEAK_ALPHA, 3), (RESERVED, 15), (MODE, 0), (MODE, 15))]
+    bad += [config(floor=floor) for floor in (F_NAN, F_INF, F_NEG_INF, F_POSITIVE)]
+    bad.append(config(raw=0x7FC00001))
+    seeds = {
+        "spectrum": (scene(initial=bands()), full + draw(1, 1, 4, 4) + draw(0, 7, 6, 1)),
+        "levels": (scene(cfg=levels, initial=bands()), draw(0, 0, 4, 2) + draw(0, 2, 4, 1)
+                   + draw(0, 3, 6, 5)),
+        "null-snapshot": (scene(initial=bands()), draw(0, 0, 6, 8, snapshot=NONE)),
+        "null-arguments": (scene(initial=bands()), draw(0, 0, 6, 8, plane=3)
+                           + draw(0, 0, 6, 8, rect=3) + draw(0, 0, 6, 8, renderer=3)
+                           + draw(0, 0, 0, 0, plane=3, rect=3)),
+        "zero-bands": (scene(initial=bands(0)), full),
+        "extreme-rects": (scene(initial=bands()), b"".join(draw(*rect) for rect in (
+            (-2**31, -2**31, 2**32 - 1, 2**32 - 1), (2**31 - 1, 2**31 - 1, 2**32 - 1, 2**32 - 1),
+            (-2**31, -2**31, 1, 1), (0, 0, 0, 2**32 - 1), (0, 0, 1, 0), (-1, -1, 4, 4),
+            (5, 7, 2**31, 2**31))) + draw(0, 0, 0, 0, modes=0xAA)),
+        "wide-left": (scene(), put(WIDE, 2, 2) + draw(1, 3, 3, 2)),
+        "wide-right": (scene(), put(WIDE, 2, 2) + draw(1, 1, 3, 2)),
+        "wide-inside": (scene(fill=WIDE, initial=bands()), draw(0, 0, 6, 8) + draw(0, 2, 6, 2)),
+        "graphemes": (scene(fill=NO_FILL, initial=bands()), put(FAMILY, 0, 0)
+                      + put(COMBINING, 5, 7) + put(WIDE, 0, 6) + bytes([R_BASE, FAMILY])
+                      + style(8) + draw(1, 1, 4, 5)),
+        "resize": (scene(initial=bands()), full + bytes([R_RESIZE, 2, 3]) + full
+                   + bytes([R_RESIZE, 47, 95]) + draw(-3, -3, 60, 120)),
+        "scroll-autogrow": (scene(initial=bands()), bytes([R_FLAGS, 2]) + put(ASCII, 2, 8)
+                            + bytes([R_FLAGS, 3]) + put(ASCII, 5, 9) + put(WIDE, 5, 9)
+                            + draw(0, 0, 7, 10) + bytes([R_FLAGS, 1]) + full),
+        "disowned": (scene(loans=3, initial=bands()), bytes([R_PUBLISH]) + bands(64, 1, 7)
+                     + bytes([R_ACQUIRE, R_DISOWN, R_PUBLISH]) + bands() + bytes([R_ACQUIRE])
+                     + draw(0, 0, 6, 8, snapshot=OLDEST) + full + bytes([R_RELEASE, 0]) + full),
+        "loan-limit": (scene(loans=1, initial=bands()),
+                       bytes([R_ACQUIRE, R_RELEASE, 0, R_ACQUIRE]) + full
+                       + bytes([R_RELEASE, 0, R_ACQUIRE]) + full),
+        "malformed": (scene(cfg=bad[0]),
+                      full + b"".join(bytes([R_RECREATE, 0]) + cfg for cfg in bad) + full),
+        "configure-failure": (scene(initial=bands()),
+                              b"".join(bytes([R_CONFIGURE, 0]) + cfg for cfg in bad)
+                              + full + bytes([R_CONFIGURE, 3]) + levels + full
+                              + bytes([R_CONFIGURE, 0]) + levels + full),
+        "no-memory": (scene(fail=True, initial=bands()), full + bytes([R_RECREATE, 1]) + config()
+                      + full + bytes([R_RECREATE, 6]) + config() + full),
+        "build-info": (scene(), bytes([R_BUILD_INFO, 0, R_BUILD_INFO, 5, R_BUILD_INFO, 5 | 2 << 3,
+                                       R_BUILD_INFO, 5 | 4 << 3, R_BUILD_INFO, 6, R_BUILD_INFO,
+                                       6 | 3 << 3, R_BUILD_INFO, 7])),
+        "floors": (scene(initial=bands(256, 3, 99)), b"".join(
+            bytes([R_RECREATE, 0]) + config(mode=mode, floor=floor) + full + draw(0, 0, 6, 300)
+            for mode, floor in ((1, F_TINY), (2, F_TINY), (1, F_HUGE), (2, F_HUGE),
+                                (1, F_NEG_ZERO)))
+            + bytes([R_RECREATE, 0]) + config(mode=2, raw=0xC2700000) + full),
+        "band-extremes": (scene(initial=bands(256, 2, 3, (0.0, 3e38), (1e-45, 1.0))),
+                          full + draw(0, 0, 6, 1) + draw(0, 0, 6, 1000)
+                          + bytes([R_CONFIGURE, 0]) + levels + full + draw(0, 0, 6, 1)),
+        "rounding-tie": (scene(rows=45, cols=4, initial=bands(1, 2, tie_band())),
+                         draw(0, 0, 45, 1) + draw(0, 1, 45, 3)),
+        "style-base": (scene(fill=COMBINING, initial=bands()),
+                       bytes([R_STYLE]) + style(0x1F, 0x48FF00FF, 0x7000FF00)
+                       + bytes([R_BASE, WIDE]) + style(1) + draw(4, 4, 3, 3, modes=NEAR)
+                       + draw(2, 2, 2, 2)),
+        # A scrolling plane fills its last row, then scrolls twice: once for a wide glyph
+        # that doesn't fit, once for a narrow one past the edge. Draws and resizes follow.
+        "scroll-cursor": (scene(initial=bands()), bytes([R_FLAGS, 1]) + put(ASCII, 5, 7)
+                          + put(WIDE | CURSOR, 5, 7) + put(WIDE | CURSOR, 7, 9)
+                          + b"".join(put(1 | CURSOR, 7, 9) for _ in range(5)) + full
+                          + bytes([R_RESIZE, 7, 7]) + draw(0, 0, 8, 8)
+                          + bytes([R_RESIZE, 5, 5]) + full),
+    }
+    for name, (head, body) in seeds.items():
+        (folder / name).write_bytes(head + body)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path)
     generate(parser.parse_args().output)
     sequences(parser.parse_args().output)
+    renderers(parser.parse_args().output)
