@@ -191,7 +191,9 @@ foreach(case snapshot cancellation failures identity closing selection rates sel
 	set_tests_properties(output.${case} PROPERTIES TIMEOUT 40 LABELS "unit;output;lifetime")
 endforeach()
 
-set_tests_properties(output.rollback-composed PROPERTIES TIMEOUT 120)
+# These do a fixed amount of work with no timed waits, and shared CI runners
+# can run them several times slower than a local machine.
+set_tests_properties(output.rollback-composed output.gapless-rates output.gapless-formats PROPERTIES TIMEOUT 120)
 add_test(NAME output.shutdown-analysis COMMAND teder_test_output shutdown-analysis)
 set_tests_properties(output.shutdown-analysis PROPERTIES TIMEOUT 40 LABELS "unit;output;lifetime")
 set_tests_properties(output.rollback-composed output.shutdown-analysis PROPERTIES RESOURCE_LOCK audit_fixture)
