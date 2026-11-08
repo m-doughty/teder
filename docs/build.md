@@ -97,16 +97,20 @@ interactive terminal. See `tests/README.md` in the source tree.
 | Job | Runners | Covers |
 |---|---|---|
 | `format` | `ubuntu-24.04` | `tools/format-c.py --check` with clang-format 18.1.3 |
+| `tools` | `ubuntu-24.04` | `tools/test-ci.py`, the notcurses checks in `tools/ci.py` |
 | `core` | `macos-15`, `windows-latest` | Shared and static core libraries, the suite and installed consumers |
 | `linux` | `ubuntu-24.04`, `ubuntu-24.04-arm` | One job per Linux configuration of `tools/ci.py` |
 | `macos-asan` | `macos-15` | `tools/ci.py macos-asan` |
+
+Every CTest run, in the workflow and in `tools/ci.py`, passes `--no-tests=error`,
+so a build that registers no tests fails rather than passing empty.
 
 `tools/ci.py` holds the commands for these configurations, so a local run
 executes exactly what CI does. Each builds Debug with `TEDER_WERROR=ON`:
 
 | Configuration | Compiler | Build | Runs |
 |---|---|---|---|
-| `linux-shared` | GCC | Shared, renderer | Suite, then installed consumers |
+| `linux-shared` | GCC | Shared, renderer | notcurses resize and autogrow cases, suite, then installed consumers |
 | `linux-static` | GCC | Static, renderer | Suite, then installed consumers |
 | `linux-asan` | Clang 18 | Shared, renderer, `TEDER_SANITIZER=address` | Suite |
 | `linux-tsan` | GCC | Shared, renderer, `TEDER_SANITIZER=thread` | Suite under `setarch -R` |
@@ -114,19 +118,58 @@ executes exactly what CI does. Each builds Debug with `TEDER_WERROR=ON`:
 | `macos-asan` | Apple Clang | Shared, core only, `TEDER_SANITIZER=address` | Suite |
 
 Linux configurations first fetch `m-doughty/notcurses` by the pinned commit hash
-and verify the checkout. notcurses is then built shared with the configuration's
-compiler and sanitizer flags, so one sanitizer runtime serves the whole process.
-For `linux-fuzz` it also gets libFuzzer feedback and source coverage instrumentation.
-A stamp in its install prefix records the revision, compiler, flags and options.
-CI caches that prefix; any mismatch rebuilds it. The installed consumers compile
-against the same notcurses and check a real plane through the installed renderer.
+and verify the checkout. The source tree must then hold that commit unmodified:
+`git status --porcelain --untracked-files=all --ignored` must print nothing, and
+no file may be marked skip-worktree or assume-unchanged, which hide edits from
+`git status`. Ignored files count because the fork's CMake globs `src/lib/*.c` and
+its `.gitignore` matches names such as `build*`. A reused tree with an edited,
+deleted, untracked or ignored file stops the run with a message naming the tree
+and listing those files. `tools/ci.py` never cleans the tree, since a local edit
+there may be deliberate: keep the change elsewhere, or remove the tree so the next
+run fetches the commit again.
+
+notcurses is then built shared with the configuration's compiler and sanitizer
+flags, so one sanitizer runtime serves the whole process. For `linux-fuzz` it also
+gets libFuzzer feedback and source coverage instrumentation. A stamp in its install
+prefix records the revision, compiler, flags and options, and the SHA-256 digest of
+every other file under the prefix: the library and its versioned names, headers,
+pkg-config and CMake package files, and documents. A symbolic link records its
+target. CI caches that prefix. A stamp for another revision or configuration, or
+one without digests, rebuilds it. When the stamp matches, every file must match
+its digest, with none missing or added. Otherwise the run stops, naming the prefix
+and each differing file, and neither reuses nor repairs the installation; remove
+the prefix to rebuild it. The installed consumers compile against the same
+notcurses and check a real plane through the installed renderer.
+
+`linux-shared` also runs the fork's own doctest cases in `src/tests/resize.cpp`
+and `src/tests/autogrow.cpp`, so they run on x86_64 and aarch64 in hosted CI and
+in `tools/run-ci-docker.py`. The hosted macOS and Windows jobs build the core
+library only. The installed notcurses has its tests turned off, so the build
+phase configures a separate test build of the same checkout, with the C++ wrapper
+and doctest on, and builds its `notcurses-tester` from scratch on every run. The
+test build is never cached. It needs a C++ compiler and doctest (Ubuntu's
+`doctest-dev`). The test phase runs the tester once per file, selecting its cases
+with doctest's `--source-file`, so cases added to either file run without changes
+to `tools/ci.py`. It runs headless, like the fork's own CI: `TERM=xterm`,
+`COLORTERM=truecolor` and the `C.UTF-8` locale, in a new session without a
+controlling terminal, with stdin closed. Rendered output goes to
+`notcurses-tests-<file>-terminal.log` in the test build, and the doctest report,
+`notcurses-tests-<file>.log`, is printed. A failing case fails the run. So does a
+file that selects no case, because the tester exits successfully when its filter
+matches nothing or `TERM` is unset.
+
+`python3 tools/test-ci.py` tests the source tree, installation and doctest
+report checks without compiling anything. A throwaway Git repository stands in
+for the fork, and CMake commands are recorded instead of run. It needs Python 3
+and Git, on any host; the `tools` job runs it.
 
 Every tree lives under `build-ci/`, or under `--build-root DIR`. `--phase build`
-fetches sources and needs the network. `--phase test` runs CTest, the installation
-and the consumers (or, for `linux-fuzz`, the fuzz replay and smoke runs) offline
-from that build; the default runs both. The script prints the compiler, CMake,
-Ninja, Python and, on Linux, glibc and sanitizer runtime versions first. A failing
-step stops the run with that step's exit status.
+fetches sources and needs the network. `--phase test` runs the fork's cases for
+`linux-shared`, then CTest, the installation and the consumers (or, for
+`linux-fuzz`, the fuzz replay and smoke runs) offline from that build; the default
+runs both. The script prints the compiler, CMake, Ninja, Python and, on Linux,
+glibc and sanitizer runtime versions first, and doctest's for `linux-shared`. A
+failing step stops the run with that step's exit status.
 
 On macOS, run the macOS configuration directly:
 
@@ -142,9 +185,10 @@ python3 tools/run-ci-docker.py linux-tsan
 ```
 
 The container image comes from a pinned Ubuntu 24.04 index and adds the hosted
-runners' toolchain packages. The build phase runs with network access; the test
-phase runs offline under a hardened seccomp profile. See `tests/README.md` for
-its requirements, retained logs and temporary-resource handling.
+runners' toolchain packages and doctest. The build phase runs with network access;
+the test phase runs offline under a hardened seccomp profile. The fork's doctest
+reports and rendered output are kept with the run's logs. See `tests/README.md`
+for its requirements, retained logs and temporary-resource handling.
 
 ## Neovim and clangd
 
@@ -191,10 +235,10 @@ third-party headers and Check are not part of the installed API.
 
 `TEDER_WITH_NOTCURSES=OFF` is the default and performs no notcurses discovery.
 Enabling it requires an explicitly supplied installation of
-`m-doughty/notcurses` commit `fd67f2bafec21365f72a418797799d2051376fbe`:
+`m-doughty/notcurses` commit `cd27fd8578cd990cf0bd44a9332e5d2891122a35`:
 
 ```sh
-cmake -S . -B build-renderer -DTEDER_WITH_NOTCURSES=ON -DTEDER_NOTCURSES_PREFIX=/absolute/fork/install -DTEDER_NOTCURSES_REVISION=fd67f2bafec21365f72a418797799d2051376fbe
+cmake -S . -B build-renderer -DTEDER_WITH_NOTCURSES=ON -DTEDER_NOTCURSES_PREFIX=/absolute/fork/install -DTEDER_NOTCURSES_REVISION=cd27fd8578cd990cf0bd44a9332e5d2891122a35
 ```
 
 Headers and the shared core runtime/import library must exist under that prefix.

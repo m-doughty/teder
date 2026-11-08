@@ -1,0 +1,21 @@
+# Exact expectations for the generated seeds that must succeed.
+# <target> <name> hash=<FNV-1a of the whole input file> <key>=<value>...
+metadata control-0 hash=0xe6b2d0e876025715 rate=44100 channels=2 bits=16 duration=16 tags=5 artwork=0 digest=0x6453d1e20506578c
+metadata tag-limit hash=0x3135bc8eab5fdaeb rate=44100 channels=2 bits=16 duration=16 tags=1024 artwork=0 digest=0xcf97dac6ac481325
+metadata tags-picture hash=0x2ebccefd47cc7f04 rate=44100 channels=2 bits=16 duration=16 tags=5 artwork=1 digest=0x63371925145aaefc
+source eight-32-0 hash=0x6e7dfdb4929025de channels=8 rate=44100 bits=32 duration=16 frames=16
+source eight-32-1 hash=0xe8f30f2fba749e6b channels=8 rate=44100 bits=32 duration=16 frames=16
+source eight-32-2 hash=0x3fddccc122009f76 channels=8 rate=44100 bits=32 duration=16 frames=9
+source eight-32-3 hash=0x2a9b0ab87d1ff9df channels=8 rate=44100 bits=32 duration=16 frames=2
+source mono-24-0 hash=0x0ba8ea93462ec63b channels=1 rate=48000 bits=24 duration=16 frames=16 pcm=0x842a0046bff96009
+source mono-24-1 hash=0x1dd1e359e2be3ea0 channels=1 rate=48000 bits=24 duration=16 frames=15
+source mono-24-2 hash=0xff2c690bcd397923 channels=1 rate=48000 bits=24 duration=16 frames=8 pcm=0xdd91817511779a81
+source mono-24-3 hash=0x5e79e2a5cab4f9cc channels=1 rate=48000 bits=24 duration=16 frames=2
+source track-a-0 hash=0x994d182ce65bdc22 channels=2 rate=44100 bits=16 duration=16 frames=16 pcm=0x6ec629d486037e6d
+source track-a-1 hash=0x2eaeb13729c8757b channels=2 rate=44100 bits=16 duration=16 frames=16 pcm=0x6ec629d486037e6d
+source track-a-2 hash=0xfe8d73c31b033ada channels=2 rate=44100 bits=16 duration=16 frames=9
+source track-a-3 hash=0x7fd6a7e994db472f channels=2 rate=44100 bits=16 duration=16 frames=2
+source track-b-0 hash=0x9c5aadfc0780fc0c channels=2 rate=44100 bits=16 duration=16 frames=16 pcm=0x5303c65b82caf361
+source track-b-1 hash=0x81098b0efb9c62f1 channels=2 rate=44100 bits=16 duration=16 frames=16 pcm=0x5303c65b82caf361
+source track-b-2 hash=0x8eaeb2275c332244 channels=2 rate=44100 bits=16 duration=16 frames=9
+source track-b-3 hash=0x4ae00ff26929641d channels=2 rate=44100 bits=16 duration=16 frames=2

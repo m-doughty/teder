@@ -28,13 +28,35 @@ copy of the pinned header. It verifies the original header hash and patch
 anchors; downloaded sources stay unchanged. The fixes release the internal log
 and backend APIs on failed initialization, unwind context mutex stages, and
 release WASAPI/ALSA/PulseAudio libraries on their early failure paths.
+CoreAudio device information also frees its stream descriptions when a format's
+sample-rate query fails; the pinned code left them in the backend heap, which then
+never emptied, so the backend could not close.
 `backend.unwind` checks the Windows handle leak; allocator and native
 enumeration tests cover the context owner. `cmake/MiniaudioDevice.cmake` also
 fixes device initialization cleanup: it releases the stop event on backend
 failure and runs the resource destructor when initialization fails before a
 worker starts. On CoreAudio it checks and tracks the separate stop event and
-frees it after unit disposal. Windows handle counts and post-init destructor
-assertions check the device fixes.
+frees it after unit disposal. When a new CoreAudio unit cannot select its device,
+as when the device disappears after lookup, initialization now fails with that
+error; the pinned code disposed the unit, returned an earlier success, carried on
+with the disposed unit and disposed it again on cleanup. A new unit whose device
+buffer size cannot be read is now disposed; the pinned code returned the error
+and kept no reference to it, so it was never released. Windows handle counts and
+post-init destructor assertions check the device fixes. The `coreaudio.*` tests
+check the CoreAudio fixes without an audio device: they replace a real CoreAudio
+context's functions with fakes, then fail each allocation of device information
+and device initialization, each AudioUnit call that initialization checks, and
+the buffer-size reads. `cmake/MiniaudioDevice.cmake` also records why a
+synchronous worker's data loop ended. The pinned worker discards that result, and its stopped
+notification is the same after a requested stop as after a native write failure.
+Device stop reads the recorded result once native stop returns, so a stop that
+races such a failure reports DEVICE_LOST. A write woken by the stop itself is not
+a failure: WASAPI's returns success and ALSA's returns `MA_DEVICE_NOT_STARTED`.
+The PulseAudio data loop returns an error after a failed main-loop iteration,
+where it returned success. `device.loss-sync-stop` and
+`output.sync-stop-loss-raced` check the race with a synchronous test backend, and
+`device.sync-stop` checks that ordinary stops woken either way report no loss.
+The PulseAudio change is compiled on Linux but has no runtime test.
 
 `cmake/CheckPack.cmake` fixes Check's message pack and unpack tables. The pinned
 source calls each typed function through a mismatched function-pointer type,

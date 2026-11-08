@@ -3,11 +3,27 @@
 Run `ctest --test-dir build --output-on-failure`. Use `-L harness` for harness
 checks; `-V -R 'harness.(memory|hooks)'` prints allocation sites and baselines.
 Check cases run without fork, each in its own CTest process with a 20-second
-timeout. Four negative controls have a second process supervisor: three must
-exit 42 with the intended diagnostic; the missing-worker control must reach
-its checkpoint and time out. Logs are `build/tests/control-*.log`. A crash or
-unrelated error cannot satisfy a control. Timeout kills the child process;
-test code never frees storage while a stranded worker may still use it.
+timeout. Six negative controls have a second process supervisor,
+`support/control.cmake`. `control.leak`, `.wrong-free`, `.pcm` and
+`output.worker-check-control` must exit 42 with the intended diagnostic;
+`control.missing-worker` must reach its checkpoint and time out;
+`output.failed-check-control` must fail cleanly ten times in a row (below).
+Logs are `build/tests/control-*.log`. A crash or unrelated error cannot satisfy
+a control. Timeout kills the child process; test code never frees storage while
+a stranded worker may still use it.
+
+A failed check prints `file:line:F:test: message` to stderr and exits with status 1
+from the failing frame. `support/harness.h` replaces Check's `ck_assert`,
+`ck_assert_msg`, `ck_abort` and `ck_abort_msg`, which every comparison macro uses,
+and removes the deprecated `fail` macros. Check's own failure path longjmps out of
+the test, then collects the result on that same stack. Engine, device and helper
+threads may still be writing the abandoned frame's fixture, gates and tracker, so
+Check can crash while it collects the result. Ending the process at the failing
+frame keeps every borrowed frame live, so a test need not close its engine before
+checking. Every Check test includes `support/harness.h`, except `test_build.c`,
+which starts no threads. `output.failed-check-control` fails a check while an
+engine plays and a helper rewrites the failing frame; each of its ten runs must
+exit 1 with that message and no sanitizer report.
 
 `support/harness.h` is private test infrastructure. Link `teder_test_support`
 only into tests; it is neither installed nor linked into the public library.
@@ -184,11 +200,45 @@ teardown; neither device storage nor its context loan may be released early.
 silence and the exact last submitted source frame. These private tests do not
 establish public engine recovery or physical unplug behavior.
 
-Run `build/bin/teder_test_device native` separately. It opens the current default
-on Windows, or the first enumerated output elsewhere, submits three silent PCM
-frames, stops, closes and injects failure at every observed device-init allocation.
+`device.loss-sync-stop` uses a synchronous fake backend that supplies only
+`onDeviceWrite` and `onDeviceStop`, so miniaudio's own worker runs its blocking
+data loop. One write fails, and the worker is held inside `onDeviceStop`, before
+its stopped notification, while the owner stops. Stop clears expected-running
+first, so that notification is ignored; stop must still return DEVICE_LOST from
+the data-loop result the worker records (see
+[miniaudio fixes](../docs/dependencies.md#selected-paths-and-limits)).
+`device.loss-sync-unraced` releases the worker first, so its notification reports
+the loss and stop bypasses native stop. `device.sync-stop` stops the same backend
+twice while its worker is blocked in a write. Stop's wakeup ends that write with
+success, as WASAPI's does, or with `MA_DEVICE_NOT_STARTED`, as ALSA's does; neither
+is loss, and the device restarts between the stops.
+
+On macOS, `-L coreaudio` selects cases that need no audio device. Each creates a
+real miniaudio CoreAudio context, then replaces its runtime-linked CoreAudio,
+AudioUnit and CoreFoundation functions with fakes for one output and one input; the
+output lists several stream formats. Any call the fakes do not model, and any call
+after the AudioUnit was disposed, fails the test where it happens.
+`coreaudio.info-default` and `coreaudio.info-keyed` fail each allocation of the
+default-output lookup and of the output's information, including each format's
+sample-rate query. `coreaudio.init-default` and `coreaudio.init-keyed` fail each
+allocation of a device open. Each must return NO_MEMORY, dispose any unit it
+created exactly once and leave the backend closable. `coreaudio.current-device`
+fails the new unit's device selection, as when the output disappears after lookup:
+the open must return DEVICE_LOST with the unit disposed once, and the same backend
+then opens the output normally. `coreaudio.unit-failures` does the same for every
+other AudioUnit call that initialization checks. `coreaudio.buffer-size` does the
+same when reading the output's allowed buffer sizes, or the size in use after
+setting it, fails; a rejected size alone must still open with the device's current
+size (see [miniaudio fixes](../docs/dependencies.md#selected-paths-and-limits)).
+
+Run `build/bin/teder_test_device native` separately. Outside Windows it opens the
+first enumerated output; then, on every OS, the current default (empty key). Each
+submits three silent PCM frames, stops, closes and injects failure at every
+observed device-init allocation, on a fresh backend each time: the open must return
+NO_MEMORY and the backend must still close, so nothing it allocated outlives the
+failed open. `native-default` runs only the default sweep.
 Normal stop must leave the private loss flag clear.
-Missing backend/device support fails the test. Headless ALSA output and silent
+Missing backend/device support, including an unusable default, fails the test. Headless ALSA output and silent
 WASAPI submission are native lifecycle evidence, not audible music acceptance.
 
 ## Engine device loss
@@ -206,6 +256,13 @@ source on either side of a gapless boundary, including its unreported final cloc
 `output.loss-repeated` runs eight loss/failed-reopen/recovery cycles, checks warmed
 Windows handles and verifies epoch exhaustion. All use public requests with a
 synthetic native backend; physical unplug/default-change behavior is not inferred.
+
+`output.sync-stop-loss-raced` repeats `device.loss-sync-stop`'s race through the
+engine: a playing synchronous backend's write fails and STOP is submitted while
+the worker is held. STOP finishes DEVICE_LOST with output LOST and the source
+PAUSED at its final position in the next epoch, not a completed rewind.
+`output.sync-stop-loss-unraced` releases the worker first and expects the same
+state from ordinary loss monitoring.
 
 ## Public device enumeration
 
@@ -262,6 +319,24 @@ a reopen commits.
 - `output.reopen-close` closes the engine. Both requests finish CANCELLED and every
   source, device and allocation is released.
 
+Further cases hold the reopen after its preparation succeeded, at the commit
+checkpoint (`TD_MEDIA_BEFORE_COMMIT`) or at the quiesce checkpoint, where control
+is about to stop output for adoption (`TD_MEDIA_BEFORE_QUIESCE`). None uses a
+timed hold.
+
+- `output.reopen-loss-quiescing-select` and `-stop` lose the device at the quiesce
+  checkpoint, after control's first recovery found no loss, so quiescence observes
+  the loss itself. `output.reopen-loss-prepared-select` and `-stop` lose it at the
+  commit checkpoint, before that recovery. All four finish the reopen and PLAY
+  STALE, leaving the source PAUSED with DEVICE_LOST at frame 3 or 0. Reselection
+  then plays from there.
+- `output.reopen-close-prepared-select` closes at the commit checkpoint. A selection
+  commits only with its reopen, so it and PLAY finish CANCELLED and the source is
+  never adopted. `-stop` runs the same schedule for STOP, which committed its rewind
+  before quiescing: its reopen keeps OK and PLAY finishes CANCELLED.
+- `output.reopen-close-committed` closes at the quiesce checkpoint, after either
+  reopen committed. Both keep OK, PLAY finishes CANCELLED and output never starts.
+
 `build/bin/teder_test_output native-select` opens a real output, verifies status,
 closes and fails each observed allocation in turn. It selects the default on
 Windows and the first enumerated output elsewhere. It never starts playback.
@@ -311,12 +386,14 @@ Shared generated fixtures use a CTest resource lock.
 
 From the package root, run `python3 tools/run-ci-docker.py <configuration>` with
 Python 3 and Docker for Linux/amd64 or Linux/arm64. The configuration is
-`linux-shared`, `linux-static`, `linux-asan` or `linux-tsan`, as in
+`linux-shared`, `linux-static`, `linux-asan`, `linux-tsan` or `linux-fuzz`, as in
 `tools/ci.py`. The runner builds a cached Ubuntu 24.04 image for the host's
 architecture and runs the same `tools/ci.py` commands as CI. The source tree is
 mounted read-only and the build tree is a temporary Docker volume, removed on exit.
 Each run saves `build.log`, `test.log`, CTest's `Testing/` trees and the control
-logs in a new directory under `build-ci/results/`. Failures propagate to the caller.
+logs in a new directory under `build-ci/results/`, with the fork's doctest reports
+for `linux-shared` and the fuzz logs and any failing inputs for `linux-fuzz`.
+Failures propagate to the caller.
 
 Every container runs with all capabilities dropped and no-new-privileges. The
 build phase fetches pinned sources under Docker's default seccomp policy. The test
@@ -381,6 +458,17 @@ rejection, exact result capacity and one byte below it. `probe.failures` injects
 32 allocation failures; `probe.initialization` rejects each probe event/thread stage
 and later publication, with joined workers and unchanged warmed Windows handle counts.
 
+`file-info.probe` and `file-info.open` fail each native file-information call
+after a FLAC opened: `fstat` on POSIX, then `GetFileType` and
+`GetFileInformationByHandle` in turn on Windows. Each must give IO, not the
+UNSUPPORTED of a file that is not regular, and close its file. The executable links
+`teder_source_faults`, a test-only copy of the source objects compiled with
+`TD_FILE_FAULTS`. Before every such call, open consults the hook `td_file_fault()`,
+which sets `errno` or the Win32 last error when it fails one. An unfaulted request
+counts the calls: one on POSIX, two on Windows. `source.fault-hook` runs `nm` over
+the library's own source objects and fails if any references the hook;
+`source.fault-hook-control` requires the test copy to reference it.
+
 `refill.probe-progress` holds a probe read while consuming 32,769 exact PCM frames
 and preparing a successor. Its constrained budget leaves just one source preparation
 plus 32 KiB of result space beyond existing owners and probe scratch/codec capacity.
@@ -442,7 +530,11 @@ capacity/ABI errors without changing current data; counters never wrap.
 `snapshot.concurrent` holds the pool gate to force AGAIN, then retains exact
 values while a publisher replaces current data 4,095 times. `snapshot.final-release`
 races three reader releases against owner removal for 32 rounds, requiring one
-matching arena free per round. These exercise the private pool and public views.
+matching arena free per round. `snapshot.single-slot` configures one slot: two loans
+on the current snapshot make a replacement return AGAIN and count a drop, a lone loan
+still does, and once the loans end the replacement reuses the slot. The last owner
+then goes in four orders: loan after pool, pool after loan, and each racing the other
+on a thread. These exercise the private pool and public views.
 
 ## Bounded analysis feed
 
@@ -460,6 +552,16 @@ checks stopped-only attachment and exact 48000-Hz post-gain data, then reads cop
 after device/source retirement. The feed callback object has its own import audit
 and deliberate forbidden-free control. The renderer may call only its three audited
 producer helpers. No timing deadline or real DSP is inferred.
+
+## Spectrum and analysis filters
+
+`spectrum.dft` compares exact band values with an independent direct DFT from 32 to
+2048 frames. `spectrum.dft-edges` does the same from 256 to 2048 frames for DC,
+Nyquist, impulses where the Hann window is 0, 1/2 and 1, and a mix, with band edges
+on FFT cell boundaries. `analysis.filter-extremes` sets smoothing and peak decay to
+zero, the smallest subnormal, the smallest normal, the largest finite value and 1e30,
+alone and mixed, and requires the documented recurrences and finite results from
+meters and bands.
 
 ## Native renderer
 

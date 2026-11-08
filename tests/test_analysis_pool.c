@@ -421,6 +421,101 @@ START_TEST(concurrent)
 }
 END_TEST
 
+typedef struct {
+	td_snapshot_pool *pool;
+	teder_snapshot *snapshot;
+	uint64_t sequence, value, drops;
+	th_gate gate;
+} last_owner;
+
+static void release_last(void *context)
+{
+	last_owner *o = context;
+	th_gate_hit(&o->gate);
+	if (o->snapshot) {
+		verify(o->snapshot, o->sequence, o->value, o->drops);
+		teder_snapshot_release(o->snapshot);
+	} else
+		td_snapshot_pool_release(&o->pool);
+}
+
+/* One slot: the only slot is the current snapshot, so a replacement can't be
+ * written while any loan on it lives. */
+START_TEST(single_slot)
+{
+	th_tracker t;
+	ck_assert(th_tracker_init(&t));
+	for (unsigned round = 0; round < 16; round++) {
+		/* 0: loan last, 1: pool last, 2: loan released on a thread racing the pool,
+		 * 3: pool released on a thread racing the loan. */
+		unsigned order = round % 4;
+		teder_config c = config();
+		c.snapshot_slots = 1;
+		td_snapshot_pool *p;
+		OK(td_snapshot_pool_create(&c, 65536, th_allocator(&t), (td_runtime){0}, &p));
+		teder_snapshot *empty = NULL;
+		ck_assert(td_snapshot_acquire(p, &empty) == TEDER_AGAIN && !empty);
+		publish(p, 1);
+		teder_snapshot *old = acquire(p), *duplicate = acquire(p);
+		ck_assert(old == duplicate && p->loans == 2);
+		teder_snapshot_info i = info(2);
+		float bands[] = {-80, -2};
+		teder_span spans[] = {{14, 3, 77, 42}, {17, 2, 88, 99}, {19, 2, 0, 0}};
+		/* Both loans pin the only slot, then one still does. */
+		ck_assert(td_snapshot_publish(p, &i, bands, spans) == TEDER_AGAIN && p->dropped == 1);
+		verify(old, 1, 1, 0);
+		teder_snapshot_release(duplicate);
+		ck_assert(td_snapshot_publish(p, &i, bands, spans) == TEDER_AGAIN && p->dropped == 2);
+		ck_assert(p->sequence == 1 && p->current == old);
+		verify(old, 1, 1, 0);
+		teder_snapshot *out = old;
+		ck_assert(td_snapshot_acquire(p, &out) == TEDER_OK && out == old);
+		teder_snapshot_release(out);
+		teder_snapshot_release(old);
+		ck_assert(!p->loans && p->current == old); /* released, still the current snapshot */
+		publish(p, 2);
+		ck_assert(p->sequence == 2 && p->dropped == 2);
+		teder_snapshot *fresh = acquire(p);
+		ck_assert(fresh == old);
+		verify(fresh, 2, 2, 2);
+		/* A held loan keeps this publication from being replaced as well. */
+		ck_assert(td_snapshot_publish(p, &i, bands, spans) == TEDER_AGAIN && p->dropped == 3);
+		verify(fresh, 2, 2, 2);
+		last_owner owner = {.pool = p, .sequence = 2, .value = 2, .drops = 2};
+		th_thread thread;
+		if (order == 0) {
+			td_snapshot_pool_release(&p);
+			ck_assert(!p && t.live == 1 && t.attempts == round + 1);
+			verify(fresh, 2, 2, 2);
+			teder_snapshot_release(fresh);
+		} else if (order == 1) {
+			teder_snapshot_release(fresh);
+			ck_assert(t.live == 1 && t.attempts == round + 1);
+			td_snapshot_pool_release(&p);
+			ck_assert(!p);
+		} else {
+			if (order == 2) {
+				owner.pool = NULL;
+				owner.snapshot = fresh;
+			}
+			ck_assert(th_gate_init(&owner.gate) && th_thread_start(&thread, release_last, &owner));
+			th_gate_await(&owner.gate);
+			th_gate_release(&owner.gate);
+			if (order == 2)
+				td_snapshot_pool_release(&p);
+			else {
+				p = NULL; /* the thread owns the pool pin */
+				teder_snapshot_release(fresh);
+			}
+			th_thread_join(&thread);
+			th_gate_uninit(&owner.gate);
+		}
+		ck_assert(t.attempts == round + 1 && th_tracker_clean(&t));
+	}
+	th_tracker_uninit(&t);
+}
+END_TEST
+
 START_TEST(engine_bounds)
 {
 	th_tracker t;
@@ -545,6 +640,8 @@ int main(int argc, char **argv)
 		test = engine_retention;
 	else if (!strcmp(argv[1], "concurrent"))
 		test = concurrent;
+	else if (!strcmp(argv[1], "single-slot"))
+		test = single_slot;
 	else
 		return 2;
 	Suite *suite = suite_create("snapshot");

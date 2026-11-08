@@ -26,6 +26,12 @@ static void checkpoint(td_file *s, unsigned point)
 		s->config.checkpoint(s->config.context, point);
 }
 
+#ifdef TD_FILE_FAULTS
+#define INFO_FAULT() td_file_fault()
+#else
+#define INFO_FAULT() false
+#endif
+
 teder_code td_path_validate(const char *path, uint32_t bytes)
 {
 	if (!path || !bytes || memchr(path, 0, bytes))
@@ -97,11 +103,22 @@ teder_code td_file_open(td_file *s, const char *path, uint32_t bytes, void *nati
 	s->handle = (intptr_t)file;
 	s->opened = true;
 	checkpoint(s, TD_FILE_OPENED);
-	BY_HANDLE_FILE_INFORMATION info;
-	if (GetFileType(file) != FILE_TYPE_DISK || !GetFileInformationByHandle(file, &info) ||
-	    (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+	/* FILE_TYPE_UNKNOWN is also GetFileType's failure value; the last error decides. */
+	SetLastError(NO_ERROR);
+	DWORD type = INFO_FAULT() ? FILE_TYPE_UNKNOWN : GetFileType(file);
+	BY_HANDLE_FILE_INFORMATION info = {0};
+	teder_code code = TEDER_OK;
+	if (type == FILE_TYPE_UNKNOWN && GetLastError() != NO_ERROR)
+		code = TEDER_IO;
+	else if (type != FILE_TYPE_DISK)
+		code = TEDER_UNSUPPORTED;
+	else if (INFO_FAULT() || !GetFileInformationByHandle(file, &info))
+		code = TEDER_IO;
+	else if (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+		code = TEDER_UNSUPPORTED;
+	if (code != TEDER_OK) {
 		td_file_close(s);
-		return TEDER_UNSUPPORTED;
+		return code;
 	}
 	s->size = ((uint64_t)info.nFileSizeHigh << 32) | info.nFileSizeLow;
 #else
@@ -114,7 +131,11 @@ teder_code td_file_open(td_file *s, const char *path, uint32_t bytes, void *nati
 	s->opened = true;
 	checkpoint(s, TD_FILE_OPENED);
 	struct stat info;
-	if (fstat(file, &info) || !S_ISREG(info.st_mode) || info.st_size < 0) {
+	if (INFO_FAULT() || fstat(file, &info)) {
+		td_file_close(s);
+		return TEDER_IO;
+	}
+	if (!S_ISREG(info.st_mode) || info.st_size < 0) {
 		td_file_close(s);
 		return TEDER_UNSUPPORTED;
 	}

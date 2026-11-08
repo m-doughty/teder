@@ -1,7 +1,40 @@
 #include "harness.h"
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+static _Noreturn void
+report_failure(const char *file, int line, const char *expr, const char *message)
+{
+	const char *test = tcase_name();
+	fflush(stdout);
+	fprintf(stderr,
+	        "%s:%d:F:%s: %s%s%s\n",
+	        file,
+	        line,
+	        test ? test : "(no test)",
+	        expr,
+	        message ? ": " : "",
+	        message ? message : "");
+	fflush(stderr);
+	_Exit(1); /* the failing frame and every borrowed fixture stay live until exit */
+}
+
+void th_check_failed(const char *file, int line, const char *expr)
+{
+	report_failure(file, line, expr, NULL);
+}
+
+void th_check_failed_msg(const char *file, int line, const char *expr, const char *format, ...)
+{
+	char message[1024];
+	va_list args;
+	va_start(args, format);
+	vsnprintf(message, sizeof(message), format, args);
+	va_end(args);
+	report_failure(file, line, expr, message);
+}
 
 bool th_tracker_init(th_tracker *t)
 {

@@ -38,6 +38,13 @@ typedef struct {
 	atomic_uint waiting_notifications;
 	unsigned initialized, released;
 	ma_device *native;
+	/* Synchronous backend: miniaudio's own worker runs its blocking data loop, leaves it
+	 * on a failed write, then calls onDeviceStop, posts the stopped notification,
+	 * publishes the stopped state and signals ma_device_stop. */
+	bool sync, block_write;
+	ma_result wake_result; /* a blocked write's result when stop wakes it */
+	atomic_uint writes, fail_write, hold_stop, woken;
+	th_gate stopping;
 } fixture;
 
 static void notify(ma_device *d, ma_device_notification_type type)
@@ -149,6 +156,43 @@ static ma_result device_uninit(ma_device *d)
 	return MA_SUCCESS;
 }
 
+/* Synchronous playback: miniaudio's worker calls this after rendering each period.
+ * A blocking write waits as for a full device, until stop's wakeup ends the wait. */
+static ma_result sync_write(ma_device *d, const void *frames, ma_uint32 count, ma_uint32 *written)
+{
+	(void)frames;
+	fixture *f = d->pContext->pUserData;
+	if (atomic_exchange(&f->fail_write, 0))
+		return MA_ERROR; /* a fatal native write ends the worker's data loop */
+	*written = count;
+	atomic_fetch_add(&f->writes, 1);
+	if (!f->block_write) {
+		pause_for_device(); /* hardware-paced periods */
+		return MA_SUCCESS;
+	}
+	while (!atomic_exchange(&f->woken, 0))
+		pause_for_device();
+	return f->wake_result;
+}
+
+/* ma_device_stop calls this after publishing the stopping state. */
+static ma_result sync_wakeup(ma_device *d)
+{
+	fixture *f = d->pContext->pUserData;
+	atomic_store(&f->woken, 1);
+	return MA_SUCCESS;
+}
+
+/* Runs on miniaudio's worker after its data loop, before the stopped notification and
+ * the stopped state. A held stop parks the worker exactly there. */
+static ma_result sync_stop(ma_device *d)
+{
+	fixture *f = d->pContext->pUserData;
+	if (atomic_exchange(&f->hold_stop, 0))
+		th_gate_hit(&f->stopping);
+	return MA_SUCCESS;
+}
+
 static ma_result context_init(const ma_backend *backends,
                               ma_uint32 count,
                               const ma_context_config *config,
@@ -156,13 +200,17 @@ static ma_result context_init(const ma_backend *backends,
 {
 	(void)backends;
 	(void)count;
+	fixture *f = config->pUserData;
 	memset(c, 0, sizeof(*c));
+	th_context_com(c);
 	c->backend = ma_backend_wasapi;
 	c->allocationCallbacks = config->allocationCallbacks;
 	c->pUserData = config->pUserData;
 	c->callbacks.onDeviceInit = device_init;
-	c->callbacks.onDeviceStart = device_start;
-	c->callbacks.onDeviceStop = device_stop;
+	c->callbacks.onDeviceStart = f->sync ? NULL : device_start;
+	c->callbacks.onDeviceStop = f->sync ? sync_stop : device_stop;
+	c->callbacks.onDeviceWrite = f->sync ? sync_write : NULL;
+	c->callbacks.onDeviceDataLoopWakeup = f->sync ? sync_wakeup : NULL;
 	c->callbacks.onDeviceUninit = device_uninit;
 	c->callbacks.onDeviceGetInfo = device_info;
 	c->callbacks.onContextGetDeviceInfo = describe;
@@ -220,16 +268,22 @@ static teder_code open_device(fixture *f, teder_blob key, uint32_t rate)
 	return td_device_open(f->backend, &f->pool, key, rate, &f->device);
 }
 
-static void uninit(fixture *f)
+/* After the backend closed: every allocation it made must have been released. */
+static void release_fixture(fixture *f)
 {
-	if (f->device)
-		OK(td_device_close(&f->device));
-	OK(td_backend_close(&f->backend));
 	td_pcm_clear(&f->pool);
 	OK(td_pcm_retire(&f->generation));
 	td_arena_destroy(f->arena);
 	ck_assert(th_tracker_clean(&f->tracker));
 	th_tracker_uninit(&f->tracker);
+}
+
+static void uninit(fixture *f)
+{
+	if (f->device)
+		OK(td_device_close(&f->device));
+	OK(td_backend_close(&f->backend));
+	release_fixture(f);
 }
 
 START_TEST(lifecycle)
@@ -664,6 +718,125 @@ START_TEST(loss_race)
 }
 END_TEST
 
+/* Start a synchronous device, let its worker write two periods, then fail one write.
+ * On return the worker has left its data loop and is parked inside onDeviceStop: no
+ * stopped notification has been posted and the native state is still started. */
+static void sync_failed_write(fixture *f)
+{
+	atomic_init(&f->writes, 0);
+	atomic_init(&f->fail_write, 0);
+	atomic_init(&f->hold_stop, 0);
+	atomic_init(&f->woken, 0);
+	ck_assert(th_gate_init(&f->stopping));
+	OK(open_device(f, (teder_blob){0}, 0));
+	/* onDeviceWrite makes the backend synchronous: miniaudio owns the worker thread. */
+	ck_assert(f->native->pContext->callbacks.onDeviceWrite == sync_write &&
+	          f->native->pContext->callbacks.onDeviceDataLoop == NULL);
+	OK(td_device_configure(f->device, (td_audio_config){1, 1, 1, 0}));
+	OK(td_device_start(f->device));
+	while (atomic_load(&f->writes) < 2)
+		pause_for_device();
+	atomic_store(&f->hold_stop, 1);
+	atomic_store(&f->fail_write, 1);
+	th_gate_await(&f->stopping);
+	ck_assert(ma_device_get_state(f->native) == ma_device_state_started);
+	ck_assert(!td_device_lost(f->device) && td_device_running(f->device));
+}
+
+typedef struct {
+	fixture *f;
+	teder_code code;
+} sync_stopper;
+
+static void stop_device(void *context)
+{
+	sync_stopper *s = context;
+	s->code = td_device_stop(s->f->device);
+}
+
+/* The stream stopped unexpectedly (a fatal write) and the worker is between its data
+ * loop and its stopped notification when the owner stops. Stop's first loss check sees
+ * neither loss nor a stopped state, so it clears expected-running and waits in native
+ * stop. Only then is the worker released: its stopped notification is ignored and
+ * native stop succeeds. The stop must still report the loss. */
+START_TEST(loss_sync_stop)
+{
+	fixture f = {.sync = true};
+	init(&f, false);
+	sync_failed_write(&f);
+	sync_stopper s = {.f = &f, .code = TEDER_INTERNAL};
+	th_thread owner;
+	ck_assert(th_thread_start(&owner, stop_device, &s));
+	while (ma_device_get_state(f.native) != ma_device_state_stopping)
+		pause_for_device(); /* expected-running is clear; the owner waits in native stop */
+	th_gate_release(&f.stopping);
+	th_thread_join(&owner);
+	ck_assert_msg(s.code == TEDER_DEVICE_LOST && td_device_lost(f.device) &&
+	                  !td_device_running(f.device),
+	              "stop returned %d after an unexpected native stop",
+	              s.code);
+	ck_assert(td_device_stop(f.device) == TEDER_BAD_STATE &&
+	          td_device_start(f.device) == TEDER_BAD_STATE);
+	uninit(&f);
+	th_gate_uninit(&f.stopping);
+}
+END_TEST
+
+/* The same failed write with the worker released before the owner stops. Its stopped
+ * notification arrives while expected-running is set, so loss is sticky and stop
+ * bypasses native stop. */
+START_TEST(loss_sync_unraced)
+{
+	fixture f = {.sync = true};
+	init(&f, false);
+	sync_failed_write(&f);
+	th_gate_release(&f.stopping);
+	while (ma_device_get_state(f.native) != ma_device_state_stopped)
+		pause_for_device();
+	ck_assert(td_device_lost(f.device));
+	ck_assert(td_device_stop(f.device) == TEDER_DEVICE_LOST && td_device_lost(f.device));
+	uninit(&f);
+	th_gate_uninit(&f.stopping);
+}
+END_TEST
+
+/* Ordinary stops of a synchronous backend while its worker is blocked in a write. Stop
+ * wakes that write: WASAPI's then returns success and its loop sees the stopping state;
+ * ALSA's returns MA_DEVICE_NOT_STARTED and ends the loop. Neither is loss: stop succeeds,
+ * and the device restarts and stops again. */
+START_TEST(ordinary_sync_stop)
+{
+	for (unsigned alsa = 0; alsa < 2; alsa++) {
+		fixture f = {.sync = true,
+		             .block_write = true,
+		             .wake_result = alsa ? MA_DEVICE_NOT_STARTED : MA_SUCCESS};
+		init(&f, false);
+		atomic_init(&f.writes, 0);
+		atomic_init(&f.fail_write, 0);
+		atomic_init(&f.hold_stop, 0);
+		atomic_init(&f.woken, 0);
+		OK(open_device(&f, (teder_blob){0}, 0));
+		OK(td_device_configure(f.device, (td_audio_config){1, 1, 1, 0}));
+		for (unsigned run = 0; run < 2; run++) {
+			unsigned before = atomic_load(&f.writes);
+			OK(td_device_start(f.device));
+			while (atomic_load(&f.writes) == before)
+				pause_for_device(); /* the worker now waits in its write */
+			teder_code code = td_device_stop(f.device);
+			ck_assert_msg(code == TEDER_OK && !td_device_lost(f.device) &&
+			                  !td_device_running(f.device) &&
+			                  ma_device_get_state(f.native) == ma_device_state_stopped,
+			              "%s stop %u returned %d, lost %d",
+			              alsa ? "ALSA-like" : "WASAPI-like",
+			              run,
+			              code,
+			              td_device_lost(f.device));
+		}
+		uninit(&f);
+	}
+}
+END_TEST
+
 START_TEST(unwind)
 {
 	fixture f = {.reject = true};
@@ -683,25 +856,36 @@ START_TEST(unwind)
 }
 END_TEST
 
-START_TEST(native)
+/* The first enumerated output's key, or the empty key that opens the current default. */
+static teder_blob native_key(teder_result *r, bool keyed)
 {
+	teder_blob key = {0};
+	if (keyed) {
+		teder_device_info entry = {.struct_size = sizeof(entry), .abi_version = TEDER_ABI_VERSION};
+		OK(teder_result_device(r, 0, &entry));
+		key = entry.key;
+	}
+	return key;
+}
+
+/* Opens a real output, submits three silent frames and closes. Then fails each
+ * observed device-init allocation in turn, on a fresh backend: the open must report
+ * NO_MEMORY and leave nothing allocated, so the backend still closes. */
+static void native_sweep(bool keyed)
+{
+	const char *target = keyed ? "first enumerated output" : "default output";
 	fixture f = {0};
 	init(&f, true);
 	teder_result *r;
 	OK(td_backend_enumerate(f.backend, 65536, 272, &r));
-	teder_blob key = {0};
-#ifndef _WIN32
-	/* Headless Linux explicitly selects its enumerated ALSA entry. */
-	teder_device_info entry = {.struct_size = sizeof(entry), .abi_version = TEDER_ABI_VERSION};
-	OK(teder_result_device(r, 0, &entry));
-	key = entry.key;
-#endif
+	teder_blob key = native_key(r, keyed);
 	size_t before = f.tracker.attempts;
 	OK(open_device(&f, key, 0));
 	size_t attempts = f.tracker.attempts - before;
 	td_device_info info;
 	OK(td_device_get_info(f.device, &info));
-	printf("backend=%u rate=%u channels=%u period=%u native-rate=%u native-format=%u\n",
+	printf("%s: backend=%u rate=%u channels=%u period=%u native-rate=%u native-format=%u\n",
+	       target,
 	       info.backend,
 	       info.rate,
 	       info.channels,
@@ -725,21 +909,51 @@ START_TEST(native)
 	OK(td_device_close(&f.device));
 	teder_result_release(r);
 	uninit(&f);
-	printf("Native silence submitted; device init allocation sites=%zu\n", attempts);
+	printf("%s: native silence submitted; device init allocation sites=%zu\n", target, attempts);
 
 	for (size_t fail = 1; fail <= attempts; fail++) {
 		fixture fault = {0};
 		init(&fault, true);
 		OK(td_backend_enumerate(fault.backend, 65536, 272, &r));
-#ifndef _WIN32
-		OK(teder_result_device(r, 0, &entry));
-		key = entry.key;
-#endif
+		key = native_key(r, keyed);
 		fault.tracker.fail_at = fault.tracker.attempts + fail;
-		ck_assert(open_device(&fault, key, 0) == TEDER_NO_MEMORY && !fault.device);
+		teder_code code = open_device(&fault, key, 0);
 		teder_result_release(r);
-		uninit(&fault);
+		const char *site = fault.tracker.failed_site ? fault.tracker.failed_site : "none failed";
+		ck_assert_msg(code == TEDER_NO_MEMORY && !fault.device,
+		              "%s: open failing allocation %llu of %llu (%s) returned %d",
+		              target,
+		              (unsigned long long)fail,
+		              (unsigned long long)attempts,
+		              site,
+		              code);
+		code = td_backend_close(&fault.backend);
+		ck_assert_msg(code == TEDER_OK,
+		              "%s: backend close after failing allocation %llu of %llu (%s) returned %d",
+		              target,
+		              (unsigned long long)fail,
+		              (unsigned long long)attempts,
+		              site,
+		              code);
+		release_fixture(&fault);
 	}
+	printf("%s: device init allocation failures checked=%zu\n", target, attempts);
+}
+
+/* The first enumerated output, then the current default (empty key). Windows has
+ * always opened only its default here. */
+START_TEST(native)
+{
+#ifndef _WIN32
+	native_sweep(true);
+#endif
+	native_sweep(false);
+}
+END_TEST
+
+START_TEST(native_default)
+{
+	native_sweep(false);
 }
 END_TEST
 
@@ -795,6 +1009,8 @@ int main(int argc, char **argv)
 		test = analysis;
 	else if (!strcmp(argv[1], "native"))
 		test = native;
+	else if (!strcmp(argv[1], "native-default"))
+		test = native_default;
 	else if (!strcmp(argv[1], "notifications"))
 		test = notifications;
 	else if (!strcmp(argv[1], "loss-state"))
@@ -805,6 +1021,12 @@ int main(int argc, char **argv)
 		test = loss_closing;
 	else if (!strcmp(argv[1], "loss-race"))
 		test = loss_race;
+	else if (!strcmp(argv[1], "loss-sync-stop"))
+		test = loss_sync_stop;
+	else if (!strcmp(argv[1], "loss-sync-unraced"))
+		test = loss_sync_unraced;
+	else if (!strcmp(argv[1], "sync-stop"))
+		test = ordinary_sync_stop;
 	else
 		return 2;
 	Suite *suite = suite_create("device");

@@ -82,6 +82,25 @@ Metadata checks exact result kind/count bounds, indexed access, unrequested-artw
 omission and the same failure set plus ENCODING. INVALID there would mean the
 result builder rejected the reader's own output.
 
+Generated seeds that must succeed are checked exactly instead. `known-good.txt` lists
+them, one line each: the target, the seed's name, `hash=` (a 64-bit FNV-1a of the whole
+input, controls included) and its expected values. For a `source` seed these are the
+stream's channels, rate, bit depth and duration, the number of output frames, and, where
+neither a rate converter nor a downmix runs, the FNV-1a of every delivered sample's
+binary32 bytes (`pcm=`). A `metadata` seed lists the stream values, the tag and picture
+counts and a digest of every tag and picture (lengths included, so embedded NULs count).
+The harness looks an input up by that hash; a hit makes any failure, a stream that stops
+short of its final block, or a value that differs fatal. A miss, which includes every
+mutated input, keeps the broad documented-outcome check above. The seeds' own controls
+select the generous limits: native rate or a plain conversion, 4,096-byte reads, a 4 MiB
+codec budget, a 1 MiB result and no early cancellation. `seeds.py` writes the values from
+how it built each seed (the fixtures' original samples and the converter's exact ceiling
+of the rate ratio), never by decoding it. `run.py` sets `TEDER_FUZZ_KNOWN` to the file,
+fails if a listed hash is not a committed input of that name (an edited seed would
+otherwise fall back to the broad check), and fails unless the replay log shows each
+listed seed passing its exact checks. Without the variable the harness checks nothing
+extra. Regenerate the manifest with the seeds, as below, and commit both.
+
 Work is bounded to 16 prime and 128 pump calls, with cancellation after 4,096 native
 reads (or an earlier selected read). Long valid streams may be retired before EOF.
 Seeking occurs only before publication. Cancellation bounds parser work between
@@ -246,8 +265,8 @@ repair. Commit minimized findings under `regressions/<target>`. See
 
 The committed `corpus/` inputs are original CC0 synthetic fixtures. Regenerate
 them into a separate directory with `python3 fuzz/seeds.py OUTPUT` and compare
-bytes before updating them. They cover stereo 16-bit, mono 24-bit, eight-channel
-32-bit, seeks/rates, truncation/CRC, UTF-8/NUL, picture and count-limit cases, plus
+bytes before updating them (`OUTPUT/known-good.txt` replaces `fuzz/known-good.txt`). They
+cover stereo 16-bit, mono 24-bit, eight-channel 32-bit, seeks/rates, truncation/CRC, UTF-8/NUL, picture and count-limit cases, plus
 playback, gapless, analysis, probe, seek, loss, cancellation, capacity, invalid
 argument, tight-limit and allocation-failure sequences. Renderer seeds cover both
 modes, NULL arguments, NULL and band-less snapshots, extreme rectangles, wide

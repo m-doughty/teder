@@ -116,7 +116,8 @@ enum {
 	TD_ANALYSIS_AFTER_COMMIT,
 	TD_ANALYSIS_BLOCK,
 	TD_ANALYSIS_BEFORE_PUBLISH,
-	TD_PREPARATION_WAIT /* control waits for pending source preparation */
+	TD_PREPARATION_WAIT,    /* control waits for pending source preparation */
+	TD_MEDIA_BEFORE_QUIESCE /* prepared media is about to stop output for adoption */
 };
 
 typedef struct {

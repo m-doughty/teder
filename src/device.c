@@ -244,6 +244,15 @@ teder_code td_device_stop(td_device *d)
 	teder_code code = outcome(d, ma_device_stop(&d->native));
 	if (code != TEDER_OK)
 		return failed(d, code);
+	/* A synchronous worker can leave its data loop on a native failure just before
+	 * this stop; its stopped notification is then ignored. Native stop returns only
+	 * after that worker recorded why its loop ended. A write woken by this stop ends
+	 * it with success (WASAPI) or MA_DEVICE_NOT_STARTED (ALSA); anything else failed. */
+	ma_result loop = d->native.dataLoopResult;
+	if (loop != MA_SUCCESS && loop != MA_DEVICE_NOT_STARTED)
+		atomic_store(&d->feed.lost, 1);
+	if (td_device_lost(d))
+		return failed(d, TEDER_DEVICE_LOST);
 	d->active = false;
 	return TEDER_OK;
 }

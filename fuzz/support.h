@@ -37,4 +37,21 @@ td_allocator fz_allocator(fz_input *);
 void fz_checkpoint(void *, unsigned);
 uint32_t fz_u32(const uint8_t *);
 void fz_touch(const void *, size_t);
+
+/* FNV-1a, 64 bits: the digest of inputs, decoded samples and metadata. */
+#define FZ_HASH_INIT UINT64_C(0xcbf29ce484222325)
+uint64_t fz_hash_bytes(uint64_t, const void *, size_t);
+uint64_t fz_hash_u32(uint64_t, uint32_t);
+uint64_t fz_hash_f32(uint64_t, float);
+/* Exact expectations for generated seeds that must succeed, kept in known-good.txt.
+ * run.py names that file in TEDER_FUZZ_KNOWN; without it, or for any other input, the
+ * harness accepts every documented hostile-input outcome. A line is
+ * "<target> <name> hash=<FNV-1a of the whole input> <key>=<number>...". */
+typedef struct {
+	char name[64], fields[384];
+} fz_expect;
+bool fz_expect_find(const char *target, const uint8_t *data, size_t size, fz_expect *);
+uint64_t fz_expect_value(const fz_expect *, const char *key);
+bool fz_expect_has(const fz_expect *, const char *key);
+void fz_expect_passed(const fz_expect *);
 #endif

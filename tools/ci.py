@@ -3,29 +3,59 @@
 Linux configurations build the pinned m-doughty/notcurses fork with their own compiler and
 sanitizer flags, then build teder Debug with -Werror and the renderer and run CTest. linux-shared
 and linux-static also install teder and run the installed consumers against that notcurses.
+linux-shared first runs the fork's own resize and autogrow doctest cases, from a separate test
+build of the same checkout.
 linux-fuzz builds the static libFuzzer harnesses, renderer included, against a notcurses with
 fuzzer and coverage instrumentation, then replays the corpora and runs fuzz/run.py's smoke.
 macos-asan builds and tests the shared core library with Apple Clang, ASan and UBSan.
 
+The notcurses source tree must hold the pinned commit unmodified, and a reused notcurses
+installation must match the SHA-256 digests its stamp recorded; either difference stops the run.
 --phase build fetches sources and needs the network; --phase test runs offline from that build.
 tools/run-ci-docker.py runs a Linux configuration in a pinned Ubuntu 24.04 container.
+tools/test-ci.py tests the source tree and installation checks.
 """
 import argparse
+import hashlib
 import json
+import os
 from pathlib import Path
+import re
 import shlex
+import signal
 import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 NOTCURSES_URL = "https://github.com/m-doughty/notcurses"
-NOTCURSES_REVISION = "fd67f2bafec21365f72a418797799d2051376fbe"
+NOTCURSES_REVISION = "cd27fd8578cd990cf0bd44a9332e5d2891122a35"
 # The C library alone, shared, without multimedia, tools, tests or generated documentation.
 NOTCURSES_OPTIONS = (
     "-DUSE_MULTIMEDIA=none", "-DUSE_CXX=OFF", "-DUSE_DOCTEST=OFF", "-DUSE_PANDOC=OFF",
     "-DUSE_POC=OFF", "-DUSE_STATIC=OFF", "-DBUILD_TESTING=OFF", "-DBUILD_EXECUTABLES=OFF",
     "-DBUILD_FFI_LIBRARY=OFF",
 )
+# Written into the notcurses installation prefix; every other file there is digested.
+NOTCURSES_STAMP = "ci-stamp.json"
+# The test build turns on the C++ wrapper and doctest, which the installed build leaves off.
+# Only its notcurses-tester target is built: the geometry tester needs static libraries.
+NOTCURSES_TEST_OPTIONS = (
+    "-DUSE_MULTIMEDIA=none", "-DUSE_CXX=ON", "-DUSE_DOCTEST=ON", "-DUSE_PANDOC=OFF",
+    "-DUSE_POC=OFF", "-DUSE_STATIC=OFF", "-DBUILD_TESTING=ON", "-DBUILD_EXECUTABLES=OFF",
+    "-DBUILD_FFI_LIBRARY=OFF",
+)
+# The fork's own cases for the plane geometry teder's renderer relies on. Selecting by source
+# file runs every case in these files, including cases added after this list was written.
+NOTCURSES_TEST_SOURCES = ("resize", "autogrow")
+# The fork's CI runs its tester headless with this terminal; the locale is the hosted runners'.
+# notcurses-tester exits successfully without running anything when TERM is unset.
+NOTCURSES_TEST_ENVIRONMENT = {"TERM": "xterm", "COLORTERM": "truecolor", "LANG": "C.UTF-8",
+                              "LC_ALL": "C.UTF-8"}
+NOTCURSES_TEST_TIMEOUT = 300
+NOTCURSES_TEST_PACKAGES = ("doctest-dev",)
+DOCTEST_CASES = re.compile(
+    r"^\[doctest\] test cases:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", re.MULTILINE)
+DOCTEST_ASSERTIONS = re.compile(r"^\[doctest\] assertions:\s*(\d+)\s*\|", re.MULTILINE)
 # cmake/Platform.cmake instruments teder and its bundled dependencies with these sanitizers.
 # notcurses gets the same instrumentation, so one sanitizer runtime serves the whole process.
 SANITIZER_FLAGS = {
@@ -43,13 +73,17 @@ FUZZ_OPTIONS = ("-DCMAKE_C_FLAGS_DEBUG=-O1 -g", "-DBUILD_TESTING=OFF", "-DTEDER_
 PARALLEL = "4"
 
 
-def configuration(cc, cxx, shared, sanitizer, renderer, consumers, host="linux", fuzz=False):
+def configuration(cc, cxx, shared, sanitizer, renderer, consumers, host="linux", fuzz=False,
+                  notcurses_tests=False):
     return {"cc": cc, "cxx": cxx, "shared": shared, "sanitizer": sanitizer,
-            "renderer": renderer, "consumers": consumers, "host": host, "fuzz": fuzz}
+            "renderer": renderer, "consumers": consumers, "host": host, "fuzz": fuzz,
+            "notcurses_tests": notcurses_tests}
 
 
 CONFIGURATIONS = {
-    "linux-shared": configuration("gcc", "g++", "ON", "none", renderer=True, consumers=True),
+    # One configuration per hosted Linux architecture runs the fork's own cases.
+    "linux-shared": configuration("gcc", "g++", "ON", "none", renderer=True, consumers=True,
+                                  notcurses_tests=True),
     "linux-static": configuration("gcc", "g++", "OFF", "none", renderer=True, consumers=True),
     "linux-asan": configuration("clang-18", "clang++-18", "ON", "address", renderer=True, consumers=False),
     "linux-tsan": configuration("gcc", "g++", "ON", "thread", renderer=True, consumers=False),
@@ -93,7 +127,10 @@ def show_versions(config):
             output = output.splitlines()[0]
         print(f"$ {shlex.join(command)}\n{output}", flush=True)
     if config["host"] == "linux":
-        for package in SANITIZER_PACKAGES:
+        packages = SANITIZER_PACKAGES
+        if config["notcurses_tests"]:
+            packages += NOTCURSES_TEST_PACKAGES
+        for package in packages:
             result = subprocess.run(["dpkg-query", "-W", "-f", "${db:Status-Abbrev}|${Version}", package],
                                     capture_output=True, text=True)
             status, _, version = result.stdout.partition("|")
@@ -109,30 +146,83 @@ def notcurses_library(prefix):
     return None
 
 
-def build_notcurses(config, paths):
-    flags = link_flags = SANITIZER_FLAGS[config["sanitizer"]]
-    if config["fuzz"]:
-        flags, link_flags = f"{flags} {FUZZ_FLAGS}", f"{link_flags} {FUZZ_LINK_FLAGS}"
-    # The stamp lives in the installed prefix, which CI restores from its cache without the
-    # source or build trees. Any change of revision, compiler, flags or options rebuilds.
-    stamp = {"url": NOTCURSES_URL, "revision": NOTCURSES_REVISION, "cc": config["cc"],
-             "compiler": capture(config["cc"], "--version").splitlines()[0],
-             "flags": flags, "link_flags": link_flags, "options": list(NOTCURSES_OPTIONS)}
-    stamp_path = paths["notcurses_install"] / "ci-stamp.json"
-    if stamp_path.is_file() and notcurses_library(paths["notcurses_install"]) \
-            and (paths["notcurses_install"] / "include" / "notcurses" / "notcurses.h").is_file():
-        try:
-            cached = json.loads(stamp_path.read_text(encoding="utf-8"))
-        except ValueError:
-            cached = None
-        if cached == stamp:
-            print(f"notcurses {NOTCURSES_REVISION} is already installed in "
-                  f"{paths['notcurses_install']} with this configuration", flush=True)
-            return
-    if stamp_path.exists():
-        stamp_path.unlink()
+def listing(lines, limit=20):
+    """The first lines of a long report, and how many more there are."""
+    shown = [f"  {line}" for line in lines[:limit]]
+    if len(lines) > limit:
+        shown.append(f"  and {len(lines) - limit} more")
+    return "\n".join(shown)
 
-    source = paths["notcurses_source"]
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as data:
+        for block in iter(lambda: data.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def install_digests(prefix):
+    """Map each path under prefix but the stamp, as a relative POSIX path, to its digest.
+
+    Every regular file is hashed, whatever the platform names the library, its versioned
+    aliases or its import library. A symbolic link records its target and is not followed."""
+    def unreadable(error):
+        raise SystemExit(f"ci.py: cannot read the notcurses installation in {prefix}: {error}")
+
+    digests = {}
+    for directory, folders, files in os.walk(prefix, onerror=unreadable):
+        for name in folders + files:
+            path = Path(directory) / name
+            relative = path.relative_to(prefix).as_posix()
+            if relative == NOTCURSES_STAMP:
+                continue
+            if path.is_symlink():
+                digests[relative] = "link:" + os.readlink(path)
+            elif path.is_file():
+                digests[relative] = "sha256:" + file_sha256(path)
+            elif not path.is_dir():
+                raise SystemExit(f"ci.py: {path} in the notcurses installation is not a file, "
+                                 "directory or link")
+    return dict(sorted(digests.items()))
+
+
+def recorded_digests(stamp_path, stamp):
+    """The digests a stamp for this configuration recorded, or None if notcurses must be built.
+
+    A missing, unreadable or older stamp, or one for another configuration, means a rebuild."""
+    if not stamp_path.is_file():
+        return None
+    try:
+        cached = json.loads(stamp_path.read_text(encoding="utf-8"))
+    except ValueError:
+        return None
+    if not isinstance(cached, dict):
+        return None
+    files = cached.pop("files", None)
+    if cached != stamp or not isinstance(files, dict) or not files:
+        return None
+    if not all(isinstance(key, str) and isinstance(value, str) for key, value in files.items()):
+        return None
+    return files
+
+
+def verify_install(prefix, recorded):
+    """Stop unless every installed file matches the digest the stamp recorded for it."""
+    actual = install_digests(prefix)
+    if actual == recorded:
+        return
+    differences = [f"changed: {path}" for path in sorted(recorded.keys() & actual.keys())
+                   if recorded[path] != actual[path]]
+    differences += [f"missing: {path}" for path in sorted(recorded.keys() - actual.keys())]
+    differences += [f"added: {path}" for path in sorted(actual.keys() - recorded.keys())]
+    raise SystemExit(f"ci.py: the notcurses installation in {prefix} differs from the SHA-256 "
+                     f"digests in its {NOTCURSES_STAMP}:\n{listing(differences)}\n"
+                     f"ci.py does not reuse or repair it. Remove {prefix} to rebuild it.")
+
+
+def checkout_notcurses(source):
+    """Check out the pinned commit in source and stop unless the tree matches it exactly."""
     source.mkdir(parents=True, exist_ok=True)
     if not (source / ".git").exists():
         run("git", "init", "--quiet", source)
@@ -143,18 +233,155 @@ def build_notcurses(config, paths):
     head = capture("git", "-C", source, "rev-parse", "HEAD")
     if head != NOTCURSES_REVISION:
         raise SystemExit(f"ci.py: notcurses checkout is {head}, expected {NOTCURSES_REVISION}")
+    # A reused tree keeps local edits and new files across the checkout, and the build would
+    # carry them under the pinned revision. Ignored files count too: the fork's CMake globs
+    # src/lib/*.c, and its .gitignore matches names such as build*. Skip-worktree and
+    # assume-unchanged entries would hide edits from status. Never clean the tree here: a
+    # local edit there may be deliberate.
+    status = capture("git", "-C", source, "status", "--porcelain", "--untracked-files=all",
+                     "--ignored").splitlines()
+    differences = [line.strip() for line in status]
+    # ls-files -v tags an ordinary tracked file H; S is skip-worktree, lowercase is
+    # assume-unchanged.
+    for entry in capture("git", "-C", source, "ls-files", "-v").splitlines():
+        tag, _, name = entry.partition(" ")
+        if tag != "H":
+            flag = "assume-unchanged" if tag.islower() else "skip-worktree" if tag == "S" else tag
+            differences.append(f"{flag} in the index: {name}")
+    if differences:
+        raise SystemExit(f"ci.py: the notcurses source tree {source} differs from "
+                         f"{NOTCURSES_REVISION}:\n{listing(differences)}\n"
+                         f"ci.py builds only the unmodified pinned commit, and does not clean "
+                         f"this tree. Keep local changes elsewhere, or remove {source} to fetch "
+                         "it again.")
 
+
+def notcurses_flags(config):
+    flags = link_flags = SANITIZER_FLAGS[config["sanitizer"]]
+    if config["fuzz"]:
+        flags, link_flags = f"{flags} {FUZZ_FLAGS}", f"{link_flags} {FUZZ_LINK_FLAGS}"
+    return flags, link_flags
+
+
+def install_notcurses(config, paths, flags, link_flags):
+    """Build and install notcurses unless its stamp matches; True if this checked it out."""
+    install = paths["notcurses_install"]
+    # The stamp lives in the installed prefix, which CI restores from its cache without the
+    # source or build trees. Any change of revision, compiler, flags or options rebuilds. A
+    # matching stamp's digests must then match every installed file, or the run stops.
+    stamp = {"url": NOTCURSES_URL, "revision": NOTCURSES_REVISION, "cc": config["cc"],
+             "compiler": capture(config["cc"], "--version").splitlines()[0],
+             "flags": flags, "link_flags": link_flags, "options": list(NOTCURSES_OPTIONS)}
+    stamp_path = install / NOTCURSES_STAMP
+    recorded = recorded_digests(stamp_path, stamp)
+    if recorded is not None:
+        verify_install(install, recorded)
+        print(f"notcurses {NOTCURSES_REVISION} is already installed in {install} with this "
+              f"configuration, and its {len(recorded)} files match their digests", flush=True)
+        return False
+    if stamp_path.exists():
+        stamp_path.unlink()
+
+    checkout_notcurses(paths["notcurses_source"])
     # --fresh discards any cache an earlier compiler or flag set left in a reused build tree.
-    run("cmake", "--fresh", "-S", source, "-B", paths["notcurses_build"], "-G", "Ninja",
-        f"-DCMAKE_C_COMPILER={config['cc']}", "-DCMAKE_BUILD_TYPE=Debug",
-        f"-DCMAKE_INSTALL_PREFIX={paths['notcurses_install']}", f"-DCMAKE_C_FLAGS={flags}",
+    run("cmake", "--fresh", "-S", paths["notcurses_source"], "-B", paths["notcurses_build"],
+        "-G", "Ninja", f"-DCMAKE_C_COMPILER={config['cc']}", "-DCMAKE_BUILD_TYPE=Debug",
+        f"-DCMAKE_INSTALL_PREFIX={install}", f"-DCMAKE_C_FLAGS={flags}",
         f"-DCMAKE_SHARED_LINKER_FLAGS={link_flags}", *NOTCURSES_OPTIONS)
     run("cmake", "--build", paths["notcurses_build"], "--parallel", PARALLEL)
     run("cmake", "--install", paths["notcurses_build"])
-    if not notcurses_library(paths["notcurses_install"]):
-        raise SystemExit(f"ci.py: no shared libnotcurses-core in {paths['notcurses_install']}")
+    if not notcurses_library(install):
+        raise SystemExit(f"ci.py: no shared libnotcurses-core in {install}")
+    if not (install / "include" / "notcurses" / "notcurses.h").is_file():
+        raise SystemExit(f"ci.py: no notcurses/notcurses.h in {install / 'include'}")
+    stamp["files"] = install_digests(install)
     with stamp_path.open("w", encoding="utf-8", newline="\n") as output:
         output.write(json.dumps(stamp, indent=2) + "\n")
+    return True
+
+
+def build_notcurses_tests(config, paths, flags, link_flags):
+    """Build notcurses-tester from the verified checkout, from scratch on every run."""
+    tests = paths["notcurses_tests"]
+    run("cmake", "--fresh", "-S", paths["notcurses_source"], "-B", tests, "-G", "Ninja",
+        f"-DCMAKE_C_COMPILER={config['cc']}", f"-DCMAKE_CXX_COMPILER={config['cxx']}",
+        "-DCMAKE_BUILD_TYPE=Debug", f"-DCMAKE_C_FLAGS={flags}", f"-DCMAKE_CXX_FLAGS={flags}",
+        f"-DCMAKE_EXE_LINKER_FLAGS={link_flags}", f"-DCMAKE_SHARED_LINKER_FLAGS={link_flags}",
+        *NOTCURSES_TEST_OPTIONS)
+    run("cmake", "--build", tests, "--parallel", PARALLEL, "--clean-first", "--target",
+        "notcurses-tester")
+
+
+def build_notcurses(config, paths):
+    flags, link_flags = notcurses_flags(config)
+    checked_out = install_notcurses(config, paths, flags, link_flags)
+    if config["notcurses_tests"]:
+        # A cached installation skips the checkout, but the test build always needs one.
+        if not checked_out:
+            checkout_notcurses(paths["notcurses_source"])
+        build_notcurses_tests(config, paths, flags, link_flags)
+
+
+def check_notcurses_report(name, report):
+    """Stop unless a doctest report shows cases from the file that passed and checked something.
+
+    A fork case returns early, passing, when notcurses cannot start."""
+    cases, assertions = DOCTEST_CASES.search(report), DOCTEST_ASSERTIONS.search(report)
+    if not cases or not assertions:
+        raise SystemExit(f"ci.py: notcurses-tester reported no {name} results")
+    total, passed, failed = (int(count) for count in cases.groups())
+    if total == 0:
+        raise SystemExit(f"ci.py: notcurses-tester selected no cases from src/tests/{name}.cpp")
+    if failed or passed != total:
+        raise SystemExit(f"ci.py: {failed} of {total} notcurses {name} cases failed")
+    if int(assertions.group(1)) == 0:
+        raise SystemExit(f"ci.py: the notcurses {name} cases checked nothing")
+
+
+def run_notcurses_tests(paths):
+    """Run every doctest case in each listed fork test file, headless, without a terminal."""
+    tests = paths["notcurses_tests"]
+    tester = tests / "notcurses-tester"
+    if not tester.is_file():
+        raise SystemExit(f"ci.py: no notcurses-tester in {tests}; run --phase build first")
+    environment = dict(os.environ, **NOTCURSES_TEST_ENVIRONMENT)
+    for name in NOTCURSES_TEST_SOURCES:
+        report = tests / f"notcurses-tests-{name}.log"
+        terminal = tests / f"notcurses-tests-{name}-terminal.log"
+        if report.exists():
+            report.unlink()
+        command = [str(tester), "-p", str(paths["notcurses_source"] / "data"), "--no-colors=true",
+                   f"--out={report}", f"--source-file=*src/tests/{name}.cpp"]
+        print("+ " + shlex.join(command), flush=True)
+        # Rendered frames go to a log rather than the console. A new session has no controlling
+        # terminal, so notcurses cannot open /dev/tty, and stdin is a pipe closed at once.
+        with terminal.open("wb") as output:
+            try:
+                process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=output,
+                                           stderr=subprocess.PIPE, env=environment,
+                                           start_new_session=True)
+            except OSError as error:
+                raise SystemExit(f"ci.py: cannot run {tester}: {error}")
+            try:
+                _, errors = process.communicate(timeout=NOTCURSES_TEST_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                # The tester leads its own process group; end any helper it started too.
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.communicate()
+                raise SystemExit(f"ci.py: notcurses {name} cases did not finish in "
+                                 f"{NOTCURSES_TEST_TIMEOUT} seconds; output is in {terminal}")
+        sys.stderr.write(errors.decode("utf-8", errors="replace"))
+        text = report.read_text(encoding="utf-8", errors="replace") if report.is_file() else ""
+        print(text, end="", flush=True)
+        if process.returncode != 0:
+            print(f"ci.py: notcurses {name} cases failed with status {process.returncode}; "
+                  f"output is in {terminal}", file=sys.stderr, flush=True)
+            raise SystemExit(process.returncode if process.returncode > 0
+                             else 128 - process.returncode)
+        check_notcurses_report(name, text)
 
 
 def build(config, paths):
@@ -177,6 +404,8 @@ def build(config, paths):
 def test(config, paths):
     if not (paths["build"] / "CMakeCache.txt").is_file():
         raise SystemExit(f"ci.py: no build in {paths['build']}; run --phase build first")
+    if config["notcurses_tests"]:
+        run_notcurses_tests(paths)
     if config["fuzz"]:
         # Replays every committed input, then runs each target's fixed smoke campaign.
         run(sys.executable, ROOT / "fuzz" / "run.py", paths["build"], "--smoke")
@@ -226,7 +455,8 @@ def main():
     notcurses = root / "notcurses" / args.configuration
     paths = {"build": work / "build", "install": work / "install", "consumer": work / "consumer",
              "notcurses_source": notcurses / "src", "notcurses_build": notcurses / "build",
-             "notcurses_install": notcurses / "install"}
+             "notcurses_install": notcurses / "install",
+             "notcurses_tests": notcurses / "test-build"}
     show_versions(config)
     if args.phase in ("build", "all"):
         build(config, paths)

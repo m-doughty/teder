@@ -77,27 +77,42 @@ static void tone(fixture *f, unsigned n, double cycles, double left, double righ
 	}
 }
 
-/* Independent O(N^2) DFT and explicit per-cell integration, no KissFFT,
- * production windows, cached edges or cumulative integral helper. */
-static void reference(const float *pcm, td_spectrum_config c, unsigned rate, float *bands)
+enum { REFERENCE_FRAMES = 2048 };
+
+/* Independent O(N^2) DFT of the Hann-windowed stereo block, with no KissFFT or
+ * production window. power[k] is the two-channel mean power of bin k, scaled so
+ * a full-scale tone of one channel reads 1/2. The transform sums products of
+ * pcm and cos/sin(2 pi k i / N), indexed through an N-entry table. */
+static void reference_power(const float *pcm, unsigned frames, double *power)
 {
-	ck_assert(c.frames <= 256);
-	double power[129] = {0}, energy = 0;
-	for (unsigned i = 0; i < c.frames; i++) {
-		double window = pow(sin(pi * i / c.frames), 2);
-		energy += window * window;
+	ck_assert(frames <= REFERENCE_FRAMES && !(frames & (frames - 1)));
+	double window[REFERENCE_FRAMES], cosine[REFERENCE_FRAMES], sine[REFERENCE_FRAMES], energy = 0;
+	for (unsigned i = 0; i < frames; i++) {
+		window[i] = pow(sin(pi * i / frames), 2);
+		cosine[i] = cos(2 * pi * i / frames);
+		sine[i] = sin(2 * pi * i / frames);
+		energy += window[i] * window[i];
 	}
-	for (unsigned k = 0; k <= c.frames / 2; k++)
+	for (unsigned k = 0; k <= frames / 2; k++) {
+		power[k] = 0;
 		for (unsigned ch = 0; ch < 2; ch++) {
 			double re = 0, im = 0;
-			for (unsigned i = 0; i < c.frames; i++) {
-				double sample = pcm[2 * i + ch] * pow(sin(pi * i / c.frames), 2);
-				re += sample * cos(2 * pi * k * i / c.frames);
-				im -= sample * sin(2 * pi * k * i / c.frames);
+			for (unsigned i = 0; i < frames; i++) {
+				double sample = pcm[2 * i + ch] * window[i];
+				unsigned phase = (unsigned)(((uint64_t)k * i) % frames);
+				re += sample * cosine[phase];
+				im -= sample * sine[phase];
 			}
-			double factor = k == 0 || k == c.frames / 2 ? 1 : 2;
-			power[k] += factor * (re * re + im * im) / (2 * c.frames * energy);
+			double factor = k == 0 || k == frames / 2 ? 1 : 2;
+			power[k] += factor * (re * re + im * im) / (2 * frames * energy);
 		}
+	}
+}
+
+/* Explicit per-cell integration of that power over each band's log-spaced
+ * edges; no cached edges or cumulative integral helper. */
+static void reference_bands(const double *power, td_spectrum_config c, unsigned rate, float *bands)
+{
 	double high = c.high_hz ? c.high_hz : rate / 2.0;
 	double bin_hz = (double)rate / c.frames;
 	for (unsigned b = 0; b < c.bands; b++) {
@@ -189,7 +204,7 @@ END_TEST
 START_TEST(dft)
 {
 	const unsigned rates[] = {44100, 48000, 96000, 1000, 48000};
-	for (unsigned n = 32; n <= 256; n *= 2) {
+	for (unsigned n = 32; n <= REFERENCE_FRAMES; n *= 2) {
 		td_spectrum_config c = config(n, 37); /* bands narrower than some FFT cells */
 		fixture f;
 		create(&f, c);
@@ -197,9 +212,11 @@ START_TEST(dft)
 			f.pcm[2 * i] = (float)(.13 + .7 * sin(2 * pi * 3.2 * i / n));
 			f.pcm[2 * i + 1] = (float)(.27 * cos(2 * pi * 5.7 * i / n));
 		}
+		double power[REFERENCE_FRAMES / 2 + 1];
+		reference_power(f.pcm, n, power);
 		for (unsigned r = 0; r < sizeof(rates) / sizeof(rates[0]); r++) {
 			float expected[37];
-			reference(f.pcm, c, rates[r], expected);
+			reference_bands(power, c, rates[r], expected);
 			td_spectrum_values got;
 			OK(td_spectrum_measure(f.spectrum, f.pcm, n, rates[r], &got));
 			ck_assert(got.count == c.bands);
@@ -213,6 +230,92 @@ START_TEST(dft)
 				              (double)expected[b]);
 		}
 		dispose(&f);
+	}
+}
+END_TEST
+
+/* Fill one block. Mode 0 is DC and 1 the Nyquist alternation. Modes 2 to 4 are
+ * single impulses where the Hann window is 0, 1/2 and 1, and mode 5 mixes DC,
+ * Nyquist, a bin-centred tone and an off-bin tone with unequal channels. */
+static void edge_signal(fixture *f, unsigned n, unsigned mode)
+{
+	memset(f->pcm, 0, (size_t)n * 2 * sizeof(float));
+	if (mode >= 2 && mode <= 4) {
+		unsigned at = mode == 2 ? 0 : mode == 3 ? n / 4 : n / 2;
+		f->pcm[2 * at] = 1;
+		f->pcm[2 * at + 1] = -.5f;
+		return;
+	}
+	for (unsigned i = 0; i < n; i++) {
+		double alternate = i & 1 ? -1 : 1;
+		if (mode == 0) {
+			f->pcm[2 * i] = .5f;
+			f->pcm[2 * i + 1] = -.25f;
+		} else if (mode == 1) {
+			f->pcm[2 * i] = (float)alternate;
+			f->pcm[2 * i + 1] = (float)(.5 * alternate);
+		} else {
+			f->pcm[2 * i] = (float)(.1 + .2 * alternate + .3 * cos(2 * pi * (n / 8) * i / n) +
+			                        .2 * sin(2 * pi * 5.5 * i / n));
+			f->pcm[2 * i + 1] = (float)(-.2 + .1 * alternate + .4 * sin(2 * pi * (n / 4) * i / n));
+		}
+	}
+}
+
+START_TEST(dft_edges)
+{
+	const unsigned rates[] = {48000, 44100, 1000};
+	static float signals[6][2 * REFERENCE_FRAMES];
+	static double powers[6][REFERENCE_FRAMES / 2 + 1];
+	for (unsigned n = 256; n <= REFERENCE_FRAMES; n *= 2) {
+		/* The direct DFT depends only on the block, so each signal's power is computed
+		 * once per size and reused for every layout and rate. */
+		for (unsigned mode = 0; mode < 6; mode++) {
+			fixture scratch = {.pcm = signals[mode]};
+			edge_signal(&scratch, n, mode);
+			reference_power(signals[mode], n, powers[mode]);
+		}
+		for (unsigned layout = 0; layout < 4; layout++) {
+			for (unsigned r = 0; r < sizeof(rates) / sizeof(rates[0]); r++) {
+				/* Band edges on the DC cell's top, on cell boundaries either side of the
+				 * Nyquist cell, inside four cells, and the default range as 64 bands. */
+				double bin_hz = (double)rates[r] / n;
+				td_spectrum_config c = config(n, layout == 3 ? 64 : layout + 1);
+				if (layout == 0) {
+					c.low_hz = (float)(1.5 * bin_hz);
+					c.high_hz = (float)((n / 2 - .5) * bin_hz);
+				} else if (layout == 1) {
+					c.low_hz = (float)(.5 * bin_hz);
+					c.high_hz = 0;
+				} else if (layout == 2) {
+					c.low_hz = (float)(n / 4 * bin_hz);
+					c.high_hz = (float)((n / 4 + 3) * bin_hz);
+					c.floor_db = -120;
+				}
+				fixture f;
+				create(&f, c);
+				for (unsigned mode = 0; mode < 6; mode++) {
+					edge_signal(&f, n, mode);
+					ck_assert(!memcmp(f.pcm, signals[mode], (size_t)n * 2 * sizeof(float)));
+					float expected[64];
+					reference_bands(powers[mode], c, rates[r], expected);
+					td_spectrum_values got;
+					OK(td_spectrum_measure(f.spectrum, f.pcm, n, rates[r], &got));
+					ck_assert(got.count == c.bands);
+					for (unsigned b = 0; b < c.bands; b++)
+						ck_assert_msg(fabs(got.bands[b] - expected[b]) < .03,
+						              "N=%u layout=%u rate=%u mode=%u band=%u got=%g expected=%g",
+						              n,
+						              layout,
+						              rates[r],
+						              mode,
+						              b,
+						              (double)got.bands[b],
+						              (double)expected[b]);
+				}
+				dispose(&f);
+			}
+		}
 	}
 }
 END_TEST
@@ -376,6 +479,7 @@ int main(int argc, char **argv)
 		const TTest *test;
 	} cases[] = {{"bounds", bounds},
 	             {"dft", dft},
+	             {"dft-edges", dft_edges},
 	             {"signals", signals},
 	             {"validation", validation},
 	             {"sizes", sizes},

@@ -20,10 +20,63 @@ def comments(entries):
         struct.pack("<I", len(entry)) + entry for entry in entries)
 
 
+PNG_MIME, PNG_IMAGE = b"image/png", b"\x00\x01\xff\x00\x03"
+
+
 def picture(description=b"cover"):
-    mime, image = b"image/png", b"\x00\x01\xff\x00\x03"
-    return (struct.pack(">II", 3, len(mime)) + mime + struct.pack(">I", len(description))
-            + description + struct.pack(">IIIII", 320, 200, 24, 0, len(image)) + image)
+    return (struct.pack(">II", 3, len(PNG_MIME)) + PNG_MIME + struct.pack(">I", len(description))
+            + description + struct.pack(">IIIII", 320, 200, 24, 0, len(PNG_IMAGE)) + PNG_IMAGE)
+
+
+def fnv(data, state=0xCBF29CE484222325):
+    """64-bit FNV-1a, as fz_hash_bytes computes it in fuzz/support.c."""
+    for byte in data:
+        state = ((state ^ byte) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return state
+
+
+def prefixed(data):
+    return struct.pack("<I", len(data)) + data
+
+
+# Output rate and staged seek frame that the first two control bytes of a source seed
+# select (fuzz/source.c); the second also picks the seek mode, 3 being the control word.
+OUTPUT_RATES = (0, 44100, 48000, 8000)
+SEEK_FRAMES = (0, 0, 8, 7)
+# name: (rate, channels, bits) of the original sample sequences in tests/fixtures.
+FIXTURES = {"track-a": (44100, 2, 16), "track-b": (44100, 2, 16), "mono-24": (48000, 1, 24)}
+
+
+def stream_fields(rate, channels, bits, rows, mode):
+    """Expectations for a source seed, from its construction and not from decoding it.
+
+    `rows` holds the integer samples that the file was built from, or None. The rate
+    converter's frame count is the exact ceiling of the rate ratio; sample digests exist
+    only where no converter or downmix runs, so every value is an exactly representable
+    binary32."""
+    out_rate, start = OUTPUT_RATES[mode], SEEK_FRAMES[mode]
+    remaining = 16 - start
+    fields = f"channels={channels} rate={rate} bits={bits} duration=16"
+    if out_rate not in (0, rate):
+        return fields + f" frames={-(-remaining * out_rate // rate)}"
+    fields += f" frames={remaining}"
+    if rows is not None:
+        digest = 0xCBF29CE484222325
+        for row in rows[start:]:
+            for value in (row * 2 if channels == 1 else row):
+                digest = fnv(struct.pack("<f", value / 2 ** (bits - 1)), digest)
+        fields += f" pcm=0x{digest:016x}"
+    return fields
+
+
+def tag_digest(entries):
+    return b"".join(prefixed(key) + prefixed(value)
+                    for key, _, value in (entry.partition(b"=") for entry in entries))
+
+
+def picture_digest(description):
+    return (struct.pack("<IIIII", 3, 320, 200, 24, 0) + prefixed(PNG_MIME)
+            + prefixed(description) + prefixed(PNG_IMAGE))
 
 
 def multichannel():
@@ -49,17 +102,29 @@ def generate(output):
     source.mkdir(parents=True, exist_ok=True)
     metadata.mkdir(parents=True, exist_ok=True)
 
-    def save(folder, name, body, controls=bytes(16)):
+    manifest = []
+
+    def save(folder, name, body, controls=bytes(16), expect=None):
         (folder / name).write_bytes(controls + body)
+        if expect:
+            manifest.append(f"{folder.name} {name} hash=0x{fnv(controls + body):016x} {expect}")
 
     tracks = {name: (ROOT / f"tests/fixtures/{name}.flac").read_bytes()
               for name in ("track-a", "track-b", "mono-24")}
     tracks["eight-32"] = multichannel()
+    samples = {}
+    for name, (rate, channels, bits) in FIXTURES.items():
+        pcm = (ROOT / f"tests/fixtures/{name}.pcm").read_bytes()
+        values = [int.from_bytes(pcm[i:i + bits // 8], "little", signed=True)
+                  for i in range(0, len(pcm), bits // 8)]
+        samples[name] = [values[i:i + channels] for i in range(0, len(values), channels)]
     for name, body in tracks.items():
+        rate, channels, bits = FIXTURES.get(name, (44100, 8, 32))
         for mode in range(4):
             control = bytearray(16)
             control[0], control[1], control[4], control[8] = mode, mode, mode & 1, 7
-            save(source, f"{name}-{mode}", body, control)
+            save(source, f"{name}-{mode}", body, control,
+                 stream_fields(rate, channels, bits, samples.get(name), mode))
     save(source, "truncated", tracks["track-a"][:-1])
     save(source, "empty", b"")
     save(source, "bad-crc", tracks["track-a"][:-1] + b"\xff")
@@ -75,12 +140,32 @@ def generate(output):
         "truncated": prefix + b"\x84\xff\xff\xff",
         "empty": b"",
     }
+    # The probed stream is track-a: 44100 Hz, two channels, 16 bits and 16 frames.
+    info = "rate=44100 channels=2 bits=16 duration=16"
+    expected = {
+        "tags-picture": (tagset, [b"cover"]),
+        "tag-limit": ([b"A=x"] * 1024, []),
+    }
     for name, body in cases.items():
-        save(metadata, name, body)
+        expect = None
+        if name in expected:
+            tags, pictures = expected[name]
+            digest = fnv(tag_digest(tags) + b"".join(picture_digest(d) for d in pictures))
+            expect = f"{info} tags={len(tags)} artwork={len(pictures)} digest=0x{digest:016x}"
+        save(metadata, name, body, expect=expect)
     for mode in range(3):
         control = bytearray(16)
         control[mode] = (1, 1, 128)[mode]
-        save(metadata, f"control-{mode}", cases["tags-picture"], control)
+        expect = None
+        if mode == 0:  # artwork not requested: the same tags, no pictures
+            expect = (f"{info} tags={len(tagset)} artwork=0 "
+                      f"digest=0x{fnv(tag_digest(tagset)):016x}")
+        save(metadata, f"control-{mode}", cases["tags-picture"], control, expect)
+    # Seeds that must succeed are checked exactly (see the manifest note in fuzz/README.md).
+    header = ("# Exact expectations for the generated seeds that must succeed.\n"
+              "# <target> <name> hash=<FNV-1a of the whole input file> <key>=<value>...\n")
+    (output / "known-good.txt").write_text(header + "\n".join(sorted(manifest)) + "\n",
+                                           newline="\n")
 
 
 # Sequence opcodes and path selectors, matching fuzz/sequence.c.

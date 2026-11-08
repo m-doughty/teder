@@ -3,7 +3,8 @@
 Requires Python 3 and Docker serving linux/amd64 or linux/arm64. A cached image from a pinned
 Ubuntu 24.04 index adds the GitHub runner's toolchain packages. The build phase fetches sources
 with the network; the test phase runs offline, with a hardened seccomp profile. Builds use a
-temporary Docker volume, removed on exit. Logs and CTest results stay in build-ci/results.
+temporary Docker volume, removed on exit. Logs, CTest results and notcurses' own test reports
+stay in build-ci/results.
 """
 import argparse
 from datetime import datetime, timezone
@@ -23,9 +24,10 @@ CONFIGURATIONS = ("linux-shared", "linux-static", "linux-asan", "linux-tsan", "l
 # A multi-arch OCI index; Docker selects the manifest for the daemon's architecture.
 BASE = "ubuntu@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac"
 # llvm-18 supplies the llvm-symbolizer that Clang's sanitizer runtimes use for stack traces.
+# doctest-dev and build-essential's g++ build notcurses' own test program.
 PACKAGES = ("ca-certificates git build-essential cmake ninja-build python3 pkg-config util-linux "
             "clang-18 libclang-rt-18-dev llvm-18 libunistring-dev libdeflate-dev libncurses-dev "
-            "ncurses-base")
+            "ncurses-base doctest-dev")
 PROFILE_URL = "https://raw.githubusercontent.com/moby/profiles/4b8214fc4971e06172938a1f1554ccff6647ee80/seccomp/default.json"
 PROFILE_SHA256 = "6416b47770785a41ac59073cdc77d9fe98517df2799dc83ef207e622de3053f6"
 
@@ -130,7 +132,12 @@ def main():
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         # Preserve detailed evidence even when a phase fails, before removing storage.
         try:
-            copy = (f"cd /work/{args.configuration} 2>/dev/null || exit 0\n"
+            # notcurses' doctest reports and rendered output, then teder's results.
+            copy = (f"reports=/work/notcurses/{args.configuration}/test-build\n"
+                    "if [ -d $reports ]; then\n"
+                    "  find $reports -maxdepth 1 -name 'notcurses-tests-*.log' -exec cp {} /results/ ';'\n"
+                    "fi\n"
+                    f"cd /work/{args.configuration} 2>/dev/null || exit 0\n"
                     "for tree in build consumer; do\n"
                     "  if [ -d $tree/Testing ]; then\n"
                     "    mkdir -p /results/$tree && cp -R $tree/Testing /results/$tree/\n"

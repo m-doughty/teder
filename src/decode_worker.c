@@ -235,12 +235,26 @@ static void prepared(teder_engine *e, td_source_job *j)
 		code = TEDER_BAD_STATE;
 	bool play = !retarget && (autoplay || (seek && (e->status.transport == TEDER_PLAYING ||
 	                                                e->status.transport == TEDER_DRAINING)));
+	unsigned live = TEDER_LIVE;
 	if (code == TEDER_OK && !retarget)
 		code = td_commit_locked(e, slot);
+	/* A selection committed its device; its reopen commits here. Close before this
+	 * point cancels the selection, ordered against close like td_commit_locked. */
+	else if (code == TEDER_OK && selected &&
+	         !atomic_compare_exchange_strong(&e->lifecycle, &live, TEDER_LIVE))
+		code = TEDER_CANCELLED;
 	td_unlock(e);
-	if (code == TEDER_OK)
+	if (code == TEDER_OK) {
+		td_media_checkpoint(e, j->request, TD_MEDIA_BEFORE_QUIESCE);
 		code = td_output_quiesce(e);
+	}
 	td_lock(e);
+	/* Quiescence can observe loss after the check above. A reopen it invalidates is
+	 * stale too: the retained source stays PAUSED, as invalidation left it. */
+	if (retarget && code != TEDER_OK && r->media.target.epoch != e->status.current.epoch) {
+		invalidated = true;
+		code = TEDER_STALE;
+	}
 	if (code == TEDER_OK) {
 		td_source_job *old = active(e);
 		if (old)

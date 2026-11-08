@@ -2,6 +2,7 @@
 #include "support/harness.h"
 #include "support/engine.h"
 #include <check.h>
+#include <float.h>
 #include <math.h>
 
 #define INIT(type) \
@@ -674,6 +675,119 @@ START_TEST(spectrum_filters)
 }
 END_TEST
 
+typedef struct {
+	double rms[2], peak[2], band;
+} filtered;
+
+/* Publish one window per level (the first window is four frames, then one hop of
+ * two) and read each back. Meters use a 4-frame window and a 2-frame hop at 2 Hz,
+ * so every hop is one second; spectra use disjoint 32-frame tone windows at 48 kHz. */
+static void run_filters(
+    bool banded, const float *levels, unsigned count, float smoothing, float decay, filtered *out)
+{
+	fixture f;
+	teder_engine *e = create(&f);
+	teder_analysis_config c = INIT(teder_analysis_config);
+	if (banded) {
+		c = spectral(32, 32);
+	} else {
+		c.enabled = 1;
+		c.window_frames = 4;
+		c.hop_frames = 2;
+	}
+	c.smoothing_ms = smoothing;
+	c.peak_decay_db_per_s = decay;
+	completed(e, configure_with(e, c), TEDER_OK);
+	for (unsigned k = 0; k < count; k++) {
+		if (banded)
+			signal(e, 32 * k, 32, 48000, levels[k], true, 1);
+		else
+			signal(e, k ? 2 + 2 * k : 0, k ? 2 : 4, 2, levels[k], false, 1);
+		teder_snapshot *s = acquire(e);
+		teder_snapshot_info i = info(s);
+		ck_assert(i.sequence == k + 1 && !i.dropped_publications);
+		for (unsigned ch = 0; ch < 2; ch++) {
+			out[k].rms[ch] = i.rms[ch];
+			out[k].peak[ch] = i.peak[ch];
+		}
+		out[k].band = banded ? band(s, 1) : 0;
+		teder_snapshot_release(s);
+	}
+	dispose(&f, &e);
+}
+
+static void expect_near(double got, double expected, const char *what, unsigned k)
+{
+	bool within = expected == 0 ? got == 0 : fabs(got - expected) <= 1e-6 * fabs(expected);
+	ck_assert_msg(
+	    isfinite(got) && within, "%s of window %u: got %.9g expected %.9g", what, k, got, expected);
+}
+
+START_TEST(filter_extremes)
+{
+	/* Zero, the smallest subnormal, the smallest normal and the largest finite value
+	 * for each control, alone and in the four mixed combinations. */
+	const float controls[][2] = {{0, 0},
+	                             {FLT_TRUE_MIN, FLT_TRUE_MIN},
+	                             {FLT_MIN, FLT_MIN},
+	                             {FLT_MAX, FLT_MAX},
+	                             {0, FLT_MAX},
+	                             {FLT_MAX, 0},
+	                             {FLT_TRUE_MIN, FLT_MAX},
+	                             {FLT_MAX, FLT_TRUE_MIN},
+	                             {1e30f, 1e30f}};
+	/* One sequence starts loud and one starts silent, so the extreme smoothing
+	 * constants are applied to a nonzero and to a zero previous state. */
+	const float sequences[][6] = {{1, .5f, 0, .25f, 0, 2}, {0, 1, .5f, 0, .25f, 0}};
+	for (unsigned banded = 0; banded < 2; banded++)
+		for (unsigned q = 0; q < 2; q++) {
+			const float *levels = sequences[q];
+			filtered raw[6];
+			run_filters(banded, levels, 6, 0, 0, raw);
+			double raw_rms[6], raw_peak[6];
+			for (unsigned k = 0; k < 6; k++) {
+				double previous = k ? levels[k - 1] : levels[k];
+				raw_peak[k] = fmax(fabs(previous), fabs(levels[k]));
+				raw_rms[k] = banded ? levels[k] / sqrt(2.0)
+				                    : sqrt((previous * previous + levels[k] * levels[k]) / 2);
+				/* With both controls at zero the meters are exactly the raw windows. */
+				expect_near(raw[k].rms[0], raw_rms[k], "raw rms", k);
+				expect_near(raw[k].rms[1], raw_rms[k], "raw rms", k);
+				expect_near(raw[k].peak[0], banded ? levels[k] : raw_peak[k], "raw peak", k);
+				/* A unit tone in both channels reads 0 dB; silence reads the -90 dB floor. */
+				double raw_db = levels[k] ? fmax(-90, 20 * log10(levels[k])) : -90;
+				if (banded)
+					ck_assert_msg(fabs(raw[k].band - raw_db) < 1e-3,
+					              "raw band of window %u: %g",
+					              k,
+					              raw[k].band);
+			}
+			const double seconds = banded ? 32.0 / 48000 : 1;
+			for (unsigned n = 0; n < sizeof(controls) / sizeof(controls[0]); n++) {
+				filtered got[6];
+				run_filters(banded, levels, 6, controls[n][0], controls[n][1], got);
+				double power = 0, peak = 0, band = 0;
+				for (unsigned k = 0; k < 6; k++) {
+					/* The first window primes the filters; later ones follow the documented
+					 * recurrences, with alpha from expm1 so a vanishing rate stays exact. */
+					double smoothing = controls[n][0], dB = controls[n][1];
+					double alpha = !k || !smoothing ? 1 : -expm1(-seconds * 1000 / smoothing);
+					double decay = !k || !dB ? 0 : pow(10, -seconds * dB / 20);
+					power = (1 - alpha) * (k ? power : 0) + alpha * raw_rms[k] * raw_rms[k];
+					peak = fmax(banded ? levels[k] : raw_peak[k], peak * decay);
+					band = (1 - alpha) * (k ? band : 0) + alpha * raw[k].band;
+					for (unsigned ch = 0; ch < 2; ch++) {
+						expect_near(got[k].rms[ch], sqrt(power), "rms", k);
+						expect_near(got[k].peak[ch], peak, "peak", k);
+					}
+					if (banded)
+						expect_near(got[k].band, band, "band", k);
+				}
+			}
+		}
+}
+END_TEST
+
 START_TEST(overlap_drops)
 {
 	fixture f;
@@ -766,6 +880,7 @@ int main(int argc, char **argv)
 	             {"overlap", overlap},
 	             {"filters", filters},
 	             {"spectrum-filters", spectrum_filters},
+	             {"filter-extremes", filter_extremes},
 	             {"overlap-drops", overlap_drops}};
 	for (unsigned n = 0; n < sizeof(cases) / sizeof(cases[0]); n++) {
 		if (strcmp(argv[1], cases[n].name))

@@ -1,5 +1,21 @@
 # Supervise intentional defects in a child; timeout kills the whole process.
 # Never unwind/free memory concurrently with a stranded test worker.
+if(CASE STREQUAL "failed-check")
+	# A failed check while workers still write the test's frame must report and exit 1
+	# on every run. Unwinding that frame into Check's result collection crashes most runs.
+	file(WRITE "${LOG}" "")
+	foreach(run RANGE 1 10)
+		execute_process(COMMAND "${PROGRAM}" "control-${CASE}" TIMEOUT 15
+			RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE errors)
+		set(text "${output}${errors}")
+		file(APPEND "${LOG}" "run ${run}: result=${result}\n${text}")
+		if(NOT result STREQUAL "1" OR NOT text MATCHES "deliberate failure with a live engine"
+			OR text MATCHES "Sanitizer|runtime error")
+			message(FATAL_ERROR "A failed check with a live engine did not exit cleanly on run ${run}; see ${LOG}")
+		endif()
+	endforeach()
+	return()
+endif()
 execute_process(COMMAND "${PROGRAM}" "control-${CASE}" TIMEOUT 3
 	RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE errors)
 file(WRITE "${LOG}" "result=${result}\n${output}${errors}")

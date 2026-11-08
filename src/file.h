@@ -30,4 +30,10 @@ teder_code td_file_open(td_file *, const char *, uint32_t path_bytes, void *nati
 teder_code td_file_read(td_file *, void *, size_t *);
 teder_code td_file_seek(td_file *, uint64_t);
 void td_file_close(td_file *);
+#ifdef TD_FILE_FAULTS
+/* Test builds only; release builds compile no hook. Open calls this on its own
+ * thread before each native file-information call. True fails that call, with the
+ * hook having set errno or the Win32 last error as the native call would. */
+bool td_file_fault(void);
+#endif
 #endif

@@ -127,3 +127,112 @@ void fz_touch(const void *data, size_t size)
 	for (size_t i = 0; i < size; i++)
 		(void)p[i];
 }
+
+uint64_t fz_hash_bytes(uint64_t hash, const void *data, size_t size)
+{
+	const unsigned char *p = data;
+	for (size_t i = 0; i < size; i++)
+		hash = (hash ^ p[i]) * UINT64_C(0x100000001b3);
+	return hash;
+}
+
+uint64_t fz_hash_u32(uint64_t hash, uint32_t value)
+{
+	const unsigned char bytes[4] = {(unsigned char)value,
+	                                (unsigned char)(value >> 8),
+	                                (unsigned char)(value >> 16),
+	                                (unsigned char)(value >> 24)};
+	return fz_hash_bytes(hash, bytes, sizeof(bytes));
+}
+
+uint64_t fz_hash_f32(uint64_t hash, float value)
+{
+	uint32_t bits;
+	memcpy(&bits, &value, sizeof(bits));
+	return fz_hash_u32(hash, bits);
+}
+
+enum { KNOWN_MAX = 1 << 16 };
+static char known_text[KNOWN_MAX];
+static bool known_loaded;
+
+static void known_load(const char *path)
+{
+	FILE *file = fopen(path, "rb");
+	FZ_CHECK(file);
+	size_t size = fread(known_text, 1, sizeof(known_text) - 1, file);
+	FZ_CHECK(!ferror(file) && feof(file) && size);
+	FZ_CHECK(fclose(file) == 0);
+	known_text[size] = 0;
+	known_loaded = true;
+}
+
+bool fz_expect_find(const char *target, const uint8_t *data, size_t size, fz_expect *out)
+{
+	const char *path = getenv("TEDER_FUZZ_KNOWN");
+	if (!path || !*path)
+		return false;
+	if (!known_loaded)
+		known_load(path);
+	char want[40];
+	snprintf(want,
+	         sizeof(want),
+	         " hash=0x%016llx",
+	         (unsigned long long)fz_hash_bytes(FZ_HASH_INIT, data, size));
+	size_t target_bytes = strlen(target);
+	for (const char *line = known_text; *line;) {
+		const char *end = strchr(line, '\n');
+		size_t bytes = end ? (size_t)(end - line) : strlen(line);
+		const char *next = line + bytes + (end ? 1 : 0);
+		if (*line != '#' && bytes > target_bytes + 1 && !strncmp(line, target, target_bytes) &&
+		    line[target_bytes] == ' ') {
+			const char *name = line + target_bytes + 1;
+			const char *fields = memchr(name, ' ', (size_t)(line + bytes - name));
+			FZ_CHECK(fields && (size_t)(fields - name) < sizeof(out->name));
+			size_t field_bytes = (size_t)(line + bytes - fields);
+			FZ_CHECK(field_bytes < sizeof(out->fields));
+			memcpy(out->fields, fields, field_bytes);
+			out->fields[field_bytes] = 0;
+			if (strstr(out->fields, want)) {
+				memcpy(out->name, name, (size_t)(fields - name));
+				out->name[fields - name] = 0;
+				return true;
+			}
+		}
+		line = next;
+	}
+	return false;
+}
+
+/* Returns the token after " key=" or NULL. Keys never contain '='. */
+static const char *known_token(const fz_expect *e, const char *key)
+{
+	char pattern[32];
+	int length = snprintf(pattern, sizeof(pattern), " %s=", key);
+	FZ_CHECK(length > 0 && (size_t)length < sizeof(pattern));
+	const char *at = strstr(e->fields, pattern);
+	return at ? at + length : NULL;
+}
+
+bool fz_expect_has(const fz_expect *e, const char *key)
+{
+	return known_token(e, key) != NULL;
+}
+
+uint64_t fz_expect_value(const fz_expect *e, const char *key)
+{
+	const char *token = known_token(e, key);
+	if (!token) {
+		fprintf(stderr, "%s: manifest entry has no %s\n", e->name, key);
+		FZ_CHECK(token);
+	}
+	char *end;
+	unsigned long long value = strtoull(token, &end, 0);
+	FZ_CHECK(end != token && (*end == 0 || *end == ' '));
+	return value;
+}
+
+void fz_expect_passed(const fz_expect *e)
+{
+	fprintf(stderr, "known seed checked: %s\n", e->name);
+}

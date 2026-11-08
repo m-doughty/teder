@@ -56,6 +56,9 @@ typedef struct {
 	bool reject, enum_error, device_error;
 	unsigned devices, releases, starts, stops, rate;
 	void *native_heap;
+	bool sync; /* miniaudio's own worker runs a blocking write loop */
+	atomic_uint sync_fail, sync_hold;
+	th_gate stop_gate;
 #ifdef _WIN32
 	DWORD caller, owner;
 #else
@@ -191,6 +194,30 @@ static ma_result device_stop(ma_device *d)
 	return MA_SUCCESS;
 }
 
+/* Synchronous playback on miniaudio's own worker. Each write blocks like a stalled
+ * hardware write until the test fails it or the owner stops the stream. */
+static ma_result sync_write(ma_device *d, const void *frames, ma_uint32 count, ma_uint32 *written)
+{
+	(void)frames;
+	fixture *f = d->pContext->pUserData;
+	while (!atomic_load(&f->sync_fail) && ma_device_get_state(d) == ma_device_state_started)
+		td_worker_sleep(1);
+	if (atomic_exchange(&f->sync_fail, 0))
+		return MA_ERROR; /* a fatal native write ends the worker's data loop */
+	*written = count;
+	return MA_SUCCESS;
+}
+
+/* Runs on miniaudio's worker after its data loop, before the stopped notification and
+ * the stopped state. A held stop parks the worker exactly there. */
+static ma_result sync_stop(ma_device *d)
+{
+	fixture *f = d->pContext->pUserData;
+	if (atomic_exchange(&f->sync_hold, 0))
+		th_gate_hit(&f->stop_gate);
+	return MA_SUCCESS;
+}
+
 static ma_result context_init(const ma_backend *backends,
                               ma_uint32 count,
                               const ma_context_config *config,
@@ -209,6 +236,7 @@ static ma_result context_init(const ma_backend *backends,
 	if (f->reject)
 		return MA_NO_BACKEND;
 	memset(c, 0, sizeof(*c));
+	th_context_com(c);
 	c->backend = ma_backend_wasapi;
 	c->pUserData = f;
 	c->allocationCallbacks = config->allocationCallbacks;
@@ -225,8 +253,9 @@ static ma_result context_init(const ma_backend *backends,
 	c->callbacks.onDeviceGetInfo = device_info;
 	c->callbacks.onDeviceInit = device_init;
 	c->callbacks.onDeviceUninit = device_uninit;
-	c->callbacks.onDeviceStart = device_start;
-	c->callbacks.onDeviceStop = device_stop;
+	c->callbacks.onDeviceStart = f->sync ? NULL : device_start;
+	c->callbacks.onDeviceStop = f->sync ? sync_stop : device_stop;
+	c->callbacks.onDeviceWrite = f->sync ? sync_write : NULL;
 	f->opened++;
 	return MA_SUCCESS;
 }
@@ -328,6 +357,8 @@ static void checkpoint(void *p, uint64_t request, unsigned point)
 		hit(p, 19);
 	if (point == TD_PREPARATION_WAIT)
 		hit(p, 20);
+	if (point == TD_MEDIA_BEFORE_QUIESCE)
+		hit(p, 21);
 }
 
 static void control_checkpoint(void *p, uint32_t point)
@@ -745,9 +776,10 @@ START_TEST(selection)
 	id = select_device(e, (teder_blob){key, sizeof(key)});
 	th_gate_await(&f.gate);
 	memset(key, 0, sizeof(key));
-	uint64_t other;
+	uint64_t other = UINT64_MAX;
 	ck_assert(teder_select_device(e, NULL, 0, &other) == TEDER_BUSY && other == 0);
-	ck_assert(teder_open(e, TRACK, sizeof(TRACK) - 1, 9, 0, &other) == TEDER_BUSY);
+	other = UINT64_MAX;
+	ck_assert(teder_open(e, TRACK, sizeof(TRACK) - 1, 9, 0, &other) == TEDER_BUSY && other == 0);
 	th_gate_release(&f.gate);
 	ck_assert(terminal(e, id).outcome == TEDER_OK);
 	ack(e, id);
@@ -3068,6 +3100,227 @@ START_TEST(reopen_loss)
 }
 END_TEST
 
+/* Loss after the held reopen's preparation succeeded. With quiescing, control's first
+ * recovery has found no loss and control parks just before it quiesces output; the
+ * device is lost there, so quiescence itself observes the loss. Otherwise the loss is
+ * published at the commit checkpoint, before that first recovery. Either way the loss
+ * is not a reopen failure: the reopen and PLAY finish STALE and the source stays PAUSED
+ * with DEVICE_LOST at frame 0 (stop) or 3 (selection), never DEVICE_LOST or FAILED. */
+static void reopen_loss_prepared(bool stop, bool quiescing)
+{
+	fixture f;
+	init(&f);
+	f.manual = true;
+	teder_config config = INIT(teder_config);
+	teder_engine *e = create(&f, config, false);
+	held h;
+	held_reopen(&f, e, stop, &h);
+
+	atomic_store(&f.point, quiescing ? 21 : 14);
+	th_gate_release(&f.prepare_gate);
+	th_gate_release(&f.gate);
+	th_gate_await(&f.gate); /* control holds the prepared reopen: the native borrow is stable */
+	ck_assert(status(e).output_state == TEDER_OUTPUT_READY);
+	lose(&f);
+	th_gate_release(&f.gate);
+
+	ends_with(e, h.reopen, TEDER_STALE, h.name);
+	ends_with(e, h.play, TEDER_STALE, h.name);
+	teder_status s = watch(&h.seen, status(e));
+	ck_assert_msg(s.current.epoch == h.committed.epoch + 1 && s.current.source == h.before.source &&
+	                  s.output_state == TEDER_OUTPUT_LOST && s.transport == TEDER_PAUSED &&
+	                  s.last_error == TEDER_DEVICE_LOST && s.source_frame == (stop ? 0 : 3) &&
+	                  !s.media_request && f.starts == h.starts,
+	              "%s: transport %u last_error %d source_frame %" PRIu64 " epoch %" PRIu64
+	              " (expected %" PRIu64 ") output_state %u",
+	              h.name,
+	              s.transport,
+	              s.last_error,
+	              s.source_frame,
+	              s.current.epoch,
+	              h.committed.epoch + 1,
+	              s.output_state);
+	loss_event(e, s);
+
+	reselect(&f, e, &h);
+	close_engine(&e);
+	dispose(&f);
+}
+
+START_TEST(reopen_loss_quiescing_select)
+{
+	reopen_loss_prepared(false, true);
+}
+END_TEST
+
+START_TEST(reopen_loss_quiescing_stop)
+{
+	reopen_loss_prepared(true, true);
+}
+END_TEST
+
+START_TEST(reopen_loss_prepared_select)
+{
+	reopen_loss_prepared(false, false);
+}
+END_TEST
+
+START_TEST(reopen_loss_prepared_stop)
+{
+	reopen_loss_prepared(true, false);
+}
+END_TEST
+
+/* Close after the held reopen's preparation succeeded, with PLAY queued behind it.
+ * Control holds the reopen at its commit checkpoint or, with committed, just before it
+ * quiesces output. A selection commits only with its reopen: closed before that, it
+ * and PLAY finish CANCELLED and the source is never adopted. STOP committed its rewind
+ * before quiescing, so its reopen keeps OK, as does a selection whose reopen committed.
+ * PLAY is always CANCELLED and output never starts. */
+static void reopen_close_prepared(bool stop, bool committed)
+{
+	fixture f;
+	init(&f);
+	f.manual = true;
+	teder_config config = INIT(teder_config);
+	teder_engine *e = create(&f, config, false);
+	held h;
+	held_reopen(&f, e, stop, &h);
+
+	atomic_store(&f.point, committed ? 21 : 14);
+	th_gate_release(&f.prepare_gate);
+	th_gate_release(&f.gate);
+	th_gate_await(&f.gate); /* preparation succeeded; control holds the prepared reopen */
+	OK(teder_request_close(e));
+	ck_assert(teder_destroy(&e) == TEDER_BUSY && e);
+	th_gate_release(&f.gate);
+	OK(th_close(e));
+	teder_request_info reopened = terminal(e, h.reopen);
+	teder_code played = terminal(e, h.play).outcome;
+	teder_code expected = stop || committed ? TEDER_OK : TEDER_CANCELLED;
+	ck_assert_msg(
+	    reopened.outcome == expected && played == TEDER_CANCELLED &&
+	        reopened.committed.epoch == h.committed.epoch && f.starts == h.starts && !f.worker,
+	    "%s%s: reopen %d (expected %d), PLAY %d, committed epoch %" PRIu64 ", starts %u/%u",
+	    h.name,
+	    committed ? " after commitment" : "",
+	    reopened.outcome,
+	    expected,
+	    played,
+	    reopened.committed.epoch,
+	    f.starts,
+	    h.starts);
+	watch(&h.seen, status(e));
+
+	close_engine(&e);
+	dispose(&f);
+}
+
+START_TEST(reopen_close_prepared_select)
+{
+	reopen_close_prepared(false, false);
+}
+END_TEST
+
+START_TEST(reopen_close_prepared_stop)
+{
+	reopen_close_prepared(true, false);
+}
+END_TEST
+
+START_TEST(reopen_close_committed)
+{
+	reopen_close_prepared(false, true);
+	reopen_close_prepared(true, true);
+}
+END_TEST
+
+/* A synchronous backend's write fails while PLAYING. Its worker leaves the data loop
+ * and is held inside onDeviceStop, before the stopped notification and stopped state.
+ * Raced, STOP is submitted then: quiescence finds no loss, native stop clears the
+ * expected-running flag and waits, and only then is the worker released, so its
+ * stopped notification is ignored. STOP must still report the unexpected stop: it
+ * finishes DEVICE_LOST with output LOST and the source PAUSED at its final position,
+ * not a completed rewind. Unraced, the worker is released first and ordinary loss
+ * monitoring reports the same state. */
+static void sync_stop_loss(bool raced)
+{
+	fixture f;
+	init(&f);
+	f.manual = true;
+	f.sync = true;
+	atomic_init(&f.sync_fail, 0);
+	atomic_init(&f.sync_hold, 0);
+	ck_assert(th_gate_init(&f.stop_gate));
+	teder_config config = INIT(teder_config);
+	teder_engine *e = create(&f, config, false);
+	outcome(e, select_device(e, (teder_blob){0}), TEDER_OK);
+	load_track(e);
+	outcome(e, transport(e, TEDER_PLAY), TEDER_OK);
+	ck_assert(f.native->pContext->callbacks.onDeviceWrite == sync_write &&
+	          f.native->pContext->callbacks.onDeviceDataLoop == NULL);
+	while (!status(e).output_frame)
+		th_yield(); /* the worker rendered its first period and blocks in its write */
+	atomic_store(&f.sync_hold, 1);
+	atomic_store(&f.sync_fail, 1);
+	th_gate_await(&f.stop_gate); /* the stream stopped unexpectedly; no notification yet */
+	teder_status before = status(e);
+	/* The 16-frame fixture decodes to EOF during prefill, so playback may be draining. */
+	ck_assert(before.output_state == TEDER_OUTPUT_READY &&
+	          (before.transport == TEDER_PLAYING || before.transport == TEDER_DRAINING) &&
+	          before.source_frame && ma_device_get_state(f.native) == ma_device_state_started);
+
+	teder_code stopped = TEDER_OK;
+	teder_status s;
+	if (raced) {
+		uint64_t id = transport(e, TEDER_STOP);
+		while (ma_device_get_state(f.native) != ma_device_state_stopping)
+			th_yield(); /* native stop cleared expected-running and waits for the worker */
+		th_gate_release(&f.stop_gate);
+		stopped = terminal(e, id).outcome;
+		ack(e, id);
+		s = status(e);
+	} else {
+		th_gate_release(&f.stop_gate);
+		do {
+			s = status(e);
+			th_yield();
+		} while (s.output_state != TEDER_OUTPUT_LOST);
+	}
+	ck_assert_msg(stopped == (raced ? TEDER_DEVICE_LOST : TEDER_OK) &&
+	                  s.output_state == TEDER_OUTPUT_LOST && s.transport == TEDER_PAUSED &&
+	                  s.last_error == TEDER_DEVICE_LOST && s.source_frame == before.source_frame &&
+	                  s.current.epoch == before.current.epoch + 1 && !s.media_request,
+	              "%s: STOP %d, output_state %u transport %u last_error %d source_frame %" PRIu64
+	              " (final %" PRIu64 ") epoch %" PRIu64 " (expected %" PRIu64 ")",
+	              raced ? "raced" : "unraced",
+	              stopped,
+	              s.output_state,
+	              s.transport,
+	              s.last_error,
+	              s.source_frame,
+	              before.source_frame,
+	              s.current.epoch,
+	              before.current.epoch + 1);
+	loss_event(e, s);
+
+	close_engine(&e);
+	dispose(&f);
+	th_gate_uninit(&f.stop_gate);
+}
+
+START_TEST(sync_stop_loss_raced)
+{
+	sync_stop_loss(true);
+}
+END_TEST
+
+START_TEST(sync_stop_loss_unraced)
+{
+	sync_stop_loss(false);
+}
+END_TEST
+
 START_TEST(loss_closing)
 {
 	fixture f;
@@ -3789,6 +4042,44 @@ static void worker_check_failure(void *unused)
 	WORKER_CHECK(false);
 }
 
+typedef struct {
+	atomic_uint *cells;
+	size_t count;
+} scribbler;
+
+/* Stands in for any worker that writes test-owned storage: it rewrites cells in the
+ * failing test's frame until the process exits. */
+static void scribble(void *context)
+{
+	scribbler *s = context;
+	for (unsigned round = 1;; round++)
+		for (size_t i = 0; i < s->count; i++)
+			atomic_store_explicit(&s->cells[i], round, memory_order_relaxed);
+}
+
+/* Supervised negative control: a deliberately failing check while the engine plays,
+ * its fake device worker writes this frame's fixture and a helper rewrites the frame.
+ * The process must exit 1 with this diagnostic and no sanitizer report. */
+START_TEST(failed_check)
+{
+	atomic_uint cells[4096];
+	for (size_t i = 0; i < 4096; i++)
+		atomic_init(&cells[i], 0);
+	fixture f;
+	init(&f);
+	teder_config config = INIT(teder_config);
+	teder_engine *e = create(&f, config, false);
+	OK(terminal(e, select_device(e, (teder_blob){0})).outcome);
+	OK(terminal(e, autoplay(e, TRACK)).outcome);
+	while (atomic_load(&f.stepped) < 4)
+		th_yield();
+	scribbler s = {cells, sizeof(cells) / sizeof(cells[0])};
+	th_thread thread;
+	ck_assert(th_thread_start(&thread, scribble, &s));
+	ck_assert_msg(false, "deliberate failure with a live engine");
+}
+END_TEST
+
 int main(int argc, char **argv)
 {
 	if (argc != 2)
@@ -3843,6 +4134,24 @@ int main(int argc, char **argv)
 		test = reopen_failure;
 	else if (!strcmp(argv[1], "reopen-close"))
 		test = reopen_close;
+	else if (!strcmp(argv[1], "reopen-loss-quiescing-select"))
+		test = reopen_loss_quiescing_select;
+	else if (!strcmp(argv[1], "reopen-loss-quiescing-stop"))
+		test = reopen_loss_quiescing_stop;
+	else if (!strcmp(argv[1], "reopen-loss-prepared-select"))
+		test = reopen_loss_prepared_select;
+	else if (!strcmp(argv[1], "reopen-loss-prepared-stop"))
+		test = reopen_loss_prepared_stop;
+	else if (!strcmp(argv[1], "reopen-close-prepared-select"))
+		test = reopen_close_prepared_select;
+	else if (!strcmp(argv[1], "reopen-close-prepared-stop"))
+		test = reopen_close_prepared_stop;
+	else if (!strcmp(argv[1], "reopen-close-committed"))
+		test = reopen_close_committed;
+	else if (!strcmp(argv[1], "sync-stop-loss-raced"))
+		test = sync_stop_loss_raced;
+	else if (!strcmp(argv[1], "sync-stop-loss-unraced"))
+		test = sync_stop_loss_unraced;
 	else if (!strcmp(argv[1], "seek-states"))
 		test = seek_states;
 	else if (!strcmp(argv[1], "stop-supersession"))
@@ -3909,6 +4218,8 @@ int main(int argc, char **argv)
 		test = native_select;
 	else if (!strcmp(argv[1], "native"))
 		test = native;
+	else if (!strcmp(argv[1], "control-failed-check"))
+		test = failed_check;
 	else
 		return 2;
 	Suite *suite = suite_create("output");
