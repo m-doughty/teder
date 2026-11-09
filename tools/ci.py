@@ -11,17 +11,24 @@ macos-asan builds and tests the shared core library with Apple Clang, ASan and U
 
 The notcurses source tree must hold the pinned commit unmodified, and a reused notcurses
 installation must match the SHA-256 digests its stamp recorded; either difference stops the run.
+Without a matching stamp, notcurses is installed again into an emptied prefix. ci.py empties
+only a prefix holding its stamp. It never follows a link in a prefix, and stops at one it could
+not check: a link to a directory, or one whose target leaves the prefix.
 --phase build fetches sources and needs the network; --phase test runs offline from that build.
+--cache-key prints the digest that CI's cache key for the notcurses installation includes.
 tools/run-ci-docker.py runs a Linux configuration in a pinned Ubuntu 24.04 container.
 tools/test-ci.py tests the source tree and installation checks.
 """
 import argparse
 import hashlib
 import json
+import ntpath
 import os
 from pathlib import Path
+import posixpath
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -162,14 +169,36 @@ def file_sha256(path):
     return digest.hexdigest()
 
 
+def link_leaves(prefix, link, target):
+    """Whether a symbolic link at link, under prefix, has a target outside prefix.
+
+    The target is resolved lexically against the link's directory, without following this or
+    any other link: an absolute target, or a relative one that climbs out with "..", leaves.
+    ci.py runs on Linux and macOS, where targets are POSIX paths. A backslash or a drive, which
+    Windows would read as a separator or a root, counts as leaving too."""
+    if "\\" in target or ntpath.splitdrive(target)[0]:
+        return True
+    root = posixpath.normpath(os.path.abspath(prefix))
+    resolved = posixpath.normpath(posixpath.join(os.path.abspath(link.parent), target))
+    return resolved != root and not resolved.startswith(root + "/")
+
+
 def install_digests(prefix):
     """Map each path under prefix but the stamp, as a relative POSIX path, to its digest.
 
     Every regular file is hashed, whatever the platform names the library, its versioned
-    aliases or its import library. A symbolic link records its target and is not followed."""
+    aliases or its import library. A symbolic link whose target stays inside the prefix
+    records that target, which is hashed under its own path; a dangling one records it too.
+    Links are never followed, so a link whose target leaves the prefix, a link to a
+    directory, or a linked prefix would hide what lies behind it from the digests; each
+    stops the run."""
     def unreadable(error):
         raise SystemExit(f"ci.py: cannot read the notcurses installation in {prefix}: {error}")
 
+    if prefix.is_symlink():
+        raise SystemExit(f"ci.py: the notcurses installation {prefix} is a link. ci.py does not "
+                         "follow links, so it cannot check what the link points to. Install "
+                         "into a directory instead.")
     digests = {}
     for directory, folders, files in os.walk(prefix, onerror=unreadable):
         for name in folders + files:
@@ -178,7 +207,17 @@ def install_digests(prefix):
             if relative == NOTCURSES_STAMP:
                 continue
             if path.is_symlink():
-                digests[relative] = "link:" + os.readlink(path)
+                target = os.readlink(path)
+                if link_leaves(prefix, path, target):
+                    raise SystemExit(f"ci.py: {path} in the notcurses installation is a link to "
+                                     f"{target}, outside {prefix}. ci.py does not follow links, "
+                                     "so it cannot check what the link points to; the "
+                                     "installation must hold it itself.")
+                if path.is_dir():
+                    raise SystemExit(f"ci.py: {path} in the notcurses installation is a link to a "
+                                     "directory. ci.py does not follow links, so it cannot check "
+                                     "the files there; the installation must hold them itself.")
+                digests[relative] = "link:" + target
             elif path.is_file():
                 digests[relative] = "sha256:" + file_sha256(path)
             elif not path.is_dir():
@@ -219,6 +258,36 @@ def verify_install(prefix, recorded):
     raise SystemExit(f"ci.py: the notcurses installation in {prefix} differs from the SHA-256 "
                      f"digests in its {NOTCURSES_STAMP}:\n{listing(differences)}\n"
                      f"ci.py does not reuse or repair it. Remove {prefix} to rebuild it.")
+
+
+def write_stamp(stamp_path, stamp):
+    with stamp_path.open("w", encoding="utf-8", newline="\n") as output:
+        output.write(json.dumps(stamp, indent=2) + "\n")
+
+
+def empty_install(prefix):
+    """Empty a notcurses installation prefix that ci.py made, before installing into it again.
+
+    ci.py made a prefix that holds its stamp, whatever the stamp says. A missing or empty
+    prefix needs nothing. Any other prefix stops the run untouched. Links inside are removed,
+    never followed."""
+    if prefix.is_symlink() or (prefix.exists() and not prefix.is_dir()):
+        raise SystemExit(f"ci.py: the notcurses installation {prefix} is a link or a file, not a "
+                         "directory ci.py made. Remove it to rebuild notcurses there.")
+    try:
+        if not prefix.exists() or not any(prefix.iterdir()):
+            return
+    except OSError as error:
+        raise SystemExit(f"ci.py: cannot read the notcurses installation in {prefix}: {error}")
+    stamp_path = prefix / NOTCURSES_STAMP
+    if stamp_path.is_symlink() or not stamp_path.is_file():
+        raise SystemExit(f"ci.py: {prefix} holds files but no {NOTCURSES_STAMP}, so ci.py did "
+                         "not install them. It empties only a notcurses installation it made. "
+                         f"Remove {prefix} to rebuild it.")
+    try:
+        shutil.rmtree(prefix)
+    except OSError as error:
+        raise SystemExit(f"ci.py: cannot empty the notcurses installation {prefix}: {error}")
 
 
 def checkout_notcurses(source):
@@ -263,15 +332,33 @@ def notcurses_flags(config):
     return flags, link_flags
 
 
-def install_notcurses(config, paths, flags, link_flags):
+def notcurses_stamp(config):
+    """What a notcurses installation's stamp records about its build, apart from its files.
+
+    Any change of revision, compiler, flags or options gives a different stamp."""
+    flags, link_flags = notcurses_flags(config)
+    return {"url": NOTCURSES_URL, "revision": NOTCURSES_REVISION, "cc": config["cc"],
+            "compiler": capture(config["cc"], "--version").splitlines()[0],
+            "flags": flags, "link_flags": link_flags, "options": list(NOTCURSES_OPTIONS)}
+
+
+def notcurses_cache_key(config):
+    """The SHA-256 digest of the stamp a notcurses build in config writes, apart from its files.
+
+    CI's cache key for the installation includes it, so a new compiler changes the key exactly
+    when it changes the stamp, and a key that hits restores an installation whose stamp
+    matches unless the installation itself changed."""
+    stamp = json.dumps(notcurses_stamp(config), sort_keys=True)
+    return hashlib.sha256(stamp.encode("utf-8")).hexdigest()
+
+
+def install_notcurses(config, paths):
     """Build and install notcurses unless its stamp matches; True if this checked it out."""
     install = paths["notcurses_install"]
     # The stamp lives in the installed prefix, which CI restores from its cache without the
     # source or build trees. Any change of revision, compiler, flags or options rebuilds. A
     # matching stamp's digests must then match every installed file, or the run stops.
-    stamp = {"url": NOTCURSES_URL, "revision": NOTCURSES_REVISION, "cc": config["cc"],
-             "compiler": capture(config["cc"], "--version").splitlines()[0],
-             "flags": flags, "link_flags": link_flags, "options": list(NOTCURSES_OPTIONS)}
+    stamp = notcurses_stamp(config)
     stamp_path = install / NOTCURSES_STAMP
     recorded = recorded_digests(stamp_path, stamp)
     if recorded is not None:
@@ -279,24 +366,26 @@ def install_notcurses(config, paths, flags, link_flags):
         print(f"notcurses {NOTCURSES_REVISION} is already installed in {install} with this "
               f"configuration, and its {len(recorded)} files match their digests", flush=True)
         return False
-    if stamp_path.exists():
-        stamp_path.unlink()
 
     checkout_notcurses(paths["notcurses_source"])
+    # Install into an empty prefix, so the stamp's digests cover only what this install
+    # writes. Until they are recorded, a stamp without digests marks the prefix as ci.py's:
+    # an install that stops part way is emptied and rebuilt by the next run.
+    empty_install(install)
+    install.mkdir(parents=True, exist_ok=True)
+    write_stamp(stamp_path, stamp)
     # --fresh discards any cache an earlier compiler or flag set left in a reused build tree.
     run("cmake", "--fresh", "-S", paths["notcurses_source"], "-B", paths["notcurses_build"],
         "-G", "Ninja", f"-DCMAKE_C_COMPILER={config['cc']}", "-DCMAKE_BUILD_TYPE=Debug",
-        f"-DCMAKE_INSTALL_PREFIX={install}", f"-DCMAKE_C_FLAGS={flags}",
-        f"-DCMAKE_SHARED_LINKER_FLAGS={link_flags}", *NOTCURSES_OPTIONS)
+        f"-DCMAKE_INSTALL_PREFIX={install}", f"-DCMAKE_C_FLAGS={stamp['flags']}",
+        f"-DCMAKE_SHARED_LINKER_FLAGS={stamp['link_flags']}", *NOTCURSES_OPTIONS)
     run("cmake", "--build", paths["notcurses_build"], "--parallel", PARALLEL)
     run("cmake", "--install", paths["notcurses_build"])
     if not notcurses_library(install):
         raise SystemExit(f"ci.py: no shared libnotcurses-core in {install}")
     if not (install / "include" / "notcurses" / "notcurses.h").is_file():
         raise SystemExit(f"ci.py: no notcurses/notcurses.h in {install / 'include'}")
-    stamp["files"] = install_digests(install)
-    with stamp_path.open("w", encoding="utf-8", newline="\n") as output:
-        output.write(json.dumps(stamp, indent=2) + "\n")
+    write_stamp(stamp_path, dict(stamp, files=install_digests(install)))
     return True
 
 
@@ -313,13 +402,12 @@ def build_notcurses_tests(config, paths, flags, link_flags):
 
 
 def build_notcurses(config, paths):
-    flags, link_flags = notcurses_flags(config)
-    checked_out = install_notcurses(config, paths, flags, link_flags)
+    checked_out = install_notcurses(config, paths)
     if config["notcurses_tests"]:
         # A cached installation skips the checkout, but the test build always needs one.
         if not checked_out:
             checkout_notcurses(paths["notcurses_source"])
-        build_notcurses_tests(config, paths, flags, link_flags)
+        build_notcurses_tests(config, paths, *notcurses_flags(config))
 
 
 def check_notcurses_report(name, report):
@@ -443,12 +531,20 @@ def main():
                         help="directory for every source, build and install tree (default: build-ci)")
     parser.add_argument("--phase", choices=("build", "test", "all"), default="all",
                         help="build (needs the network), test (offline) or both (default)")
+    parser.add_argument("--cache-key", action="store_true",
+                        help="print the digest of the notcurses stamp this configuration writes, "
+                             "which CI's cache key includes, and exit without building")
     args = parser.parse_args()
     config = CONFIGURATIONS[args.configuration]
     if not sys.platform.startswith(config["host"]):
         if config["host"] == "linux":
             parser.error(f"{args.configuration} needs Linux; elsewhere use tools/run-ci-docker.py")
         parser.error(f"{args.configuration} needs macOS")
+    if args.cache_key:
+        if not config["renderer"]:
+            parser.error(f"{args.configuration} builds no notcurses, so it has no cache key")
+        print(notcurses_cache_key(config), flush=True)
+        return 0
 
     root = args.build_root.resolve()
     work = root / args.configuration

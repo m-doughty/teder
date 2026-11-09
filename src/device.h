@@ -38,9 +38,9 @@ bool td_device_running(td_device *); /* lifecycle-owner observation, not a join 
  * observation, never proof of callback/notification quiescence. Replace to reset. */
 bool td_device_lost(td_device *);
 /* Known loss bypasses native stop and uninitializes, returning DEVICE_LOST. So does
- * loss found when native stop returns: a notification, or a synchronous worker
- * whose data loop failed before the stop. The report stays readable until close;
- * this instance cannot restart. */
+ * loss found when native stop returns: a notification, a synchronous worker whose
+ * data loop failed before the stop, or a backend stop callback that failed. The
+ * report stays readable until close; this instance cannot restart. */
 teder_code td_device_stop(td_device *);
 /* One bounded coherent read, including while running; AGAIN retries later.
  * A delegated producer may borrow this with lifecycle/configuration held stable.

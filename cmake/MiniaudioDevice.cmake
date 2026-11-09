@@ -61,22 +61,29 @@ teder_ma_replace(teder_ma_header
 teder_ma_replace(teder_ma_header
 	"    result = ma_set_AudioObject_buffer_size_in_frames(pContext, deviceObjectID, deviceType, &actualPeriodSizeInFrames);\n    if (result != MA_SUCCESS) {\n        return result;\n    }"
 	"    result = ma_set_AudioObject_buffer_size_in_frames(pContext, deviceObjectID, deviceType, &actualPeriodSizeInFrames);\n    if (result != MA_SUCCESS) {\n        ((ma_AudioComponentInstanceDispose_proc)pContext->coreaudio.AudioComponentInstanceDispose)(pData->audioUnit);\n        return result;\n    }")
-# A synchronous worker discards why its data loop ended, and its stopped
-# notification looks the same after a requested stop as after a native write
-# failure. Record the loop's result, so a stop that races such a failure still
-# reports it. PulseAudio's loop returns an error when a main-loop iteration fails.
+# A synchronous worker discards why its data loop ended and what its backend's
+# stop callback returned, and its stopped notification looks the same after a
+# requested stop as after a native write failure. A failed stop callback, such as
+# WASAPI's IAudioClient_Stop or PulseAudio's cork on a vanished device, suppresses
+# that notification, yet ma_device_stop still returns success. Record both
+# results before the worker publishes the stopped state, so a stop that races a
+# write failure, or whose backend stop fails, still reports it. PulseAudio's loop
+# returns an error when a main-loop iteration fails.
 teder_ma_replace(teder_ma_header
 	"    ma_result workResult;                       /* This is set by the worker thread after it's finished doing a job. */"
-	"    ma_result workResult;                       /* This is set by the worker thread after it's finished doing a job. */\n    ma_result dataLoopResult;                   /* Set by the worker when its last data loop returned. */")
+	"    ma_result workResult;                       /* This is set by the worker thread after it's finished doing a job. */\n    ma_result dataLoopResult;                   /* Set by the worker when its last data loop returned. */\n    ma_result stopCallbackResult;               /* Set by the worker when its last onDeviceStop returned. */")
 teder_ma_replace(teder_ma_header
 	"        /* Default result code. */\n        pDevice->workResult = MA_SUCCESS;"
-	"        /* Default result code. */\n        pDevice->workResult = MA_SUCCESS;\n        pDevice->dataLoopResult = MA_SUCCESS;")
+	"        /* Default result code. */\n        pDevice->workResult = MA_SUCCESS;\n        pDevice->dataLoopResult = MA_SUCCESS;\n        pDevice->stopCallbackResult = MA_SUCCESS;")
 teder_ma_replace(teder_ma_header
 	"            pDevice->pContext->callbacks.onDeviceDataLoop(pDevice);"
 	"            pDevice->dataLoopResult = pDevice->pContext->callbacks.onDeviceDataLoop(pDevice);")
 teder_ma_replace(teder_ma_header
 	"            ma_device_audio_thread__default_read_write(pDevice);"
 	"            pDevice->dataLoopResult = ma_device_audio_thread__default_read_write(pDevice);")
+teder_ma_replace(teder_ma_header
+	"        if (stopResult == MA_SUCCESS) {\n            ma_device__on_notification_stopped(pDevice);\n        }"
+	"        pDevice->stopCallbackResult = stopResult;\n        if (stopResult == MA_SUCCESS) {\n            ma_device__on_notification_stopped(pDevice);\n        }")
 teder_ma_replace(teder_ma_header
 	"        if (resultPA < 0) {\n            break;\n        }\n    }\n\n    /* NOTE: Don't stop the device here. It'll be done at a higher level. */"
 	"        if (resultPA < 0) {\n            return MA_ERROR;\n        }\n    }\n\n    /* NOTE: Don't stop the device here. It'll be done at a higher level. */")

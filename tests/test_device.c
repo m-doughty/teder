@@ -44,6 +44,7 @@ typedef struct {
 	bool sync, block_write;
 	ma_result wake_result; /* a blocked write's result when stop wakes it */
 	atomic_uint writes, fail_write, hold_stop, woken;
+	atomic_uint fail_native_stop, stop_calls;
 	th_gate stopping;
 } fixture;
 
@@ -184,13 +185,15 @@ static ma_result sync_wakeup(ma_device *d)
 }
 
 /* Runs on miniaudio's worker after its data loop, before the stopped notification and
- * the stopped state. A held stop parks the worker exactly there. */
+ * the stopped state. A held stop parks the worker exactly there. A failing native stop
+ * returns an error as WASAPI's IAudioClient_Stop or PulseAudio's cork does. */
 static ma_result sync_stop(ma_device *d)
 {
 	fixture *f = d->pContext->pUserData;
 	if (atomic_exchange(&f->hold_stop, 0))
 		th_gate_hit(&f->stopping);
-	return MA_SUCCESS;
+	atomic_fetch_add(&f->stop_calls, 1);
+	return atomic_load(&f->fail_native_stop) ? MA_ERROR : MA_SUCCESS;
 }
 
 static ma_result context_init(const ma_backend *backends,
@@ -837,6 +840,54 @@ START_TEST(ordinary_sync_stop)
 }
 END_TEST
 
+/* The same ordinary stops, but the backend's native stop then fails, as WASAPI's
+ * IAudioClient_Stop or PulseAudio's cork does once the device is gone. The woken write
+ * still ends the data loop normally, and miniaudio's synchronous stop returns success
+ * whatever its worker's stop callback returned. Stop must report the loss, keep the
+ * report readable, and refuse to restart. */
+START_TEST(sync_stop_failure)
+{
+	for (unsigned alsa = 0; alsa < 2; alsa++) {
+		fixture f = {.sync = true,
+		             .block_write = true,
+		             .wake_result = alsa ? MA_DEVICE_NOT_STARTED : MA_SUCCESS};
+		init(&f, false);
+		atomic_init(&f.writes, 0);
+		atomic_init(&f.fail_write, 0);
+		atomic_init(&f.hold_stop, 0);
+		atomic_init(&f.woken, 0);
+		atomic_init(&f.fail_native_stop, 0);
+		atomic_init(&f.stop_calls, 0);
+		OK(open_device(&f, (teder_blob){0}, 0));
+		OK(td_device_configure(f.device, (td_audio_config){1, 1, 1, 0}));
+		unsigned before = atomic_load(&f.writes);
+		OK(td_device_start(f.device));
+		while (atomic_load(&f.writes) == before)
+			pause_for_device(); /* the worker now waits in its write */
+		atomic_store(&f.fail_native_stop, 1);
+
+		teder_code code = td_device_stop(f.device);
+		ck_assert_msg(code == TEDER_DEVICE_LOST && td_device_lost(f.device) &&
+		                  !td_device_running(f.device) && atomic_load(&f.stop_calls) == 1 &&
+		                  f.released == 1,
+		              "%s stop returned %d after a failed native stop: lost %d, running %d, "
+		              "stop callbacks %u, released %u",
+		              alsa ? "ALSA-like" : "WASAPI-like",
+		              code,
+		              td_device_lost(f.device),
+		              td_device_running(f.device),
+		              atomic_load(&f.stop_calls),
+		              f.released);
+		td_device_report report;
+		OK(td_device_get_report(f.device, &report));
+		ck_assert(report.generation == 1 && report.error == TEDER_OK);
+		ck_assert(td_device_stop(f.device) == TEDER_BAD_STATE &&
+		          td_device_start(f.device) == TEDER_BAD_STATE);
+		uninit(&f);
+	}
+}
+END_TEST
+
 START_TEST(unwind)
 {
 	fixture f = {.reject = true};
@@ -1027,6 +1078,8 @@ int main(int argc, char **argv)
 		test = loss_sync_unraced;
 	else if (!strcmp(argv[1], "sync-stop"))
 		test = ordinary_sync_stop;
+	else if (!strcmp(argv[1], "sync-stop-failure"))
+		test = sync_stop_failure;
 	else
 		return 2;
 	Suite *suite = suite_create("device");

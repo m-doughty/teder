@@ -4,13 +4,18 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Check's own failure line has the same form, so a run that unwound through Check could
+ * pass for one reported here. Only this path prints the marker line after it, and the
+ * failed-check control requires it. */
+#define TH_FAILED_CHECK_MARKER "teder test harness: failed check reported without unwinding"
+
 static _Noreturn void
 report_failure(const char *file, int line, const char *expr, const char *message)
 {
 	const char *test = tcase_name();
 	fflush(stdout);
 	fprintf(stderr,
-	        "%s:%d:F:%s: %s%s%s\n",
+	        "%s:%d:F:%s: %s%s%s\n" TH_FAILED_CHECK_MARKER "\n",
 	        file,
 	        line,
 	        test ? test : "(no test)",

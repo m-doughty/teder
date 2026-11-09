@@ -40,7 +40,10 @@ ORIGIN_FILES = {
     "README.md": b"stand-in\n",
 }
 LIBRARY = "lib/libnotcurses-core.so"
+ALIAS = "lib/libnotcurses-core.so.3"
 HEADER = "include/notcurses/notcurses.h"
+DOCUMENT = "share/doc/notcurses/README.md"
+PARTIAL = "lib/partial-install.o"
 
 
 def load_ci():
@@ -67,10 +70,18 @@ def flip_byte(path, offset=0):
 class FakeCMake:
     """Records CMake commands. Installing writes a library made from the configured source's
     src/lib/notcurses.c, so a modified tree would yield a different library, plus its headers
-    and a document."""
+    and a document.
+
+    Optionally the install names the library through a versioned file and a link to it, as
+    real installations do (alias); installs the documents through a link to a directory,
+    absolute or relative to the link's directory (linked_documents); or stops part way, as an
+    interrupted build would, after writing one file (interrupt)."""
 
     def __init__(self):
         self.configured = {}
+        self.alias = False
+        self.linked_documents = None
+        self.interrupt = False
 
     def __call__(self, command):
         if command[1] == "--fresh":
@@ -81,10 +92,27 @@ class FakeCMake:
         elif command[1] == "--install":
             source, prefix = self.configured[command[2]]
             prefix = Path(prefix)
-            for directory in ("lib", "include/notcurses", "share/doc/notcurses"):
+            for directory in ("lib", "include/notcurses", "share/doc"):
                 (prefix / directory).mkdir(parents=True, exist_ok=True)
-            (prefix / LIBRARY).write_bytes(b"\x7fELF stand-in built from: " +
-                                           (source / "src" / "lib" / "notcurses.c").read_bytes())
+            if self.interrupt:
+                (prefix / PARTIAL).write_bytes(b"partial")
+                raise SystemExit("cmake --install was interrupted")
+            documents = prefix / "share/doc/notcurses"
+            if self.linked_documents:
+                (documents.parent / self.linked_documents).mkdir(parents=True, exist_ok=True)
+                if not documents.is_symlink():
+                    documents.symlink_to(self.linked_documents, target_is_directory=True)
+            else:
+                documents.mkdir(exist_ok=True)
+            library = b"\x7fELF stand-in built from: " + (source / "src" / "lib" /
+                                                          "notcurses.c").read_bytes()
+            if self.alias:
+                (prefix / ALIAS).write_bytes(library)
+                if (prefix / LIBRARY).exists() or (prefix / LIBRARY).is_symlink():
+                    (prefix / LIBRARY).unlink()
+                (prefix / LIBRARY).symlink_to(Path(ALIAS).name)
+            else:
+                (prefix / LIBRARY).write_bytes(library)
             shutil.copyfile(source / HEADER, prefix / HEADER)
             shutil.copyfile(source / "README.md", prefix / "share/doc/notcurses/README.md")
 
@@ -163,11 +191,12 @@ class SourceTreeTest(CiTestCase):
     """A reused source tree must hold the pinned commit unmodified, and is never cleaned."""
 
     def built_then_modified(self, change):
-        """Build from a clean tree, apply change to the reused tree, and force a rebuild."""
+        """Build from a clean tree, apply change to the reused tree, and remove the
+        installation to force a rebuild."""
         paths = self.paths()
         self.build(paths)
         change(paths["notcurses_source"])
-        (paths["notcurses_install"] / "ci-stamp.json").unlink()
+        shutil.rmtree(paths["notcurses_install"])
         return paths
 
     def assert_refused(self, paths, *names):
@@ -358,6 +387,344 @@ class InstallDigestTest(CiTestCase):
         paths = self.restored(
             lambda install: (install / "ci-stamp.json").write_bytes(b"{not json"))
         self.assert_rebuilt(paths)
+
+    def rebuilt_without_stale_file(self, miss):
+        """Leave a file no current install writes, apply miss to the stamp, and rebuild. The
+        install must go into an emptied prefix, so neither it nor the new stamp keeps the file."""
+        stale = "include/notcurses/obsolete.h"
+
+        def change(install):
+            (install / stale).write_bytes(b"stale")
+            miss(install)
+
+        paths = self.restored(change)
+        self.assert_rebuilt(paths)
+        self.assertEqual(sorted(self.stamp(paths)["files"]), [HEADER, LIBRARY, DOCUMENT])
+        self.assertFalse((paths["notcurses_install"] / stale).exists())
+
+    def test_stamp_for_another_configuration_rebuilds_into_an_empty_prefix(self):
+        self.rebuilt_without_stale_file(lambda install: self.rewrite_stamp(
+            install, lambda stamp: stamp.update(flags="-O3")))
+
+    def test_stamp_without_digests_rebuilds_into_an_empty_prefix(self):
+        self.rebuilt_without_stale_file(lambda install: self.rewrite_stamp(
+            install, lambda stamp: stamp.pop("files")))
+
+    def test_unreadable_stamp_rebuilds_into_an_empty_prefix(self):
+        self.rebuilt_without_stale_file(
+            lambda install: (install / "ci-stamp.json").write_bytes(b"{not json"))
+
+    def test_empty_prefix_is_installed(self):
+        paths = self.paths()
+        paths["notcurses_install"].mkdir(parents=True)
+        self.build(paths)
+        self.assertEqual(sorted(self.stamp(paths)["files"]), [HEADER, LIBRARY, DOCUMENT])
+
+    def test_prefix_without_a_stamp_is_refused_untouched(self):
+        """ci.py empties only a prefix it made, which holds its stamp."""
+        paths = self.restored(lambda install: (install / "ci-stamp.json").unlink())
+        install = paths["notcurses_install"]
+        before = sorted(path.relative_to(install) for path in install.rglob("*"))
+        message = self.refused(paths)
+        self.assertIn(str(install), message)
+        self.assertIn("ci-stamp.json", message)
+        self.assertEqual(self.ran("cmake"), [])
+        self.assertEqual(sorted(path.relative_to(install) for path in install.rglob("*")), before)
+
+    def test_prefix_holding_only_a_directory_link_is_refused(self):
+        """A link in place before the first install would carry the library outside the
+        prefix, where the stamp's digests never reach."""
+        paths = self.paths()
+        install = paths["notcurses_install"]
+        install.mkdir(parents=True)
+        external = self.root / "external-lib"
+        external.mkdir()
+        (external / "keep").write_bytes(b"keep")
+        (install / "lib").symlink_to(external, target_is_directory=True)
+        message = self.refused(paths)
+        self.assertIn(str(install), message)
+        self.assertEqual(self.ran("cmake"), [])
+        self.assertTrue((install / "lib").is_symlink())
+        self.assertEqual([path.name for path in external.iterdir()], ["keep"])
+
+    def test_emptying_removes_links_without_following_them(self):
+        external = self.root / "external-documents"
+        external.mkdir()
+        (external / "keep").write_bytes(b"keep")
+
+        def change(install):
+            (install / "share/extra").symlink_to(external, target_is_directory=True)
+            self.rewrite_stamp(install, lambda stamp: stamp.update(flags="-O3"))
+
+        paths = self.restored(change)
+        self.assert_rebuilt(paths)
+        self.assertFalse(os.path.lexists(paths["notcurses_install"] / "share/extra"))
+        self.assertEqual([path.name for path in external.iterdir()], ["keep"])
+
+    def test_interrupted_install_is_emptied_and_rebuilt(self):
+        """The stamp, without digests, marks the prefix as ci.py's before the install starts,
+        so an install that stops part way is emptied and rebuilt on the next run."""
+        paths = self.paths()
+        install = paths["notcurses_install"]
+        self.cmake.interrupt = True
+        with self.assertRaises(SystemExit):
+            self.build(paths)
+        self.assertTrue((install / PARTIAL).is_file())
+        self.assertNotIn("files", self.stamp(paths))
+        self.cmake.interrupt = False
+        self.build(paths)
+        self.assertEqual(sorted(self.stamp(paths)["files"]), [HEADER, LIBRARY, DOCUMENT])
+        self.assertFalse((install / PARTIAL).exists())
+
+    def linked_prefix(self, change):
+        """A prefix that is a link to a stamped installation elsewhere, after change."""
+        elsewhere = self.paths("elsewhere")
+        self.build(elsewhere)
+        change(elsewhere["notcurses_install"])
+        paths = self.paths()
+        paths["notcurses_install"].parent.mkdir(parents=True)
+        paths["notcurses_install"].symlink_to(elsewhere["notcurses_install"],
+                                              target_is_directory=True)
+        return paths, elsewhere["notcurses_install"]
+
+    def assert_linked_prefix_refused(self, paths, target):
+        before = {path.relative_to(target): path.read_bytes() for path in target.rglob("*")
+                  if path.is_file()}
+        message = self.refused(paths)
+        self.assertIn(str(paths["notcurses_install"]), message)
+        self.assertIn("link", message)
+        self.assertEqual(self.ran("cmake"), [])
+        after = {path.relative_to(target): path.read_bytes() for path in target.rglob("*")
+                 if path.is_file()}
+        self.assertEqual(after, before)
+
+    def test_linked_prefix_with_a_matching_stamp_is_refused(self):
+        self.assert_linked_prefix_refused(*self.linked_prefix(lambda install: None))
+
+    def test_linked_prefix_with_another_configuration_is_refused(self):
+        self.assert_linked_prefix_refused(*self.linked_prefix(lambda install: self.rewrite_stamp(
+            install, lambda stamp: stamp.update(flags="-O3"))))
+
+    def test_library_link_is_recorded_and_reused(self):
+        """Installations name the library through a link to its versioned file beside it. The
+        link records its target, the file is hashed under its own path, and a restored
+        installation with them is reused."""
+        self.cmake.alias = True
+        paths = self.restored()
+        files = self.stamp(paths)["files"]
+        self.assertEqual(files[LIBRARY], "link:" + Path(ALIAS).name)
+        self.assertEqual(files[ALIAS], "sha256:" + hashlib.sha256(
+            (paths["notcurses_install"] / ALIAS).read_bytes()).hexdigest())
+        output = self.build(paths)
+        self.assertIn("already installed", output)
+        self.assertEqual(self.commands, [])
+
+    def stamped_with_link(self, name, link, target):
+        """A built and stamped installation with a link at link to target, replacing any file
+        there, and the stamp rewritten to record the link's target as ci.py records links."""
+        paths = self.paths(name)
+        self.build(paths)
+        path = paths["notcurses_install"] / link
+        if path.exists() or path.is_symlink():
+            path.unlink()
+        path.symlink_to(target)
+        self.rewrite_stamp(paths["notcurses_install"],
+                           lambda stamp: stamp["files"].update({link: "link:" + str(target)}))
+        return paths
+
+    def assert_link_refused(self, paths, link):
+        message = self.refused(paths)
+        self.assertIn(str(paths["notcurses_install"] / link), message)
+        self.assertIn("outside", message)
+        self.assertEqual(self.commands, [])
+        self.assertTrue((paths["notcurses_install"] / link).is_symlink())
+
+    def external_library(self):
+        external = self.root / "external-lib" / Path(LIBRARY).name
+        external.parent.mkdir()
+        external.write_bytes(b"\x7fELF stand-in outside the prefix")
+        return external
+
+    def test_absolute_link_leaving_the_prefix_is_refused(self):
+        """A recorded link's text matches whatever its target outside the prefix holds."""
+        external = self.external_library()
+        paths = self.stamped_with_link("build-root", LIBRARY, external)
+        self.assert_link_refused(paths, LIBRARY)
+        self.assertEqual(external.read_bytes(), b"\x7fELF stand-in outside the prefix")
+
+    def test_relative_link_climbing_out_of_the_prefix_is_refused(self):
+        external = self.external_library()
+        install = self.paths()["notcurses_install"]
+        target = os.path.relpath(external, (install / LIBRARY).parent)
+        self.assertTrue(target.startswith(".." + os.sep))
+        paths = self.stamped_with_link("build-root", LIBRARY, target)
+        self.assert_link_refused(paths, LIBRARY)
+        self.assertEqual(external.read_bytes(), b"\x7fELF stand-in outside the prefix")
+
+    def test_dangling_link_leaving_the_prefix_is_refused(self):
+        paths = self.stamped_with_link("build-root", "lib/libnotcurses-extra.so",
+                                       "../../libnotcurses-extra.so")
+        self.assert_link_refused(paths, "lib/libnotcurses-extra.so")
+
+    def test_windows_style_link_targets_are_refused(self):
+        """On Linux and macOS these name files inside the prefix, but Windows would read the
+        backslashes as separators climbing out, and the drive as another root."""
+        targets = {"backslashes": "..\\..\\..\\..\\..\\external-lib\\libnotcurses-core.so",
+                   "drive": "C:/external-lib/libnotcurses-core.so"}
+        for name, target in targets.items():
+            with self.subTest(name):
+                paths = self.stamped_with_link(name, "lib/libnotcurses-extra.so", target)
+                self.assert_link_refused(paths, "lib/libnotcurses-extra.so")
+
+    def test_links_resolving_inside_the_prefix_are_recorded_and_reused(self):
+        """A link that climbs with ".." but stays inside, and a dangling link inside."""
+        links = {"climbing": ("include/notcurses/library", "../../lib/libnotcurses-core.so"),
+                 "dangling": ("lib/libnotcurses-old.so", "libnotcurses-gone.so")}
+        for name, (link, target) in links.items():
+            with self.subTest(name):
+                paths = self.stamped_with_link(name, link, target)
+                self.assertEqual(self.stamp(paths)["files"][link], "link:" + target)
+                output = self.build(paths)
+                self.assertIn("already installed", output)
+                self.assertEqual(self.commands, [])
+
+    def test_directory_link_leaving_a_stamped_installation_is_refused(self):
+        """A stamp that recorded only a directory link's target covered none of the files
+        behind it, so a changed library there would be accepted."""
+        external = self.root / "external-lib"
+
+        def link_library_directory(install):
+            shutil.move(install / "lib", external)
+            (install / "lib").symlink_to(external, target_is_directory=True)
+            flip_byte(external / Path(LIBRARY).name, 7)
+            self.rewrite_stamp(install, lambda stamp: stamp.update(files={
+                HEADER: stamp["files"][HEADER], DOCUMENT: stamp["files"][DOCUMENT],
+                "lib": "link:" + str(external)}))
+
+        paths = self.restored(link_library_directory)
+        library = (external / Path(LIBRARY).name).read_bytes()
+        message = self.refused(paths)
+        self.assertIn(str(paths["notcurses_install"] / "lib"), message)
+        self.assertIn("outside", message)
+        self.assertEqual(self.commands, [])
+        self.assertTrue((paths["notcurses_install"] / "lib").is_symlink())
+        self.assertEqual((external / Path(LIBRARY).name).read_bytes(), library)
+
+    def test_directory_link_inside_a_stamped_installation_is_refused(self):
+        """Links to directories are refused even inside the prefix: ci.py never follows one."""
+        def link_library_directory(install):
+            (install / "lib").rename(install / "lib-files")
+            (install / "lib").symlink_to("lib-files", target_is_directory=True)
+            self.rewrite_stamp(install, lambda stamp: stamp.update(files={
+                HEADER: stamp["files"][HEADER], DOCUMENT: stamp["files"][DOCUMENT],
+                "lib": "link:lib-files", "lib-files/libnotcurses-core.so": stamp["files"][LIBRARY]}))
+
+        paths = self.restored(link_library_directory)
+        message = self.refused(paths)
+        self.assertIn(str(paths["notcurses_install"] / "lib"), message)
+        self.assertIn("link to a directory", message)
+        self.assertEqual(self.commands, [])
+
+    def test_install_with_a_directory_link_is_refused(self):
+        """An install that writes through a link to a directory, here one inside the prefix,
+        is never stamped with digests, and is refused again after its prefix is emptied."""
+        self.cmake.linked_documents = Path("../../notcurses-documents")
+        paths = self.paths()
+        link = paths["notcurses_install"] / "share/doc/notcurses"
+        for attempt in range(2):
+            message = self.refused(paths)
+            self.assertIn(str(link), message)
+            self.assertIn("link to a directory", message)
+            self.assertNotIn("files", self.stamp(paths))
+        self.assertTrue((paths["notcurses_install"] / "notcurses-documents/README.md").is_file())
+
+    def test_install_with_a_link_leaving_the_prefix_is_refused(self):
+        """An install that writes through a link out of the prefix is never stamped with
+        digests, and emptying its prefix afterwards removes the link but not what it points
+        to."""
+        documents = self.root / "external-documents"
+        documents.mkdir()
+        (documents / "keep").write_bytes(b"keep")
+        self.cmake.linked_documents = documents
+        paths = self.paths()
+        link = paths["notcurses_install"] / "share/doc/notcurses"
+        for attempt in range(2):
+            message = self.refused(paths)
+            self.assertIn(str(link), message)
+            self.assertIn("outside", message)
+            self.assertNotIn("files", self.stamp(paths))
+        self.assertTrue((documents / "keep").is_file())
+
+
+class CacheKeyTest(CiTestCase):
+    """CI keys its cached notcurses installation by a digest of the stamp a build writes,
+    compiler identity included, so a key hit never restores an installation whose stamp
+    then misses."""
+
+    def config(self):
+        return dict(self.ci.CONFIGURATIONS["linux-shared"], cc=sys.executable)
+
+    def test_key_is_the_digest_of_the_stamp_a_build_writes(self):
+        paths = self.paths()
+        self.build(paths)
+        stamp = self.stamp(paths)
+        stamp.pop("files")
+        self.assertEqual(stamp, self.ci.notcurses_stamp(self.config()))
+        digest = hashlib.sha256(json.dumps(stamp, sort_keys=True).encode("utf-8")).hexdigest()
+        self.assertEqual(self.ci.notcurses_cache_key(self.config()), digest)
+
+    def test_new_compiler_changes_the_key_and_the_stamp(self):
+        paths = self.paths()
+        self.build(paths)
+        key = self.ci.notcurses_cache_key(self.config())
+        real_capture = self.ci.capture
+
+        def capture(*args):
+            output = real_capture(*args)
+            if args[1:] == ("--version",):
+                return "Compiler 99.0 from a new runner image\n" + output
+            return output
+
+        self.ci.capture = capture
+        self.assertNotEqual(self.ci.notcurses_cache_key(self.config()), key)
+        self.build(paths)
+        self.assertEqual(len(self.ran("cmake", "--install")), 1)
+        self.assertEqual(self.stamp(paths)["compiler"], "Compiler 99.0 from a new runner image")
+
+    def main(self, *arguments, platform="linux"):
+        """Run ci.py's command line; returns its exit status, output and error output."""
+        output, errors = io.StringIO(), io.StringIO()
+        with mock.patch.object(sys, "argv", ["ci.py", *arguments]), \
+                mock.patch.object(sys, "platform", platform), \
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            try:
+                status = self.ci.main()
+            except SystemExit as stopped:
+                status = stopped.code
+        return status, output.getvalue(), errors.getvalue()
+
+    def test_command_line_prints_only_the_key(self):
+        self.ci.CONFIGURATIONS["linux-shared"]["cc"] = sys.executable
+        status, output, _ = self.main("linux-shared", "--cache-key")
+        self.assertEqual(status, 0)
+        self.assertEqual(output, self.ci.notcurses_cache_key(self.config()) + "\n")
+        self.assertEqual(self.commands, [])
+
+    def test_configuration_without_notcurses_has_no_key(self):
+        status, output, errors = self.main("macos-asan", "--cache-key", platform="darwin")
+        self.assertEqual(status, 2)
+        self.assertEqual(output, "")
+        self.assertIn("builds no notcurses", errors)
+
+    def test_workflow_keys_the_cache_by_the_printed_digest(self):
+        workflow = (TOOLS.parent / ".github" / "workflows" / "build.yml").read_text(
+            encoding="utf-8")
+        self.assertIn("python3 tools/ci.py linux-${{ matrix.configuration }} --cache-key",
+                      workflow)
+        keys = [line.strip() for line in workflow.splitlines()
+                if line.strip().startswith("key: notcurses-")]
+        self.assertEqual(len(keys), 1)
+        self.assertTrue(keys[0].endswith("-${{ steps.notcurses.outputs.key }}"), keys[0])
 
 
 class DoctestReportTest(unittest.TestCase):

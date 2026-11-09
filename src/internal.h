@@ -47,6 +47,7 @@ typedef struct {
 	uint64_t frame, track, next;
 	uint32_t flags;
 	float gain;
+	bool output_ready; /* a reopen of the retained source began with output READY */
 } td_media_input;
 
 typedef struct {

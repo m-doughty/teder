@@ -133,13 +133,31 @@ flags, so one sanitizer runtime serves the whole process. For `linux-fuzz` it al
 gets libFuzzer feedback and source coverage instrumentation. A stamp in its install
 prefix records the revision, compiler, flags and options, and the SHA-256 digest of
 every other file under the prefix: the library and its versioned names, headers,
-pkg-config and CMake package files, and documents. A symbolic link records its
-target. CI caches that prefix. A stamp for another revision or configuration, or
-one without digests, rebuilds it. When the stamp matches, every file must match
-its digest, with none missing or added. Otherwise the run stops, naming the prefix
-and each differing file, and neither reuses nor repairs the installation; remove
-the prefix to rebuild it. The installed consumers compile against the same
-notcurses and check a real plane through the installed renderer.
+pkg-config and CMake package files, and documents. A symbolic link whose target
+stays inside the prefix, such as `libnotcurses-core.so -> libnotcurses-core.so.3`,
+records that target, which is digested under its own path; a dangling link inside
+records it too. `tools/ci.py` never follows links: it resolves a target by its text
+alone, against the link's directory. So the run stops at a link whose target leaves
+the prefix (an absolute path, a relative one that climbs out with `..`, or one with
+a backslash or drive, which Windows would read differently), at a link to a
+directory anywhere under the prefix, and at a prefix that is itself a link: the
+digests could not cover what lies behind them. CI caches that prefix. Its cache key includes
+the SHA-256 digest of the stamp's build record, compiler identity included, which
+`tools/ci.py <configuration> --cache-key` prints; a new compiler on the runner image
+therefore misses the cache as it misses the stamp.
+
+A stamp for another revision or configuration, one without digests, or an
+unreadable one, rebuilds notcurses into an emptied prefix, so the new stamp covers
+only what that install wrote. `tools/ci.py` empties only a prefix that holds its
+stamp, whatever the stamp says, and removes links there without following them.
+A prefix holding files but no stamp stops the run untouched; remove it to rebuild.
+A stamp without digests marks the prefix from before the install starts, so an
+interrupted install is emptied and rebuilt by the next run. When the stamp
+matches, every file must match its digest, with none missing or added. Otherwise
+the run stops, naming the prefix and each differing file, and neither reuses nor
+repairs the installation; remove the prefix to rebuild it. The installed consumers
+compile against the same notcurses and check a real plane through the installed
+renderer.
 
 `linux-shared` also runs the fork's own doctest cases in `src/tests/resize.cpp`
 and `src/tests/autogrow.cpp`, so they run on x86_64 and aarch64 in hosted CI and

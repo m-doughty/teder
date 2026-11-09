@@ -246,10 +246,16 @@ teder_code td_device_stop(td_device *d)
 		return failed(d, code);
 	/* A synchronous worker can leave its data loop on a native failure just before
 	 * this stop; its stopped notification is then ignored. Native stop returns only
-	 * after that worker recorded why its loop ended. A write woken by this stop ends
-	 * it with success (WASAPI) or MA_DEVICE_NOT_STARTED (ALSA); anything else failed. */
+	 * after that worker recorded why its loop ended and what its backend's stop
+	 * callback returned. This stop ends the loop with success (WASAPI, and ALSA when
+	 * the stop lands outside its poll) or MA_DEVICE_NOT_STARTED (ALSA woken in its
+	 * poll); anything else failed. Native stop succeeds even when the stop callback
+	 * failed, as WASAPI's and PulseAudio's do for a vanished device, so that is loss
+	 * too. Asynchronous backends have no worker, leave both fields MA_SUCCESS and
+	 * return a failed stop callback from native stop. */
 	ma_result loop = d->native.dataLoopResult;
-	if (loop != MA_SUCCESS && loop != MA_DEVICE_NOT_STARTED)
+	if ((loop != MA_SUCCESS && loop != MA_DEVICE_NOT_STARTED) ||
+	    d->native.stopCallbackResult != MA_SUCCESS)
 		atomic_store(&d->feed.lost, 1);
 	if (td_device_lost(d))
 		return failed(d, TEDER_DEVICE_LOST);

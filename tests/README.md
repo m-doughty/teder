@@ -12,8 +12,9 @@ Logs are `build/tests/control-*.log`. A crash or unrelated error cannot satisfy
 a control. Timeout kills the child process; test code never frees storage while
 a stranded worker may still use it.
 
-A failed check prints `file:line:F:test: message` to stderr and exits with status 1
-from the failing frame. `support/harness.h` replaces Check's `ck_assert`,
+A failed check prints `file:line:F:test: message` to stderr, then the line
+`teder test harness: failed check reported without unwinding`, and exits with
+status 1 from the failing frame. `support/harness.h` replaces Check's `ck_assert`,
 `ck_assert_msg`, `ck_abort` and `ck_abort_msg`, which every comparison macro uses,
 and removes the deprecated `fail` macros. Check's own failure path longjmps out of
 the test, then collects the result on that same stack. Engine, device and helper
@@ -23,7 +24,9 @@ frame keeps every borrowed frame live, so a test need not close its engine befor
 checking. Every Check test includes `support/harness.h`, except `test_build.c`,
 which starts no threads. `output.failed-check-control` fails a check while an
 engine plays and a helper rewrites the failing frame; each of its ten runs must
-exit 1 with that message and no sanitizer report.
+exit 1 with that message, the harness's marker line and no sanitizer report.
+Check's own report has the same first line, and a run that unwound through Check
+can occasionally survive under load, so only the marker shows the harness ended it.
 
 `support/harness.h` is private test infrastructure. Link `teder_test_support`
 only into tests; it is neither installed nor linked into the public library.

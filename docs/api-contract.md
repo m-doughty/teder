@@ -371,7 +371,8 @@ from the saved frame with a zero clock, instead of starting output without a
 source. Loss observation and close remain available meanwhile. Loss makes the
 pending reopen finish STALE, and queued requests built from the old target then
 fail STALE. Close returns CANCELLED for the selection and every request queued
-behind it.
+behind it. Close wins even when a loss or a failed preparation is seen in the same
+window. Close is not a reopen failure, so transport does not enter FAILED.
 
 Open with AUTOPLAY prefills the bounded PCM pool, then starts the selected output.
 PLAYING requires successful native startup; missing output returns BAD_STATE.
@@ -412,7 +413,9 @@ its reopen is pending makes the stop finish STALE and leaves the source PAUSED a
 frame zero, as after any loss. A pending selection reopen likewise finishes STALE
 and leaves the source PAUSED at its saved frame. Loss is not a reopen failure, so
 neither enters FAILED and `last_error` stays DEVICE_LOST. Epoch exhaustion closes
-the engine with LIMIT instead of wrapping.
+the engine with LIMIT instead of wrapping; `last_error` is then LIMIT. A pending
+selection ends CANCELLED, as close requires. A STOP whose rewind is committed still
+ends STALE.
 
 Recover by selecting a device explicitly, waiting for successful completion,
 reading the new target and submitting PLAY. Selection reopens the retained source

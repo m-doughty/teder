@@ -47,16 +47,24 @@ check the CoreAudio fixes without an audio device: they replace a real CoreAudio
 context's functions with fakes, then fail each allocation of device information
 and device initialization, each AudioUnit call that initialization checks, and
 the buffer-size reads. `cmake/MiniaudioDevice.cmake` also records why a
-synchronous worker's data loop ended. The pinned worker discards that result, and its stopped
-notification is the same after a requested stop as after a native write failure.
-Device stop reads the recorded result once native stop returns, so a stop that
-races such a failure reports DEVICE_LOST. A write woken by the stop itself is not
-a failure: WASAPI's returns success and ALSA's returns `MA_DEVICE_NOT_STARTED`.
+synchronous worker's data loop ended, and what its backend's stop callback
+returned. The pinned worker discards both results, and its stopped notification
+is the same after a requested stop as after a native write failure. A failed stop
+callback, such as WASAPI's `IAudioClient_Stop` or PulseAudio's cork on a vanished
+device, only suppresses that notification: the synchronous `ma_device_stop` still
+returns success. Device stop reads both recorded results once native stop returns,
+so a stop that races a write failure, or whose stop callback fails, reports
+DEVICE_LOST. The stop itself ends the data loop without failure: WASAPI's write
+returns success, and ALSA's returns `MA_DEVICE_NOT_STARTED` when the stop wakes its
+poll, or success when the stop lands outside it. ALSA's stop callback always
+succeeds; CoreAudio's runs on the caller and native stop returns its result.
 The PulseAudio data loop returns an error after a failed main-loop iteration,
 where it returned success. `device.loss-sync-stop` and
-`output.sync-stop-loss-raced` check the race with a synchronous test backend, and
-`device.sync-stop` checks that ordinary stops woken either way report no loss.
-The PulseAudio change is compiled on Linux but has no runtime test.
+`output.sync-stop-loss-raced` check the race with a synchronous test backend,
+`device.sync-stop` checks that ordinary stops woken either way report no loss,
+and `device.sync-stop-failure` and `output.sync-stop-failure` check a failed stop
+callback after either kind of woken write. The PulseAudio changes are compiled on
+Linux but have no runtime test.
 
 `cmake/CheckPack.cmake` fixes Check's message pack and unpack tables. The pinned
 source calls each typed function through a mismatched function-pointer type,

@@ -2,7 +2,9 @@
 # Never unwind/free memory concurrently with a stranded test worker.
 if(CASE STREQUAL "failed-check")
 	# A failed check while workers still write the test's frame must report and exit 1
-	# on every run. Unwinding that frame into Check's result collection crashes most runs.
+	# on every run. Unwinding that frame into Check's result collection crashes most runs,
+	# but not all: Check's own report has the same form. Only the harness's report adds
+	# the marker line, so every run must print it.
 	file(WRITE "${LOG}" "")
 	foreach(run RANGE 1 10)
 		execute_process(COMMAND "${PROGRAM}" "control-${CASE}" TIMEOUT 15
@@ -10,6 +12,7 @@ if(CASE STREQUAL "failed-check")
 		set(text "${output}${errors}")
 		file(APPEND "${LOG}" "run ${run}: result=${result}\n${text}")
 		if(NOT result STREQUAL "1" OR NOT text MATCHES "deliberate failure with a live engine"
+			OR NOT text MATCHES "teder test harness: failed check reported without unwinding"
 			OR text MATCHES "Sanitizer|runtime error")
 			message(FATAL_ERROR "A failed check with a live engine did not exit cleanly on run ${run}; see ${LOG}")
 		endif()

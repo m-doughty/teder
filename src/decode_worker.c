@@ -196,6 +196,36 @@ static bool retire(teder_engine *e, td_source_job *j)
 	return true;
 }
 
+/* How a selection's or stop's reopen of the retained source ends. */
+typedef enum { TD_REOPEN_OK, TD_REOPEN_CLOSED, TD_REOPEN_LOST, TD_REOPEN_FAILED } td_reopen;
+
+/* Gate held, after quiescence. Decides how a reopen of the retained source ends, in
+ * precedence order:
+ * - Close: a selection's reopen commits here, and the gate stays held until its source
+ *   is adopted. So close at any earlier point cancels the selection, whatever loss or
+ *   preparation did meanwhile, and is not a reopen failure. Stop committed its rewind
+ *   before reopening, so close leaves its outcome to the rules below.
+ * - Loss: invalidation already left the retained source PAUSED with output LOST, so
+ *   the reopen ends STALE, not as a failure.
+ * - Otherwise preparation's or quiescence's result: success adopts the source, and a
+ *   failure leaves it FAILED. */
+static td_reopen reopen_end(teder_engine *e, const td_request_slot *r, teder_code code)
+{
+	/* The same-value RMW orders this commitment against close, as td_commit_locked does. */
+	unsigned live = TEDER_LIVE;
+	if (r->info.operation == TEDER_OP_SELECT_DEVICE &&
+	    !atomic_compare_exchange_strong(&e->lifecycle, &live, TEDER_LIVE))
+		return TD_REOPEN_CLOSED;
+	/* Loss advances the epoch. At the last epoch it closes the engine and leaves the epoch
+	 * unchanged instead, so output turning LOST marks it too. Output cannot turn READY
+	 * again while the reopen is pending: only a selection does that, and no request runs
+	 * until a pending reopen ends. */
+	if (r->media.target.epoch != e->status.current.epoch ||
+	    (r->media.output_ready && e->status.output_state == TEDER_OUTPUT_LOST))
+		return TD_REOPEN_LOST;
+	return code == TEDER_OK ? TD_REOPEN_OK : TD_REOPEN_FAILED;
+}
+
 static void prepared(teder_engine *e, td_source_job *j)
 {
 	uint32_t slot = j->slot;
@@ -235,26 +265,19 @@ static void prepared(teder_engine *e, td_source_job *j)
 		code = TEDER_BAD_STATE;
 	bool play = !retarget && (autoplay || (seek && (e->status.transport == TEDER_PLAYING ||
 	                                                e->status.transport == TEDER_DRAINING)));
-	unsigned live = TEDER_LIVE;
 	if (code == TEDER_OK && !retarget)
 		code = td_commit_locked(e, slot);
-	/* A selection committed its device; its reopen commits here. Close before this
-	 * point cancels the selection, ordered against close like td_commit_locked. */
-	else if (code == TEDER_OK && selected &&
-	         !atomic_compare_exchange_strong(&e->lifecycle, &live, TEDER_LIVE))
-		code = TEDER_CANCELLED;
 	td_unlock(e);
 	if (code == TEDER_OK) {
 		td_media_checkpoint(e, j->request, TD_MEDIA_BEFORE_QUIESCE);
 		code = td_output_quiesce(e);
 	}
 	td_lock(e);
-	/* Quiescence can observe loss after the check above. A reopen it invalidates is
-	 * stale too: the retained source stays PAUSED, as invalidation left it. */
-	if (retarget && code != TEDER_OK && r->media.target.epoch != e->status.current.epoch) {
-		invalidated = true;
+	td_reopen reopen = retarget ? reopen_end(e, r, code) : TD_REOPEN_OK;
+	if (reopen == TD_REOPEN_CLOSED)
+		code = TEDER_CANCELLED;
+	else if (reopen == TD_REOPEN_LOST)
 		code = TEDER_STALE;
-	}
 	if (code == TEDER_OK) {
 		td_source_job *old = active(e);
 		if (old)
@@ -321,9 +344,7 @@ static void prepared(teder_engine *e, td_source_job *j)
 	} else if (!retire(e, j))
 		abort(); /* uncommitted source has no PCM references */
 	td_lock(e);
-	/* A reopen made stale by device loss is not a reopen failure. Invalidation already
-	 * left the retained source PAUSED with DEVICE_LOST at its committed position. */
-	if (retarget && code != TEDER_OK && !invalidated) {
+	if (reopen == TD_REOPEN_FAILED) {
 		e->status.transport =
 		    stopped || e->status.output_state == TEDER_OUTPUT_READY ? TEDER_FAILED : TEDER_PAUSED;
 		e->status.last_error = code;
@@ -440,6 +461,7 @@ void td_media_retarget(teder_engine *e, uint32_t slot)
 	r->input_bytes = old->path_bytes;
 	r->media.target = e->status.current;
 	r->media.frame = e->status.source_frame;
+	r->media.output_ready = e->status.output_state == TEDER_OUTPUT_READY;
 	bool dispatched = td_media_dispatch(e, slot);
 	if (!dispatched) {
 		e->status.transport = TEDER_FAILED;
